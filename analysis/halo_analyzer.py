@@ -202,11 +202,16 @@ class HaloAnalyzer:
 
     def _plot_profile(self, r: np.ndarray, I_norm: np.ndarray,
                        fit: dict, label: str) -> plt.Figure:
-        fig, ax = plt.subplots(figsize=(6, 4))
+        halo_r = fit["halo_radius_px"]
+        popt = fit["popt"]
+
+        # Extend x-axis to cover the fitted halo radius so R_halo is always visible
+        r_max_plot = max(r[-1], halo_r * 1.2)
+        r_fine = np.linspace(r[0], r_max_plot, 400)
+
+        fig, ax = plt.subplots(figsize=(7, 4))
         ax.semilogy(r, I_norm, "k.", markersize=3, label="Measured")
 
-        popt = fit["popt"]
-        r_fine = np.linspace(r[0], r[-1], 300)
         core = _moffat1d(r_fine, popt[0], popt[1], popt[2])
         halo = _moffat1d(r_fine, popt[3], popt[4], popt[5])
         total = core + halo
@@ -214,11 +219,20 @@ class HaloAnalyzer:
         ax.semilogy(r_fine, core, "g--", linewidth=1, label="Core")
         ax.semilogy(r_fine, halo, "r--", linewidth=1, label="Halo")
 
+        # Mark where measured data ends when the fit extends beyond it
+        if halo_r > r[-1] * 0.9:
+            ax.axvline(r[-1], color="gray", linestyle=":", linewidth=1.2,
+                       label=f"Data limit ({r[-1]:.0f} px)")
+
+        # Mark the fitted halo half-power radius
+        ax.axvline(halo_r, color="tomato", linestyle="--", linewidth=1.0,
+                   alpha=0.8, label=f"R_halo = {halo_r:.0f} px")
+
         ax.set_xlabel("Radius (pixels)")
         ax.set_ylabel("Normalised intensity")
         ax.set_title(f"Halo profile — {label}\n"
-                     f"Halo/core = {fit['halo_to_core_ratio']:.3f}, "
-                     f"R_halo = {fit['halo_radius_px']:.1f} px")
+                     f"Halo/core = {fit['halo_to_core_ratio']:.5f}, "
+                     f"R_halo = {halo_r:.1f} px")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()

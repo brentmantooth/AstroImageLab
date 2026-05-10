@@ -828,7 +828,10 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
                                       higher_is_better=False)
         prof_a = _img_tag((ha.get("figures") or {}).get("halo_profile"), f"Halo {ra.label}")
         prof_b = _img_tag((hb.get("figures") or {}).get("halo_profile"), f"Halo {rb.label}")
-        grid_tag = _img_tag(self._plot_halo_star_grid(ra, rb, img_a, img_b),
+        matched = self._match_halo_stars(ra, rb)
+        star_map_tag = _img_tag(self._plot_halo_star_map(matched, img_a),
+                                "Halo star field overview")
+        grid_tag = _img_tag(self._plot_halo_star_grid(matched, img_a, img_b),
                             "Halo star comparison grid")
 
         # Build dynamic optics note from FITS headers
@@ -878,7 +881,7 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Stars fitted</td><td>{_val(ha.get("n_stars_fitted"), "d")}</td><td>{_val(hb.get("n_stars_fitted"), "d")}</td></tr>
-  <tr><td>Halo / core ratio</td><td class="{ca}">{_val(ha.get("halo_to_core_ratio"))}</td><td class="{cb}">{_val(hb.get("halo_to_core_ratio"))}</td></tr>
+  <tr><td>Halo / core ratio</td><td class="{ca}">{_val(ha.get("halo_to_core_ratio"), ".5f")}</td><td class="{cb}">{_val(hb.get("halo_to_core_ratio"), ".5f")}</td></tr>
   <tr><td>Halo radius (px)</td><td>{_val(ha.get("halo_radius_px"))}</td><td>{_val(hb.get("halo_radius_px"))}</td></tr>
 </table>
 
@@ -889,8 +892,13 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
+{star_map_tag}
+<p class="caption">STF-stretched overview of {ra.label}. Red circles mark the top {len(matched)}
+brightest stars common to both images; the rank number matches the pair numbering in the
+cutout grid below.</p>
+
 {grid_tag}
-<p class="caption">Top 20 brightest stars common to both images, side-by-side
+<p class="caption">Top {len(matched)} brightest stars common to both images, side-by-side
 (Image A left, Image B right per pair). STF stretch applied per image to reveal
 faint halo structure. Stars ranked by peak brightness (brightest first).
 <em>Turbo</em> colormap: bright = high intensity.</p>
@@ -915,14 +923,13 @@ bright stars.</div>"""
         cut[y0_dst:y1_dst, x0_dst:x1_dst] = data[y0_src:y1_src, x0_src:x1_src]
         return cut
 
-    def _plot_halo_star_grid(self, ra: AnalysisResult, rb: AnalysisResult,
-                              img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+    @staticmethod
+    def _match_halo_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
+        """Return up to 20 (sa, sb) pairs ranked by image-A peak brightness."""
         stars_a = (ra.halo_metrics or {}).get("star_data", [])
         stars_b = (rb.halo_metrics or {}).get("star_data", [])
         if not stars_a:
-            return None
-
-        # Match all stars from A to B within 20 px, rank by brightness, take top 20
+            return []
         if stars_b:
             xs_b = np.array([s["xc"] for s in stars_b])
             ys_b = np.array([s["yc"] for s in stars_b])
@@ -933,11 +940,57 @@ bright stars.</div>"""
                 if dists[idx] <= 20.0:
                     all_matched.append((sa, stars_b[idx]))
             all_matched.sort(key=lambda pair: pair[0].get("peak", 0.0), reverse=True)
-            matched = all_matched[:20]
+            return all_matched[:20]
         else:
             sorted_a = sorted(stars_a, key=lambda s: s.get("peak", 0.0), reverse=True)
-            matched = [(sa, None) for sa in sorted_a[:20]]
+            return [(sa, None) for sa in sorted_a[:20]]
 
+    def _plot_halo_star_map(self, matched: list, img_a: AstroImage) -> plt.Figure | None:
+        """Full-field STF-stretched overview with top-N halo stars circled and ranked."""
+        if not matched:
+            return None
+
+        bgsub = img_a.background_subtracted() if img_a.background is not None else img_a.data
+        from core.stretch import stf_stretch
+        display = stf_stretch(bgsub).astype(np.float64)
+
+        h, w = display.shape
+        if max(h, w) > 1200:
+            zoom_f = 1200.0 / max(h, w)
+            display = _ndimage_zoom(display, zoom_f, order=1)
+            scale = zoom_f
+        else:
+            scale = 1.0
+        dh, dw = display.shape
+
+        fig_w = 10.0 * (dw / max(dh, dw))
+        fig_h = 10.0 * (dh / max(dh, dw))
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        ax.imshow(display, origin="lower", cmap="gray", aspect="equal",
+                  interpolation="nearest", vmin=0, vmax=1)
+
+        circle_r = max(dw, dh) * 0.012
+        font_size = max(6, int(circle_r * 0.6))
+
+        for rank, (sa, _sb) in enumerate(matched, start=1):
+            xd = sa["xc"] * scale
+            yd = sa["yc"] * scale
+            circ = plt.Circle((xd, yd), circle_r, color="red",
+                               fill=False, linewidth=1.2)
+            ax.add_patch(circ)
+            ax.text(xd + circle_r * 0.8, yd + circle_r * 0.8,
+                    str(rank), color="red", fontsize=font_size,
+                    fontweight="bold", ha="left", va="bottom",
+                    clip_on=True)
+
+        ax.set_title(f"{img_a.label} — top {len(matched)} brightest halo stars",
+                     fontsize=10)
+        ax.axis("off")
+        fig.tight_layout(pad=0.3)
+        return fig
+
+    def _plot_halo_star_grid(self, matched: list,
+                              img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
         if not matched:
             return None
 
@@ -974,7 +1027,9 @@ bright stars.</div>"""
 
             r_a = sa.get("halo_radius_px") or optics_half
             r_b = (sb.get("halo_radius_px") if sb else r_a) or optics_half
-            half = max(int(max(r_a, r_b) * 2.0), optics_half)
+            # 1.5× shows out to well past the halo half-power point; cap at 200 px
+            # to guard against unreliable extrapolated radii from sparse data
+            half = min(max(int(max(r_a, r_b) * 1.5), optics_half), 200)
 
             cut_a = self._extract_cutout(bgsub_a, sa["xc"], sa["yc"], half)
             cut_b = (self._extract_cutout(bgsub_b, sb["xc"], sb["yc"], half)
@@ -996,7 +1051,7 @@ bright stars.</div>"""
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             h2c_a = sa.get("halo_to_core_ratio")
             ax_a.set_title(f"#{idx+1} {ra.label}"
-                           + (f"\nh/c={h2c_a:.3f}" if h2c_a is not None else ""),
+                           + (f"\nh/c={h2c_a:.5f}" if h2c_a is not None else ""),
                            fontsize=7)
             ax_a.axis("off")
 
@@ -1005,7 +1060,7 @@ bright stars.</div>"""
             if sb is not None:
                 h2c_b = sb.get("halo_to_core_ratio")
                 ax_b.set_title(f"#{idx+1} {rb.label}"
-                               + (f"\nh/c={h2c_b:.3f}" if h2c_b is not None else ""),
+                               + (f"\nh/c={h2c_b:.5f}" if h2c_b is not None else ""),
                                fontsize=7)
             else:
                 ax_b.set_title(f"#{idx+1} {rb.label}\n(no match)", fontsize=7)
@@ -1483,7 +1538,7 @@ between the two filters.</p>
             row("MTF50 (cyc/px)", psf_a.get("mtf50_cycles_per_px"),
                 psf_b.get("mtf50_cycles_per_px"), fmt=".4f"),
             row("Halo/core ratio", halo_a.get("halo_to_core_ratio"),
-                halo_b.get("halo_to_core_ratio"), higher_is_better=False),
+                halo_b.get("halo_to_core_ratio"), fmt=".5f", higher_is_better=False),
             row("Edge width 10–90% (px)", edge_a.get("edge_width_10_90_px"),
                 edge_b.get("edge_width_10_90_px"), higher_is_better=False),
             row(f"Edge contrast ratio", edge_a.get("edge_contrast_ratio"),
