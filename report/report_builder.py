@@ -903,6 +903,28 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
   is a more filter-specific quality indicator than the raw halo size.
 </div>
 {optics_note}
+<div class="info-box">
+  <strong>How halo/core ratio and halo radius are computed.</strong>
+  For each bright unsaturated star, the background-subtracted radial intensity profile
+  (median-binned in 0.5&thinsp;px annuli out to {HALO_FIT_RADIUS_PX}&thinsp;px) is fitted
+  with a <em>two-component Moffat model</em>:<br>
+  <code>I(r) = A<sub>core</sub> &middot; Moffat(r; &gamma;<sub>core</sub>, &alpha;<sub>core</sub>)
+             + A<sub>halo</sub> &middot; Moffat(r; &gamma;<sub>halo</sub>, &alpha;<sub>halo</sub>)</code><br>
+  The fit is performed in log<sub>10</sub> space so the profile&rsquo;s wide dynamic range is
+  weighted uniformly rather than being dominated by the bright core.<br><br>
+  <strong>Halo / core ratio</strong> = A<sub>halo</sub> / A<sub>core</sub> &mdash; the
+  amplitude of the wide Moffat component relative to the core peak. A value of 0 means no
+  detectable halo; values above 0.15 indicate significant internal reflection. Because both
+  amplitudes are normalised to the same star, the ratio is independent of absolute brightness
+  and directly comparable between filters.<br><br>
+  <strong>Halo radius</strong> = HWHM of the halo Moffat component:
+  R&thinsp;=&thinsp;&gamma;<sub>halo</sub>&thinsp;&middot;&thinsp;&radic;(2<sup>1/&alpha;<sub>halo</sub></sup>&thinsp;&minus;&thinsp;1).
+  If this value exceeds the {HALO_FIT_RADIUS_PX}&thinsp;px fit window it is marked
+  <em>N/A</em> — the data do not yet show the halo half-power point, so the width cannot
+  be reliably measured. In that case the halo/core ratio is the more reliable indicator.
+  For strongly saturated stars the core is clipped and no Moffat fit is attempted; their
+  halo structure is visible in the cross-sections and RDF plots instead.
+</div>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -1143,6 +1165,8 @@ bright stars.</div>"""
                            + (f"\nh/c={h2c_a:.5f}" if h2c_a is not None else ""),
                            fontsize=9)
             ax_a.axis("off")
+            ax_a.plot(half, half, '+', color='magenta', markersize=12,
+                      markeredgewidth=1.5, zorder=5)
 
             ax_b.imshow(disp_b, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
@@ -1154,6 +1178,9 @@ bright stars.</div>"""
             else:
                 ax_b.set_title(f"#{idx+1} {img_b.label}\n(no match)", fontsize=9)
             ax_b.axis("off")
+            if sb is not None:
+                ax_b.plot(half, half, '+', color='magenta', markersize=12,
+                          markeredgewidth=1.5, zorder=5)
 
             # Horizontal cross-section through the star centre — log y-axis
             if cut_a.shape[0] > 0 and cut_a.shape[1] > 0:
@@ -1178,7 +1205,7 @@ bright stars.</div>"""
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
 
-            # Per-star RDF (mean ± std annular profile)
+            # Per-star RDF (log10-space stats, inverse-transformed for display)
             rdf_r_a = sa.get("rdf_radii")
             rdf_m_a = sa.get("rdf_mean")
             rdf_s_a = sa.get("rdf_std")
@@ -1186,18 +1213,18 @@ bright stars.</div>"""
             rdf_m_b = sb.get("rdf_mean")  if sb else None
             rdf_s_b = sb.get("rdf_std")   if sb else None
             if rdf_m_a is not None:
-                ax_rdf.semilogy(rdf_r_a, rdf_m_a, color="steelblue",
+                ax_rdf.semilogy(rdf_r_a, 10**rdf_m_a, color="steelblue",
                                 linewidth=1.0, label=img_a.label)
                 ax_rdf.fill_between(rdf_r_a,
-                                    np.maximum(rdf_m_a - rdf_s_a, 1e-6),
-                                    rdf_m_a + rdf_s_a,
+                                    10**(rdf_m_a - rdf_s_a),
+                                    10**(rdf_m_a + rdf_s_a),
                                     alpha=0.25, color="steelblue")
             if rdf_m_b is not None:
-                ax_rdf.semilogy(rdf_r_b, rdf_m_b, color="tomato",
+                ax_rdf.semilogy(rdf_r_b, 10**rdf_m_b, color="tomato",
                                 linewidth=1.0, label=img_b.label)
                 ax_rdf.fill_between(rdf_r_b,
-                                    np.maximum(rdf_m_b - rdf_s_b, 1e-6),
-                                    rdf_m_b + rdf_s_b,
+                                    10**(rdf_m_b - rdf_s_b),
+                                    10**(rdf_m_b + rdf_s_b),
                                     alpha=0.25, color="tomato")
             if rdf_m_a is not None or rdf_m_b is not None:
                 ax_rdf.set_title(f"#{idx+1} RDF", fontsize=8)
@@ -1207,11 +1234,6 @@ bright stars.</div>"""
                 ax_rdf.grid(True, alpha=0.25, which="both")
                 ax_rdf.axis("on")
 
-        fig.suptitle(
-            f"Top {n} brightest stars common to both images — {img_a.label} (left) vs {img_b.label} (right) "
-            f"per pair  |  STF stretch per image  |  turbo colormap",
-            fontsize=9,
-        )
         fig.tight_layout()
         return fig
 
@@ -1266,6 +1288,8 @@ bright stars.</div>"""
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             ax_a.set_title(f"S{idx+1} {img_a.label}\n⚠ saturated core", fontsize=9)
             ax_a.axis("off")
+            ax_a.plot(half, half, '+', color='magenta', markersize=12,
+                      markeredgewidth=1.5, zorder=5)
 
             ax_b.imshow(disp_b, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
@@ -1273,6 +1297,9 @@ bright stars.</div>"""
                        + ("⚠ saturated core" if sb is not None else "(no match)"))
             ax_b.set_title(title_b, fontsize=9)
             ax_b.axis("off")
+            if sb is not None:
+                ax_b.plot(half, half, '+', color='magenta', markersize=12,
+                          markeredgewidth=1.5, zorder=5)
 
             if cut_a.shape[0] > 0:
                 mid_row = cut_a.shape[0] // 2
@@ -1294,7 +1321,7 @@ bright stars.</div>"""
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
 
-            # Per-star RDF (mean ± std annular profile)
+            # Per-star RDF (log10-space stats, inverse-transformed for display)
             rdf_r_a = sa.get("rdf_radii")
             rdf_m_a = sa.get("rdf_mean")
             rdf_s_a = sa.get("rdf_std")
@@ -1302,18 +1329,18 @@ bright stars.</div>"""
             rdf_m_b = sb.get("rdf_mean")  if sb else None
             rdf_s_b = sb.get("rdf_std")   if sb else None
             if rdf_m_a is not None:
-                ax_rdf.semilogy(rdf_r_a, rdf_m_a, color="steelblue",
+                ax_rdf.semilogy(rdf_r_a, 10**rdf_m_a, color="steelblue",
                                 linewidth=1.0, label=img_a.label)
                 ax_rdf.fill_between(rdf_r_a,
-                                    np.maximum(rdf_m_a - rdf_s_a, 1e-6),
-                                    rdf_m_a + rdf_s_a,
+                                    10**(rdf_m_a - rdf_s_a),
+                                    10**(rdf_m_a + rdf_s_a),
                                     alpha=0.25, color="steelblue")
             if rdf_m_b is not None:
-                ax_rdf.semilogy(rdf_r_b, rdf_m_b, color="tomato",
+                ax_rdf.semilogy(rdf_r_b, 10**rdf_m_b, color="tomato",
                                 linewidth=1.0, label=img_b.label)
                 ax_rdf.fill_between(rdf_r_b,
-                                    np.maximum(rdf_m_b - rdf_s_b, 1e-6),
-                                    rdf_m_b + rdf_s_b,
+                                    10**(rdf_m_b - rdf_s_b),
+                                    10**(rdf_m_b + rdf_s_b),
                                     alpha=0.25, color="tomato")
             if rdf_m_a is not None or rdf_m_b is not None:
                 ax_rdf.set_title(f"S{idx+1} RDF", fontsize=8)
@@ -1323,11 +1350,6 @@ bright stars.</div>"""
                 ax_rdf.grid(True, alpha=0.25, which="both")
                 ax_rdf.axis("on")
 
-        fig.suptitle(
-            f"Saturated bright stars — {img_a.label} (left) vs {img_b.label} (right)  |  "
-            f"STF stretch  |  turbo colormap  |  halo/core ratio not computed (core saturated)",
-            fontsize=9,
-        )
         fig.tight_layout()
         return fig
 
@@ -1347,14 +1369,14 @@ bright stars.</div>"""
 
         fig, ax = plt.subplots(figsize=(7, 4))
         if m_a is not None:
-            ax.semilogy(r_a, m_a, color="steelblue", linewidth=1.8, label=label_a)
+            ax.semilogy(r_a, 10**m_a, color="steelblue", linewidth=1.8, label=label_a)
             ax.fill_between(r_a,
-                            np.maximum(m_a - s_a, 1e-6), m_a + s_a,
+                            10**(m_a - s_a), 10**(m_a + s_a),
                             alpha=0.25, color="steelblue")
         if m_b is not None:
-            ax.semilogy(r_b, m_b, color="tomato", linewidth=1.8, label=label_b)
+            ax.semilogy(r_b, 10**m_b, color="tomato", linewidth=1.8, label=label_b)
             ax.fill_between(r_b,
-                            np.maximum(m_b - s_b, 1e-6), m_b + s_b,
+                            10**(m_b - s_b), 10**(m_b + s_b),
                             alpha=0.25, color="tomato")
         ax.set_xlabel("Radius (pixels)")
         ax.set_ylabel("Normalised mean intensity")

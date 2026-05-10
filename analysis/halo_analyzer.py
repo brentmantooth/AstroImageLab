@@ -48,6 +48,13 @@ class HaloAnalyzer:
         }
 
         bgsub = image.background_subtracted()
+
+        # Log10-transform for RDF: gives balanced statistics across the halo's
+        # dynamic range; floor at the 1st percentile of positive pixels.
+        _pos = bgsub[bgsub > 0]
+        _log_floor = float(np.percentile(_pos, 1)) if _pos.size > 0 else 1.0
+        log_bgsub = np.log10(np.clip(bgsub, _log_floor, None))
+
         halo_stars = self._select_halo_stars(catalog, image)
 
         profiles = []
@@ -68,13 +75,13 @@ class HaloAnalyzer:
                 star_entry["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
                 star_entry["halo_radius_px"]     = fit["halo_radius_px"]
 
-            rdf_result = self._annular_stats(bgsub, xc, yc, HALO_FIT_RADIUS_PX)
+            rdf_result = self._annular_stats(log_bgsub, xc, yc, HALO_FIT_RADIUS_PX)
             if rdf_result is not None:
                 r_rdf, mu, sig = rdf_result
-                norm = mu[0] if mu[0] > 0 else 1.0
+                norm = mu[0]                    # log10 value at centre bin
                 star_entry["rdf_radii"] = r_rdf
-                star_entry["rdf_mean"]  = mu / norm
-                star_entry["rdf_std"]   = sig / norm
+                star_entry["rdf_mean"]  = mu - norm   # 0 at r=0 → 10^0 = 1 in display
+                star_entry["rdf_std"]   = sig          # already in log10 units
 
             per_star.append(star_entry)
 
@@ -111,13 +118,13 @@ class HaloAnalyzer:
         # --- Saturated stars (always collected, regardless of unsaturated count) ---
         sat_stars = self._collect_saturated_stars(catalog, image)
         for s in sat_stars:
-            rdf_result = self._annular_stats(bgsub, s["xc"], s["yc"], HALO_FIT_RADIUS_PX)
+            rdf_result = self._annular_stats(log_bgsub, s["xc"], s["yc"], HALO_FIT_RADIUS_PX)
             if rdf_result is not None:
                 r_rdf, mu, sig = rdf_result
-                norm = mu[0] if mu[0] > 0 else 1.0
+                norm = mu[0]                    # log10 value at centre bin
                 s["rdf_radii"] = r_rdf
-                s["rdf_mean"]  = mu / norm
-                s["rdf_std"]   = sig / norm
+                s["rdf_mean"]  = mu - norm      # 0 at r=0 → 10^0 = 1 in display
+                s["rdf_std"]   = sig            # already in log10 units
 
         result["saturated_star_data"] = sat_stars
 
@@ -336,8 +343,8 @@ class HaloAnalyzer:
         p0 = [1.0, 2.0, 2.5,   # core: amp, gamma, alpha
               0.1, 20.0, 1.5]  # halo: amp, gamma, alpha
         bounds = (
-            [0, 0.1, 0.5,   0,  5.0, 0.5],
-            [5, 15.0, 10.0, 2, 150.0, 5.0],
+            [0,  0.1,  0.5,  0,               5.0, 0.5],
+            [5, 15.0, 10.0,  2, HALO_FIT_RADIUS_PX, 5.0],
         )
 
         def model_log(r, *p):
@@ -358,7 +365,10 @@ class HaloAnalyzer:
                 amp_halo, gamma_halo, alpha_halo, amp_core, gamma_core, alpha_core
 
         halo_to_core = amp_halo / amp_core if amp_core > 0 else float("inf")
-        halo_r = gamma_halo * np.sqrt(2.0 ** (1.0 / alpha_halo) - 1.0)
+        halo_r: float | None = gamma_halo * np.sqrt(2.0 ** (1.0 / alpha_halo) - 1.0)
+        # HWHM beyond the data window is extrapolation — mark as unreliable
+        if halo_r > HALO_FIT_RADIUS_PX:
+            halo_r = None
 
         return {
             "popt": popt,
@@ -372,10 +382,10 @@ class HaloAnalyzer:
 
     def _plot_profile(self, r: np.ndarray, I_norm: np.ndarray,
                        fit: dict, label: str) -> plt.Figure:
-        halo_r = fit["halo_radius_px"]
+        halo_r = fit["halo_radius_px"]   # may be None if HWHM > data window
         popt = fit["popt"]
 
-        r_max_plot = max(r[-1], halo_r * 1.2)
+        r_max_plot = max(r[-1], (halo_r or r[-1]) * 1.2)
         r_fine = np.linspace(r[0], r_max_plot, 400)
 
         fig, ax = plt.subplots(figsize=(7, 4))
@@ -388,18 +398,19 @@ class HaloAnalyzer:
         ax.semilogy(r_fine, core, "g--", linewidth=1, label="Core")
         ax.semilogy(r_fine, halo, "r--", linewidth=1, label="Halo")
 
-        if halo_r > r[-1] * 0.9:
-            ax.axvline(r[-1], color="gray", linestyle=":", linewidth=1.2,
-                       label=f"Data limit ({r[-1]:.0f} px)")
+        ax.axvline(r[-1], color="gray", linestyle=":", linewidth=1.2,
+                   label=f"Data limit ({r[-1]:.0f} px)")
 
-        ax.axvline(halo_r, color="tomato", linestyle="--", linewidth=1.0,
-                   alpha=0.8, label=f"R_halo = {halo_r:.0f} px")
+        if halo_r is not None:
+            ax.axvline(halo_r, color="tomato", linestyle="--", linewidth=1.0,
+                       alpha=0.8, label=f"R_halo = {halo_r:.0f} px")
 
+        halo_r_str = f"{halo_r:.1f} px" if halo_r is not None else "N/A (> data window)"
         ax.set_xlabel("Radius (pixels)")
         ax.set_ylabel("Normalised intensity")
         ax.set_title(f"Halo profile — {label}\n"
                      f"Halo/core = {fit['halo_to_core_ratio']:.5f}, "
-                     f"R_halo = {halo_r:.1f} px")
+                     f"R_halo = {halo_r_str}")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
