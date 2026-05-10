@@ -99,6 +99,8 @@ class PSFAnalyzer:
             result["mtf_nyquist"] = mtf_nyq
             result["epsf_data"] = epsf                       # raw 2D array for convolution
             result["epsf_oversampling"] = EPSF_OVERSAMPLING  # = 2
+            result["mtf_freq"] = freq
+            result["mtf_curve"] = mtf
             result["figures"] = figs_to_b64({
                 "mtf": self._plot_mtf(freq, mtf, mtf50, image.label),
                 "epsf": self._plot_epsf(epsf, image.label),

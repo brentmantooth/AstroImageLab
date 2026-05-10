@@ -10,10 +10,10 @@ from scipy.optimize import curve_fit
 
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
-from core.models import HALO_FIT_RADIUS_PX, HALO_MIN_STAR_SNR
+from core.models import HALO_FIT_RADIUS_PX, HALO_MIN_STAR_SNR, RDF_BIN_WIDTH
 from analysis.star_catalog import StarCatalogBuilder
 
-RADIAL_BIN_WIDTH = 0.5   # px
+RADIAL_BIN_WIDTH = 0.5   # px; bin width for the median-profile used in Moffat fitting
 N_SATURATED_DISPLAY = 10
 
 
@@ -47,59 +47,96 @@ class HaloAnalyzer:
             "radial_radii": None,
         }
 
-        halo_stars = self._select_halo_stars(catalog, image)
-        if len(halo_stars) == 0:
-            return result
-
         bgsub = image.background_subtracted()
+        halo_stars = self._select_halo_stars(catalog, image)
+
         profiles = []
         per_star = []
+
         for row in halo_stars:
             xc, yc = float(row["xcentroid"]), float(row["ycentroid"])
             r, I = self._extract_radial_profile(bgsub, xc, yc, HALO_FIT_RADIUS_PX)
             if len(r) < 10:
                 continue
-            # Normalize to peak
             peak = I[0] if I[0] > 0 else 1.0
             I_norm = I / peak
             profiles.append((r, I_norm))
-            # Per-star halo fit for ranking
+
             fit = self._fit_two_component(r, I_norm)
+            star_entry: dict = {"xc": xc, "yc": yc, "peak": float(row["peak"])}
             if fit is not None:
-                per_star.append({
-                    "xc": xc, "yc": yc,
-                    "peak": float(row["peak"]),
-                    "halo_to_core_ratio": fit["halo_to_core_ratio"],
-                    "halo_radius_px": fit["halo_radius_px"],
-                })
+                star_entry["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
+                star_entry["halo_radius_px"]     = fit["halo_radius_px"]
 
-        if not profiles:
-            return result
+            rdf_result = self._annular_stats(bgsub, xc, yc, HALO_FIT_RADIUS_PX)
+            if rdf_result is not None:
+                r_rdf, mu, sig = rdf_result
+                norm = mu[0] if mu[0] > 0 else 1.0
+                star_entry["rdf_radii"] = r_rdf
+                star_entry["rdf_mean"]  = mu / norm
+                star_entry["rdf_std"]   = sig / norm
 
-        result["star_data"] = per_star
+            per_star.append(star_entry)
 
-        # Median stack normalized profiles
-        common_r = profiles[0][0]
-        stacked = np.median(
-            np.array([np.interp(common_r, p[0], p[1]) for p in profiles]),
-            axis=0
-        )
-        result["n_stars_fitted"] = len(profiles)
-        result["radial_radii"] = common_r
-        result["radial_profile"] = stacked
+        figs_dict: dict = {}
 
-        fit = self._fit_two_component(common_r, stacked)
-        if fit is not None:
-            result["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
-            result["halo_radius_px"] = fit["halo_radius_px"]
-            result["figures"] = figs_to_b64({
-                "halo_profile": self._plot_profile(
+        if profiles:
+            result["star_data"] = per_star
+
+            common_r = profiles[0][0]
+            stacked = np.median(
+                np.array([np.interp(common_r, p[0], p[1]) for p in profiles]),
+                axis=0
+            )
+            result["n_stars_fitted"] = len(profiles)
+            result["radial_radii"]   = common_r
+            result["radial_profile"] = stacked
+
+            fit = self._fit_two_component(common_r, stacked)
+            if fit is not None:
+                result["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
+                result["halo_radius_px"]     = fit["halo_radius_px"]
+                figs_dict["halo_profile"]    = self._plot_profile(
                     common_r, stacked, fit, image.label)
-            })
 
-        result["saturated_star_data"] = self._collect_saturated_stars(catalog, image)
+            agg_unsat = self._compute_aggregate_rdf(
+                [s for s in per_star if "rdf_mean" in s])
+            if agg_unsat is not None:
+                result["rdf_radii"]    = agg_unsat["rdf_radii"]
+                result["rdf_mean"]     = agg_unsat["rdf_mean"]
+                result["rdf_std"]      = agg_unsat["rdf_std"]
+                result["rdf_star_std"] = agg_unsat["rdf_star_std"]
+                result["rdf_n_stars"]  = agg_unsat["rdf_n_stars"]
 
+        # --- Saturated stars (always collected, regardless of unsaturated count) ---
+        sat_stars = self._collect_saturated_stars(catalog, image)
+        for s in sat_stars:
+            rdf_result = self._annular_stats(bgsub, s["xc"], s["yc"], HALO_FIT_RADIUS_PX)
+            if rdf_result is not None:
+                r_rdf, mu, sig = rdf_result
+                norm = mu[0] if mu[0] > 0 else 1.0
+                s["rdf_radii"] = r_rdf
+                s["rdf_mean"]  = mu / norm
+                s["rdf_std"]   = sig / norm
+
+        result["saturated_star_data"] = sat_stars
+
+        agg_sat = self._compute_aggregate_rdf(
+            [s for s in sat_stars if "rdf_mean" in s])
+        if agg_sat is not None:
+            result["sat_rdf_radii"]    = agg_sat["rdf_radii"]
+            result["sat_rdf_mean"]     = agg_sat["rdf_mean"]
+            result["sat_rdf_std"]      = agg_sat["rdf_std"]
+            result["sat_rdf_star_std"] = agg_sat["rdf_star_std"]
+            result["sat_rdf_n_stars"]  = agg_sat["rdf_n_stars"]
+
+        if figs_dict:
+            result["figures"] = figs_to_b64(figs_dict)
         return result
+
+    # ------------------------------------------------------------------
+    # Star selection — unsaturated halo stars (unchanged)
+    # ------------------------------------------------------------------
 
     def _select_halo_stars(self, catalog, image: AstroImage):
         if len(catalog) == 0:
@@ -140,39 +177,66 @@ class HaloAnalyzer:
             return catalog[:0]
         return Table(rows=isolated)
 
+    # ------------------------------------------------------------------
+    # Saturated star detection — connected components on raw pixels
+    # ------------------------------------------------------------------
+
     def _collect_saturated_stars(self, catalog, image: AstroImage) -> list:
-        """Return the top N brightest saturated stars (display-only — no Moffat fit)."""
+        """Find saturated stars via connected-component analysis on saturated pixels.
+
+        Uses scipy.ndimage.label on pixels >= saturation threshold instead of the
+        catalog, because DAOStarFinder fails to detect heavily blown-out cores
+        (flat plateau — no identifiable Gaussian peak).
+        """
+        from scipy.ndimage import label as _label
         sat = image.saturation_threshold()
         h, w = image.data.shape
         margin = HALO_FIT_RADIUS_PX + 5
 
-        candidates = []
+        # Primary: connected regions of saturated pixels → one star each
+        sat_mask = image.data >= sat
+        labeled, n_features = _label(sat_mask)
+
+        cc_stars: list[dict] = []
+        for region_idx in range(1, n_features + 1):
+            ys, xs = np.where(labeled == region_idx)
+            if len(xs) < 4:             # skip cosmic rays / hot pixels
+                continue
+            xc = float(np.mean(xs))
+            yc = float(np.mean(ys))
+            if xc < margin or xc > w - margin or yc < margin or yc > h - margin:
+                continue
+            peak = float(image.data[ys, xs].max())
+            cc_stars.append({"xc": xc, "yc": yc, "peak": peak,
+                              "n_sat_px": len(xs)})
+
+        # Supplementary: catalog entries that are saturated but form no large
+        # connected region (moderately saturated — not fully clipped)
         for row in catalog:
             if row["peak"] < sat:
                 continue
             x, y = float(row["xcentroid"]), float(row["ycentroid"])
             if x < margin or x > w - margin or y < margin or y > h - margin:
                 continue
-            candidates.append({"xc": x, "yc": y, "peak": float(row["peak"])})
+            if any(np.sqrt((x - s["xc"])**2 + (y - s["yc"])**2) < 30.0
+                   for s in cc_stars):
+                continue    # already captured by a CC region
+            cc_stars.append({"xc": x, "yc": y, "peak": float(row["peak"]),
+                              "n_sat_px": 0})
 
-        # Basic isolation: drop if another saturated candidate is within 50 px
-        isolated = []
-        for i, ca in enumerate(candidates):
-            too_close = any(
-                j != i
-                and abs(cb["xc"] - ca["xc"]) < 50
-                and abs(cb["yc"] - ca["yc"]) < 50
-                for j, cb in enumerate(candidates)
-            )
-            if not too_close:
-                isolated.append(ca)
+        # Sort by saturated-pixel area (proxy for total brightness), then peak
+        cc_stars.sort(key=lambda s: (s["n_sat_px"], s["peak"]), reverse=True)
+        return [{"xc": s["xc"], "yc": s["yc"], "peak": s["peak"]}
+                for s in cc_stars[:N_SATURATED_DISPLAY]]
 
-        isolated.sort(key=lambda s: s["peak"], reverse=True)
-        return isolated[:N_SATURATED_DISPLAY]
+    # ------------------------------------------------------------------
+    # Radial profiles
+    # ------------------------------------------------------------------
 
     def _extract_radial_profile(self, data: np.ndarray,
                                   xc: float, yc: float,
                                   max_radius: float) -> tuple[np.ndarray, np.ndarray]:
+        """Median intensity in each 0.5 px annular bin — used for Moffat fitting."""
         h, w = data.shape
         x0 = max(0, int(xc - max_radius))
         y0 = max(0, int(yc - max_radius))
@@ -194,9 +258,79 @@ class HaloAnalyzer:
 
         return np.array(radii), np.array(intensities)
 
+    def _annular_stats(self, data: np.ndarray, xc: float, yc: float,
+                        max_radius: float
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Mean and std of pixel values in each 1 px annular bin — used for RDF."""
+        h, w = data.shape
+        x0 = max(0, int(xc - max_radius))
+        y0 = max(0, int(yc - max_radius))
+        x1 = min(w, int(xc + max_radius + 1))
+        y1 = min(h, int(yc + max_radius + 1))
+        sub = data[y0:y1, x0:x1].astype(float)
+        yg, xg = np.mgrid[y0:y1, x0:x1]
+        r_map = np.sqrt((xg - xc)**2 + (yg - yc)**2)
+
+        edges = np.arange(0, max_radius + RDF_BIN_WIDTH, RDF_BIN_WIDTH)
+        r_centers, means, stds = [], [], []
+        for i in range(len(edges) - 1):
+            mask = (r_map >= edges[i]) & (r_map < edges[i + 1])
+            if mask.sum() > 2:
+                vals = sub[mask]
+                r_centers.append((edges[i] + edges[i + 1]) / 2.0)
+                means.append(float(np.mean(vals)))
+                stds.append(float(np.std(vals)))
+
+        if len(r_centers) < 3:
+            return None
+        return np.array(r_centers), np.array(means), np.array(stds)
+
+    def _compute_aggregate_rdf(self, rdf_list: list) -> dict | None:
+        """Stack per-star RDF dicts and return cross-star aggregate statistics.
+
+        Stars near image edges produce shorter radius arrays, so each profile is
+        interpolated onto the longest common grid; np.nanmean handles bins that
+        fall outside a given star's covered radius range.
+        """
+        if not rdf_list:
+            return None
+
+        # Reference grid = the star with the most radial bins
+        r_ref = max((d["rdf_radii"] for d in rdf_list), key=len)
+
+        stacked_means = []
+        stacked_stds  = []
+        for d in rdf_list:
+            r = d["rdf_radii"]
+            m = d["rdf_mean"]
+            s = d["rdf_std"]
+            if len(r) < 3:
+                continue
+            # Extrapolated bins (beyond this star's range) become NaN
+            m_i = np.interp(r_ref, r, m, left=np.nan, right=np.nan)
+            s_i = np.interp(r_ref, r, s, left=np.nan, right=np.nan)
+            stacked_means.append(m_i)
+            stacked_stds.append(s_i)
+
+        if not stacked_means:
+            return None
+
+        all_means = np.array(stacked_means)
+        all_stds  = np.array(stacked_stds)
+        return {
+            "rdf_radii":    r_ref,
+            "rdf_mean":     np.nanmean(all_means, axis=0),
+            "rdf_std":      np.nanmean(all_stds,  axis=0),   # avg per-bin σ
+            "rdf_star_std": np.nanstd(all_means,  axis=0),   # star-to-star σ
+            "rdf_n_stars":  len(stacked_means),
+        }
+
+    # ------------------------------------------------------------------
+    # Moffat fitting
+    # ------------------------------------------------------------------
+
     def _fit_two_component(self, r: np.ndarray,
                              I_norm: np.ndarray) -> dict | None:
-        # Fit in log space for better numerical behaviour
         log_I = np.log10(np.clip(I_norm, 1e-6, None))
 
         p0 = [1.0, 2.0, 2.5,   # core: amp, gamma, alpha
@@ -219,13 +353,11 @@ class HaloAnalyzer:
 
         amp_core, gamma_core, alpha_core, amp_halo, gamma_halo, alpha_halo = popt
 
-        # Guard against role swap
         if gamma_core > gamma_halo:
             amp_core, gamma_core, alpha_core, amp_halo, gamma_halo, alpha_halo = \
                 amp_halo, gamma_halo, alpha_halo, amp_core, gamma_core, alpha_core
 
         halo_to_core = amp_halo / amp_core if amp_core > 0 else float("inf")
-        # Halo half-power radius: where halo component drops to amp_halo/2
         halo_r = gamma_halo * np.sqrt(2.0 ** (1.0 / alpha_halo) - 1.0)
 
         return {
@@ -234,12 +366,15 @@ class HaloAnalyzer:
             "halo_radius_px": halo_r,
         }
 
+    # ------------------------------------------------------------------
+    # Figures
+    # ------------------------------------------------------------------
+
     def _plot_profile(self, r: np.ndarray, I_norm: np.ndarray,
                        fit: dict, label: str) -> plt.Figure:
         halo_r = fit["halo_radius_px"]
         popt = fit["popt"]
 
-        # Extend x-axis to cover the fitted halo radius so R_halo is always visible
         r_max_plot = max(r[-1], halo_r * 1.2)
         r_fine = np.linspace(r[0], r_max_plot, 400)
 
@@ -253,12 +388,10 @@ class HaloAnalyzer:
         ax.semilogy(r_fine, core, "g--", linewidth=1, label="Core")
         ax.semilogy(r_fine, halo, "r--", linewidth=1, label="Halo")
 
-        # Mark where measured data ends when the fit extends beyond it
         if halo_r > r[-1] * 0.9:
             ax.axvline(r[-1], color="gray", linestyle=":", linewidth=1.2,
                        label=f"Data limit ({r[-1]:.0f} px)")
 
-        # Mark the fitted halo half-power radius
         ax.axvline(halo_r, color="tomato", linestyle="--", linewidth=1.0,
                    alpha=0.8, label=f"R_halo = {halo_r:.0f} px")
 

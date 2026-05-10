@@ -396,8 +396,12 @@ shown in the metadata table above.</div>"""
         ma, mb = _better_worse_class(pa.get("mtf50_cycles_per_px"), pb.get("mtf50_cycles_per_px"))
 
         fig_mtf = None
-        if "figures" in pa and "mtf" in pa["figures"] and "mtf" in (pb.get("figures") or {}):
-            fig_mtf = self._overlay_mtf(pa["figures"]["mtf"], pb["figures"]["mtf"],
+        freq_a = pa.get("mtf_freq")
+        mtf_a  = pa.get("mtf_curve")
+        freq_b = pb.get("mtf_freq")
+        mtf_b  = pb.get("mtf_curve")
+        if freq_a is not None or freq_b is not None:
+            fig_mtf = self._overlay_mtf(freq_a, mtf_a, freq_b, mtf_b,
                                         ra.label, rb.label)
 
         img_mtf = _img_tag(fig_mtf, "MTF comparison")
@@ -714,18 +718,15 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         fig.tight_layout()
         return fig
 
-    def _overlay_mtf(self, fig_a: plt.Figure, fig_b: plt.Figure,
+    def _overlay_mtf(self,
+                      freq_a: "np.ndarray | None", mtf_a: "np.ndarray | None",
+                      freq_b: "np.ndarray | None", mtf_b: "np.ndarray | None",
                       label_a: str, label_b: str) -> plt.Figure:
         fig, ax = plt.subplots(figsize=(7, 4))
-        for fig_src, label, color in [(fig_a, label_a, "steelblue"),
-                                       (fig_b, label_b, "tomato")]:
-            try:
-                src_ax = fig_src.axes[0]
-                line = src_ax.lines[0]
-                ax.plot(line.get_xdata(), line.get_ydata(),
-                        color=color, linewidth=2, label=label)
-            except (IndexError, AttributeError):
-                pass
+        if freq_a is not None and mtf_a is not None:
+            ax.plot(freq_a, mtf_a, color="steelblue", linewidth=2, label=label_a)
+        if freq_b is not None and mtf_b is not None:
+            ax.plot(freq_b, mtf_b, color="tomato", linewidth=2, label=label_b)
         ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
         ax.axvline(0.5, color="red", linestyle=":", linewidth=0.8, label="Nyquist")
         ax.set_xlabel("Spatial frequency (cycles/pixel)")
@@ -843,6 +844,22 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
         sat_grid_tag = _img_tag(self._plot_saturated_star_grid(matched_sat, img_a, img_b),
                                 "Saturated star cross-sections")
 
+        rdf_unsat_fig = _img_tag(
+            self._plot_rdf_comparison(
+                ha, hb, ra.label, rb.label,
+                "Aggregate RDF — unsaturated halo stars"),
+            "Aggregate RDF unsaturated")
+
+        sat_ha = {k.replace("sat_rdf_", "rdf_"): v
+                  for k, v in ha.items() if k.startswith("sat_rdf_")}
+        sat_hb = {k.replace("sat_rdf_", "rdf_"): v
+                  for k, v in hb.items() if k.startswith("sat_rdf_")}
+        rdf_sat_fig = _img_tag(
+            self._plot_rdf_comparison(
+                sat_ha, sat_hb, ra.label, rb.label,
+                "Aggregate RDF — saturated stars"),
+            "Aggregate RDF saturated")
+
         # Build dynamic optics note from FITS headers
         f_rat = _focal_ratio(img_a)
         pix_mm = _pixel_size_mm(img_a)
@@ -901,6 +918,18 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
+{rdf_unsat_fig}
+<p class="caption">Aggregate Radial Distribution Function — unsaturated halo stars.
+Mean normalised intensity vs. radius (blue = Image A, red = Image B). Shaded band = ±1σ
+within-annulus variability averaged over all fitted stars. A wider band at a given radius
+indicates angular asymmetry in the halo (not a perfect ring). Comparing the falloff slope
+between the two images gives a filter-independent measure of halo extent.</p>
+
+{rdf_sat_fig}
+<p class="caption">Aggregate RDF — saturated stars only. The flat plateau at small radii
+reflects the saturated core; the slope beyond the plateau shows the halo ring structure.
+Meaningful even when the core is clipped.</p>
+
 {star_map_tag}
 <p class="caption">STF-stretched overview of {ra.label}.
 <span style="color:red"><strong>Red circles</strong></span> mark the top {len(matched)}
@@ -939,7 +968,7 @@ bright stars.</div>"""
 
     @staticmethod
     def _match_halo_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
-        """Return up to 20 (sa, sb) pairs ranked by image-A peak brightness."""
+        """Return up to 10 (sa, sb) pairs ranked by image-A peak brightness."""
         stars_a = (ra.halo_metrics or {}).get("star_data", [])
         stars_b = (rb.halo_metrics or {}).get("star_data", [])
         if not stars_a:
@@ -954,10 +983,10 @@ bright stars.</div>"""
                 if dists[idx] <= 20.0:
                     all_matched.append((sa, stars_b[idx]))
             all_matched.sort(key=lambda pair: pair[0].get("peak", 0.0), reverse=True)
-            return all_matched[:20]
+            return all_matched[:10]
         else:
             sorted_a = sorted(stars_a, key=lambda s: s.get("peak", 0.0), reverse=True)
-            return [(sa, None) for sa in sorted_a[:20]]
+            return [(sa, None) for sa in sorted_a[:10]]
 
     @staticmethod
     def _match_saturated_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
@@ -1069,12 +1098,12 @@ bright stars.</div>"""
 
         n = len(matched)
         pairs_per_row = 1
-        cols_per_pair = 3   # img A | img B | cross-section
+        cols_per_pair = 4   # img A | img B | cross-section | RDF
         n_rows = (n + pairs_per_row - 1) // pairs_per_row
         n_cols = pairs_per_row * cols_per_pair
 
         fig, axes = plt.subplots(n_rows, n_cols,
-                                  figsize=(n_cols * 4.0, n_rows * 3.5))
+                                  figsize=(n_cols * 3.5, n_rows * 3.5))
         if n_rows == 1:
             axes = axes[np.newaxis, :]
         for ax in axes.flat:
@@ -1102,9 +1131,10 @@ bright stars.</div>"""
             disp_a = stf_stretch(cut_a)
             disp_b = stf_stretch(cut_b)
 
-            ax_a = axes[row, col_base]
-            ax_b = axes[row, col_base + 1]
-            ax_xs = axes[row, col_base + 2]
+            ax_a   = axes[row, col_base]
+            ax_b   = axes[row, col_base + 1]
+            ax_xs  = axes[row, col_base + 2]
+            ax_rdf = axes[row, col_base + 3]
 
             ax_a.imshow(disp_a, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
@@ -1148,6 +1178,35 @@ bright stars.</div>"""
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
 
+            # Per-star RDF (mean ± std annular profile)
+            rdf_r_a = sa.get("rdf_radii")
+            rdf_m_a = sa.get("rdf_mean")
+            rdf_s_a = sa.get("rdf_std")
+            rdf_r_b = sb.get("rdf_radii") if sb else None
+            rdf_m_b = sb.get("rdf_mean")  if sb else None
+            rdf_s_b = sb.get("rdf_std")   if sb else None
+            if rdf_m_a is not None:
+                ax_rdf.semilogy(rdf_r_a, rdf_m_a, color="steelblue",
+                                linewidth=1.0, label=img_a.label)
+                ax_rdf.fill_between(rdf_r_a,
+                                    np.maximum(rdf_m_a - rdf_s_a, 1e-6),
+                                    rdf_m_a + rdf_s_a,
+                                    alpha=0.25, color="steelblue")
+            if rdf_m_b is not None:
+                ax_rdf.semilogy(rdf_r_b, rdf_m_b, color="tomato",
+                                linewidth=1.0, label=img_b.label)
+                ax_rdf.fill_between(rdf_r_b,
+                                    np.maximum(rdf_m_b - rdf_s_b, 1e-6),
+                                    rdf_m_b + rdf_s_b,
+                                    alpha=0.25, color="tomato")
+            if rdf_m_a is not None or rdf_m_b is not None:
+                ax_rdf.set_title(f"#{idx+1} RDF", fontsize=8)
+                ax_rdf.set_xlabel("px from centre", fontsize=7)
+                ax_rdf.tick_params(labelsize=7)
+                ax_rdf.legend(fontsize=6)
+                ax_rdf.grid(True, alpha=0.25, which="both")
+                ax_rdf.axis("on")
+
         fig.suptitle(
             f"Top {n} brightest stars common to both images — {img_a.label} (left) vs {img_b.label} (right) "
             f"per pair  |  STF stretch per image  |  turbo colormap",
@@ -1178,9 +1237,9 @@ bright stars.</div>"""
 
         n = len(matched)
         n_rows = n
-        n_cols = 3   # img A | img B | cross-section
+        n_cols = 4   # img A | img B | cross-section | RDF
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4.0, n_rows * 3.5))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3.5, n_rows * 3.5))
         if n_rows == 1:
             axes = axes[np.newaxis, :]
         for ax in axes.flat:
@@ -1198,9 +1257,10 @@ bright stars.</div>"""
             disp_a = stf_stretch(cut_a)
             disp_b = stf_stretch(cut_b)
 
-            ax_a  = axes[idx, 0]
-            ax_b  = axes[idx, 1]
-            ax_xs = axes[idx, 2]
+            ax_a   = axes[idx, 0]
+            ax_b   = axes[idx, 1]
+            ax_xs  = axes[idx, 2]
+            ax_rdf = axes[idx, 3]
 
             ax_a.imshow(disp_a, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
@@ -1234,11 +1294,73 @@ bright stars.</div>"""
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
 
+            # Per-star RDF (mean ± std annular profile)
+            rdf_r_a = sa.get("rdf_radii")
+            rdf_m_a = sa.get("rdf_mean")
+            rdf_s_a = sa.get("rdf_std")
+            rdf_r_b = sb.get("rdf_radii") if sb else None
+            rdf_m_b = sb.get("rdf_mean")  if sb else None
+            rdf_s_b = sb.get("rdf_std")   if sb else None
+            if rdf_m_a is not None:
+                ax_rdf.semilogy(rdf_r_a, rdf_m_a, color="steelblue",
+                                linewidth=1.0, label=img_a.label)
+                ax_rdf.fill_between(rdf_r_a,
+                                    np.maximum(rdf_m_a - rdf_s_a, 1e-6),
+                                    rdf_m_a + rdf_s_a,
+                                    alpha=0.25, color="steelblue")
+            if rdf_m_b is not None:
+                ax_rdf.semilogy(rdf_r_b, rdf_m_b, color="tomato",
+                                linewidth=1.0, label=img_b.label)
+                ax_rdf.fill_between(rdf_r_b,
+                                    np.maximum(rdf_m_b - rdf_s_b, 1e-6),
+                                    rdf_m_b + rdf_s_b,
+                                    alpha=0.25, color="tomato")
+            if rdf_m_a is not None or rdf_m_b is not None:
+                ax_rdf.set_title(f"S{idx+1} RDF", fontsize=8)
+                ax_rdf.set_xlabel("px from centre", fontsize=7)
+                ax_rdf.tick_params(labelsize=7)
+                ax_rdf.legend(fontsize=6)
+                ax_rdf.grid(True, alpha=0.25, which="both")
+                ax_rdf.axis("on")
+
         fig.suptitle(
             f"Saturated bright stars — {img_a.label} (left) vs {img_b.label} (right)  |  "
             f"STF stretch  |  turbo colormap  |  halo/core ratio not computed (core saturated)",
             fontsize=9,
         )
+        fig.tight_layout()
+        return fig
+
+    def _plot_rdf_comparison(self, ha: dict, hb: dict,
+                              label_a: str, label_b: str,
+                              title: str) -> "plt.Figure | None":
+        """Overlay Image A (steelblue) and Image B (tomato) aggregate RDFs with ±1σ bands."""
+        r_a = ha.get("rdf_radii")
+        m_a = ha.get("rdf_mean")
+        s_a = ha.get("rdf_std")
+        r_b = hb.get("rdf_radii")
+        m_b = hb.get("rdf_mean")
+        s_b = hb.get("rdf_std")
+
+        if m_a is None and m_b is None:
+            return None
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        if m_a is not None:
+            ax.semilogy(r_a, m_a, color="steelblue", linewidth=1.8, label=label_a)
+            ax.fill_between(r_a,
+                            np.maximum(m_a - s_a, 1e-6), m_a + s_a,
+                            alpha=0.25, color="steelblue")
+        if m_b is not None:
+            ax.semilogy(r_b, m_b, color="tomato", linewidth=1.8, label=label_b)
+            ax.fill_between(r_b,
+                            np.maximum(m_b - s_b, 1e-6), m_b + s_b,
+                            alpha=0.25, color="tomato")
+        ax.set_xlabel("Radius (pixels)")
+        ax.set_ylabel("Normalised mean intensity")
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
         fig.tight_layout()
         return fig
 
