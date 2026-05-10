@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 
 from core.astro_image import AstroImage
+from core.fig_utils import figs_to_b64
 from core.models import HALO_FIT_RADIUS_PX, HALO_MIN_STAR_SNR
 from analysis.star_catalog import StarCatalogBuilder
 
@@ -90,10 +91,10 @@ class HaloAnalyzer:
         if fit is not None:
             result["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
             result["halo_radius_px"] = fit["halo_radius_px"]
-            result["figures"] = {
+            result["figures"] = figs_to_b64({
                 "halo_profile": self._plot_profile(
                     common_r, stacked, fit, image.label)
-            }
+            })
 
         return result
 

@@ -8,6 +8,7 @@ from scipy.ndimage import sobel, rotate
 from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
+from core.fig_utils import figs_to_b64
 from core.models import EDGE_ROI_HALF_WIDTH
 
 
@@ -64,10 +65,10 @@ class EdgeAnalyzer:
         ecr = self._measure_edge_contrast_ratio(roi_data, edge_info)
         result["edge_contrast_ratio"] = ecr
 
-        result["figures"] = {
+        result["figures"] = figs_to_b64({
             "edge": self._plot_results(roi_data, positions, esf, lsf, width,
                                        image.label, edge_info)
-        }
+        })
 
         return result
 

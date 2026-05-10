@@ -10,6 +10,7 @@ from astropy.table import Table
 from photutils.detection import DAOStarFinder
 
 from core.astro_image import AstroImage
+from core.fig_utils import figs_to_b64
 from core.models import GHOST_SEARCH_RADIUS_PX
 from analysis.star_catalog import StarCatalogBuilder
 
@@ -57,10 +58,10 @@ class GhostDetector:
         result["ghost_candidates"] = candidates
 
         if candidates:
-            result["figures"] = {
+            result["figures"] = figs_to_b64({
                 "ghost_map": self._plot_ghost_map(
                     bgsub, bright_stars, candidates, image.label)
-            }
+            })
 
         return result
 

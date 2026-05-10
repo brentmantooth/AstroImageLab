@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from astropy.stats import sigma_clip
 
 from core.astro_image import AstroImage
+from core.fig_utils import figs_to_b64
 from core.models import POWER_SPECTRUM_NPIX
 
 LOW_FREQ_MAX = 0.10    # cycles/px boundary between low and mid+high
@@ -51,9 +52,9 @@ class PowerSpectrumAnalyzer:
             "radial_power": radial,
             "freq_axis": freq,
         })
-        result["figures"] = {
+        result["figures"] = figs_to_b64({
             "power_spectrum": self._plot_results(ps2d, freq, radial, ratio, image.label)
-        }
+        })
         return result
 
     # ------------------------------------------------------------------

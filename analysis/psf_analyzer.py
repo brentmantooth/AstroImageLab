@@ -12,6 +12,7 @@ from astropy.table import Table
 from photutils.psf import EPSFBuilder, extract_stars
 
 from core.astro_image import AstroImage
+from core.fig_utils import figs_to_b64
 from core.models import SEEING_WARN_FWHM_ARCS
 from analysis.star_catalog import StarCatalogBuilder
 
@@ -98,10 +99,10 @@ class PSFAnalyzer:
             result["mtf_nyquist"] = mtf_nyq
             result["epsf_data"] = epsf                       # raw 2D array for convolution
             result["epsf_oversampling"] = EPSF_OVERSAMPLING  # = 2
-            result["figures"] = {
+            result["figures"] = figs_to_b64({
                 "mtf": self._plot_mtf(freq, mtf, mtf50, image.label),
                 "epsf": self._plot_epsf(epsf, image.label),
-            }
+            })
 
         return result
 

@@ -68,16 +68,20 @@ def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
     return data
 
 
-def _img_tag(fig: plt.Figure, alt: str = "") -> str:
+def _img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     if fig is None:
         return ""
+    if isinstance(fig, str):
+        return f'<img src="data:image/png;base64,{fig}" alt="{alt}">'
     return f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" alt="{alt}">'
 
 
-def _hires_img_tag(fig: plt.Figure, alt: str = "") -> str:
+def _hires_img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     """Like _img_tag but saved at 150 dpi for detail-heavy maps."""
     if fig is None:
         return ""
+    if isinstance(fig, str):
+        return f'<img src="data:image/png;base64,{fig}" alt="{alt}">'
     return f'<img src="data:image/png;base64,{_fig_to_b64(fig, dpi=150)}" alt="{alt}">'
 
 
@@ -308,9 +312,9 @@ class ReportBuilder:
 
             ax.set_xscale("log")
             ax.set_yscale("log")
-            ax.set_xlabel("Pixel value")
+            ax.set_xlabel("Pixel Intensity")
             ax.set_ylabel("Count")
-            ax.set_title("Pixel value histogram")
+            ax.set_title("Pixel Intensity histogram")
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.25, which="both")
             fig.tight_layout()
@@ -610,7 +614,7 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         def _make_map(pts, img_h, img_w):
             if not pts:
                 return None
-            # Grid with same aspect ratio as image; long axis = 400 px
+            # Grid with same aspect ratio as image; long axis = 300 px
             if img_w >= img_h:
                 gw, gh = 300, max(1, int(300 * img_h / img_w))
             else:
@@ -659,10 +663,10 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         rng = (float(min(all_vals)), float(max(all_vals)))
         fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
         if vals_a:
-            ax.hist(vals_a, bins=20, range=rng, alpha=XS_LINE_ALPHA,
+            ax.hist(vals_a, bins=40, range=rng, alpha=XS_LINE_ALPHA,
                     color="#ff7f0e", label=label_a, edgecolor="none")
         if vals_b:
-            ax.hist(vals_b, bins=20, range=rng, alpha=XS_LINE_ALPHA,
+            ax.hist(vals_b, bins=40, range=rng, alpha=XS_LINE_ALPHA,
                     color="#1f77b4", label=label_b, edgecolor="none")
         ax.set_xlabel(xlabel)
         ax.set_ylabel("Count")
@@ -1050,7 +1054,7 @@ bright stars.</div>"""
             ax_a.imshow(disp_a, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             h2c_a = sa.get("halo_to_core_ratio")
-            ax_a.set_title(f"#{idx+1} {ra.label}"
+            ax_a.set_title(f"#{idx+1} {img_a.label}"
                            + (f"\nh/c={h2c_a:.5f}" if h2c_a is not None else ""),
                            fontsize=7)
             ax_a.axis("off")
@@ -1059,11 +1063,11 @@ bright stars.</div>"""
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             if sb is not None:
                 h2c_b = sb.get("halo_to_core_ratio")
-                ax_b.set_title(f"#{idx+1} {rb.label}"
+                ax_b.set_title(f"#{idx+1} {img_b.label}"
                                + (f"\nh/c={h2c_b:.5f}" if h2c_b is not None else ""),
                                fontsize=7)
             else:
-                ax_b.set_title(f"#{idx+1} {rb.label}\n(no match)", fontsize=7)
+                ax_b.set_title(f"#{idx+1} {img_b.label}\n(no match)", fontsize=7)
             ax_b.axis("off")
 
             # Horizontal cross-section through the star centre — log y-axis
@@ -1078,10 +1082,10 @@ bright stars.</div>"""
                 xs_b_vals = (np.maximum(cut_b[mid_row, :w_min], noise_floor)
                              if sb is not None else None)
                 ax_xs.semilogy(px_offset, xs_a, color="steelblue",
-                               linewidth=1.0, alpha=XS_LINE_ALPHA, label=ra.label)
+                               linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_a.label)
                 if xs_b_vals is not None:
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
-                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=rb.label)
+                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
                 ax_xs.set_title(f"#{idx+1} cross-section", fontsize=7)
                 ax_xs.set_xlabel("px from centre", fontsize=6)
                 ax_xs.tick_params(labelsize=6)
@@ -1090,7 +1094,7 @@ bright stars.</div>"""
                 ax_xs.axis("on")
 
         fig.suptitle(
-            f"Top {n} brightest stars common to both images — {ra.label} (left) vs {rb.label} (right) "
+            f"Top {n} brightest stars common to both images — {img_a.label} (left) vs {img_b.label} (right) "
             f"per pair  |  STF stretch per image  |  turbo colormap",
             fontsize=9,
         )
