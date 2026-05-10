@@ -17,13 +17,13 @@ A Python desktop application for characterizing narrowband astrophotography filt
 | **Laplacian of Gaussian** | Edge/detail enhancement at 3 spatial scales | ✓ Normalised |
 | **Wavelet decomposition** | 4-level Daubechies-4 decomposition; per-level SNR; detail images | ✓ Normalised |
 
-All analysis runs on linear (unstretched) calibrated image data. Display uses an [STF-equivalent statistical stretch](https://www.setiastro.com/statistical-stretch) (SETIAstroSuite MTF method). Images with different filter bandwidths are handled correctly — metrics are clearly labelled as bandwidth-independent or bandwidth-sensitive, and a warning banner appears in the report when bandwidths differ.
+All analysis runs on linear (unstretched) calibrated image data. Images with different filter bandwidths are handled correctly — metrics are clearly labelled as bandwidth-independent or bandwidth-sensitive, and a warning banner appears in the report when bandwidths differ.
 
 ---
 
 ## Screenshot
 
-> *(Add a screenshot here after first launch)*
+![Astro Image Lab](/resources/AstroImageLabMain.png)
 
 ---
 

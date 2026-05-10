@@ -17,8 +17,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Filter Image Comparator")
-        self.resize(1200, 800)
+        self.setWindowTitle("Astro Image Lab")
+        self.resize(1400, 900)
 
         self._thread: AnalysisThread | None = None
         self._roi: tuple | None = None
