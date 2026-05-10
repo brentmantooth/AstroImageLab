@@ -75,7 +75,7 @@ python AstroImageLab.py
 
 **Suggested — starless versions of each image:**
 - Creating starless counterparts (using tools such as [Star XTerminator](https://www.rc-astro.com/resources/StarXTerminator/), [StarNet++](https://www.starnetastro.com/), or equivalent) and loading them alongside the original images significantly improves edge, power spectrum, and spatial detail analysis by removing the PSF contribution of stars from nebula regions.
-- Load the starless images via the **Open Starless…** button in each panel.
+- Load the starless images when prompted after loading the original image.
 
 **For narrowband filter comparisons — enter filter bandwidths:**
 - If your image headers do not contain filter bandwidth information, enter the bandwidth (in nm) manually in the field provided in each image panel (e.g., 3 nm vs 7 nm Ha filters).
