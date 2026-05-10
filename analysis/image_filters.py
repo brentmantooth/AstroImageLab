@@ -9,6 +9,7 @@ from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, map
 import pywt
 
 from core.astro_image import AstroImage
+from core.fig_utils import fig_to_b64, figs_to_b64
 from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS, XS_LINE_ALPHA
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
@@ -68,7 +69,7 @@ class SpatialDetailAnalyzer:
             display_roi=display_roi,
             crosshair=crosshair,
         )
-        figures.update(std_figs)
+        figures.update(figs_to_b64(std_figs, dpi=150))
 
         # 2. Laplacian of Gaussian maps
         log_figs = self._log_analysis(
@@ -77,7 +78,7 @@ class SpatialDetailAnalyzer:
             display_roi=display_roi,
             crosshair=crosshair,
         )
-        figures.update(log_figs)
+        figures.update(figs_to_b64(log_figs, dpi=150))
 
         # 3. Wavelet decomposition
         wav_figs = self._wavelet_analysis(
@@ -87,23 +88,23 @@ class SpatialDetailAnalyzer:
             display_roi=display_roi,
             crosshair=crosshair,
         )
-        figures.update(wav_figs)
+        figures.update(figs_to_b64(wav_figs, dpi=150))
 
         if crosshair is not None:
-            figures["xs_context"] = self._plot_context_figure(
-                image_a, image_b, image_a.label, image_b.label, crosshair)
+            figures["xs_context"] = fig_to_b64(self._plot_context_figure(
+                image_a, image_b, image_a.label, image_b.label, crosshair), dpi=150)
             pos_a, prof_a = self._sample_line(norm_a, **crosshair)
             pos_b, prof_b = self._sample_line(norm_b, **crosshair)
-            figures["xs_image_profile"] = self._plot_image_profile(
-                pos_a, prof_a, pos_b, prof_b, image_a.label, image_b.label)
+            figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile(
+                pos_a, prof_a, pos_b, prof_b, image_a.label, image_b.label), dpi=150)
             pos_a_raw, prof_a_raw = self._sample_line(image_a.data, **crosshair)
             pos_b_raw, prof_b_raw = self._sample_line(image_b.data, **crosshair)
-            figures["xs_image_profile_raw"] = self._plot_image_profile(
+            figures["xs_image_profile_raw"] = fig_to_b64(self._plot_image_profile(
                 pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
                 image_a.label, image_b.label,
                 title="Cross-section brightness profile (raw counts)",
                 ylabel="Pixel value (raw ADU)",
-            )
+            ), dpi=150)
 
         result["crosshair"] = crosshair
         result["figures"] = figures

@@ -8,7 +8,7 @@ from astropy.io import fits
 from astropy.nddata import NDData, StdDevUncertainty
 from photutils.background import Background2D, SExtractorBackground, MADStdBackgroundRMS
 
-from core.models import DEFAULT_PIXEL_SCALE
+from core.models import DEFAULT_PIXEL_SCALE, FILTER_THICKNESS_MM
 
 
 # FITS keywords tried in priority order for pixel scale derivation
@@ -41,6 +41,7 @@ class AstroImage:
         self.pixel_scale: float = DEFAULT_PIXEL_SCALE
         self.pixel_scale_is_estimated: bool = False
         self.bandwidth_nm: float | None = None
+        self.filter_thickness_mm: float = FILTER_THICKNESS_MM
         self.original_dtype: np.dtype | None = None   # dtype before float64 conversion
         self.background: Background2D | None = None
         self.background_rms: np.ndarray | None = None

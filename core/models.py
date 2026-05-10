@@ -17,6 +17,9 @@ SATURATION_FRACTION = 0.90
 DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback
 SEEING_WARN_FWHM_ARCS = 3.0
 EDGE_ROI_HALF_WIDTH = 30
+FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); default for UI
+GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
+RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation
 POWER_SPECTRUM_NPIX = 256
 
 STD_KERNEL_SIZES = (5, 15, 31)

@@ -8,6 +8,7 @@ from scipy.ndimage import sobel, rotate
 from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
+from core.fig_utils import figs_to_b64
 from core.models import EDGE_ROI_HALF_WIDTH
 
 
@@ -64,10 +65,10 @@ class EdgeAnalyzer:
         ecr = self._measure_edge_contrast_ratio(roi_data, edge_info)
         result["edge_contrast_ratio"] = ecr
 
-        result["figures"] = {
+        result["figures"] = figs_to_b64({
             "edge": self._plot_results(roi_data, positions, esf, lsf, width,
                                        image.label, edge_info)
-        }
+        })
 
         return result
 
@@ -78,8 +79,12 @@ class EdgeAnalyzer:
     def _auto_detect_roi(self, bgsub: np.ndarray, image: AstroImage
                           ) -> tuple[np.ndarray | None, tuple | None]:
         """Find a patch centred on the strongest gradient in the image."""
-        sx = sobel(bgsub, axis=1)
-        sy = sobel(bgsub, axis=0)
+        from core.stretch import stf_stretch
+        # STF stretch amplifies faint nebula edges before gradient detection;
+        # bgsub (linear) is still returned as roi_data for accurate ESF measurement.
+        stretched = stf_stretch(bgsub).astype(np.float64)
+        sx = sobel(stretched, axis=1)
+        sy = sobel(stretched, axis=0)
         gm = np.sqrt(sx**2 + sy**2)
 
         # Avoid borders

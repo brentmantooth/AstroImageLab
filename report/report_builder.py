@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import io
@@ -15,7 +15,7 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA
+from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -68,16 +68,20 @@ def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
     return data
 
 
-def _img_tag(fig: plt.Figure, alt: str = "") -> str:
+def _img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     if fig is None:
         return ""
+    if isinstance(fig, str):
+        return f'<img src="data:image/png;base64,{fig}" alt="{alt}">'
     return f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" alt="{alt}">'
 
 
-def _hires_img_tag(fig: plt.Figure, alt: str = "") -> str:
+def _hires_img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     """Like _img_tag but saved at 150 dpi for detail-heavy maps."""
     if fig is None:
         return ""
+    if isinstance(fig, str):
+        return f'<img src="data:image/png;base64,{fig}" alt="{alt}">'
     return f'<img src="data:image/png;base64,{_fig_to_b64(fig, dpi=150)}" alt="{alt}">'
 
 
@@ -119,6 +123,31 @@ def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[st
     if higher_is_better:
         return ("better", "worse") if val_a >= val_b else ("worse", "better")
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
+
+
+def _focal_ratio(img: AstroImage) -> float | None:
+    hdr = img.header
+    if hdr is None:
+        return None
+    for kw in ("FOCRATIO", "FRATIO", "FNUMBER"):
+        try:
+            return float(hdr[kw])
+        except (KeyError, ValueError, TypeError):
+            pass
+    try:
+        return float(hdr["FOCALLEN"]) / float(hdr["APTDIA"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _pixel_size_mm(img: AstroImage) -> float | None:
+    hdr = img.header
+    if hdr is None:
+        return None
+    try:
+        return float(hdr["XPIXSZ"]) / 1000.0
+    except (KeyError, ValueError, TypeError):
+        return None
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
@@ -283,9 +312,9 @@ class ReportBuilder:
 
             ax.set_xscale("log")
             ax.set_yscale("log")
-            ax.set_xlabel("Pixel value")
+            ax.set_xlabel("Pixel Intensity")
             ax.set_ylabel("Count")
-            ax.set_title("Pixel value histogram")
+            ax.set_title("Pixel Intensity histogram")
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.25, which="both")
             fig.tight_layout()
@@ -367,8 +396,12 @@ shown in the metadata table above.</div>"""
         ma, mb = _better_worse_class(pa.get("mtf50_cycles_per_px"), pb.get("mtf50_cycles_per_px"))
 
         fig_mtf = None
-        if "figures" in pa and "mtf" in pa["figures"] and "mtf" in (pb.get("figures") or {}):
-            fig_mtf = self._overlay_mtf(pa["figures"]["mtf"], pb["figures"]["mtf"],
+        freq_a = pa.get("mtf_freq")
+        mtf_a  = pa.get("mtf_curve")
+        freq_b = pb.get("mtf_freq")
+        mtf_b  = pb.get("mtf_curve")
+        if freq_a is not None or freq_b is not None:
+            fig_mtf = self._overlay_mtf(freq_a, mtf_a, freq_b, mtf_b,
                                         ra.label, rb.label)
 
         img_mtf = _img_tag(fig_mtf, "MTF comparison")
@@ -423,6 +456,53 @@ These metrics are normalised to unit amplitude and are valid regardless of filte
   <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td></tr>
 </table>
 
+<div class="info-box">
+  <strong>Understanding the PSF metrics:</strong><br><br>
+
+  <strong>FWHM (Full Width at Half Maximum)</strong> &mdash; The diameter of a star
+  image at half its peak brightness. Smaller = sharper. Ground-based imaging is
+  typically seeing-limited (1&ndash;3 arcsec); the best sites achieve sub-arcsecond
+  FWHM. For filter comparison the arcsec value is the primary metric (it is
+  scale-independent). A larger FWHM in one image may indicate that session had
+  worse seeing, or that the filter introduces additional softening (e.g. from
+  substrate wedge or coating scatter).<br><br>
+
+  <strong>Moffat &beta; (beta)</strong> &mdash; The wing-falloff exponent of the Moffat
+  profile fitted to each star: I(r) = A &times; (1 + (r/&gamma;)&sup2;)<sup>&minus;&beta;</sup>. Higher &beta;
+  means the stellar wings fall off more steeply, leaving less scattered light
+  outside the core. Pure Kolmogorov atmospheric turbulence predicts &beta; &asymp; 4.765;
+  in practice values of 2&ndash;6 are typical. <strong>Ideal: &beta; &gt; 3.</strong> Low
+  &beta; (1&ndash;2) indicates extended wings from vibration, wind shake, or poor tracking;
+  very high &beta; (&gt; 6) suggests an unusually compact PSF or unusually thin
+  atmosphere. A consistently lower &beta; for one filter implies it scatters more light
+  into the halo/wing region &mdash; compare with the Halo Analysis section.<br><br>
+
+  <strong>Ellipticity</strong> &mdash; How non-circular the average star shape is,
+  measured from second-order image moments (0 = perfectly round, 1 = infinitely
+  elongated). <strong>Ideal: &lt; 0.05.</strong> Values of 0.05&ndash;0.10 are
+  borderline; &gt; 0.10 indicates a significant elongation that may reduce
+  effective resolution in one axis. Common causes: tracking drift, autoguider
+  lag, astigmatism, or filter substrate wedge. A large difference in ellipticity
+  between the two filters is a specific indicator of filter tilt or wedge.<br><br>
+
+  <strong>Eccentricity</strong> &mdash; A complementary measure of star elongation
+  derived from the ratio of semi-minor to semi-major axis: e = &radic;(1 &minus; (b/a)&sup2;).
+  <strong>Ideal: &lt; 0.10.</strong> Unlike ellipticity, eccentricity weights
+  extreme elongation more strongly.<br><br>
+
+  <strong>MTF50 (cycles/pixel)</strong> &mdash; The spatial frequency at which the
+  Modulation Transfer Function falls to 50% of its peak. Higher MTF50 = the
+  system preserves contrast at finer scales. The maximum physically possible
+  value is 0.5 cyc/px (Nyquist limit for fully-sampled images).
+  <strong>Ideal: as high as possible; typical ground-based: 0.1&ndash;0.3 cyc/px.</strong>
+  MTF50 is the single most useful number for ranking overall sharpness.<br><br>
+
+  <strong>MTF @ Nyquist</strong> &mdash; The residual MTF at exactly 0.5 cyc/px.
+  For a well-sampled, diffraction-limited system this should approach 0.
+  <strong>Ideal: close to 0.</strong> A notably non-zero value at Nyquist can
+  indicate undersampling (FWHM &lt; ~2 px) or aliasing from a very sharp PSF.
+</div>
+
 {img_fwhm_map}
 <p class="caption">Smoothed FWHM map (px) across the field. Shared colour scale between both images. Dots mark individual star measurements.</p>
 {img_fwhm_hist}
@@ -457,19 +537,68 @@ filter flatness and seating.</div>
 consistent star size between filters. Systematic offset reveals which filter produces
 tighter stars. Points far from the line indicate individual star measurement scatter.</p>
 
+<div class="info-box">
+  <strong>How the Empirical PSF (ePSF) was built.</strong>
+  The ePSF is constructed from all stars that passed the quality filters
+  (unsaturated, adequate SNR, isolated from neighbours). Cutouts of each star
+  are extracted from the background-subtracted image with a box size of
+  max(25 px, 6 &times; FWHM) to capture the full wing extent. The
+  <em>photutils</em> <code>EPSFBuilder</code> iteratively stacks these cutouts
+  at <strong>2&times; oversampling</strong>, aligning each star to its sub-pixel
+  centroid position to fill in the finer spatial grid. After 5 iterations the
+  model converges to the average PSF across all selected stars. The result is
+  displayed on a logarithmic scale to reveal structure spanning several orders
+  of magnitude in brightness.<br><br>
+
+  <strong>What to look for:</strong>
+  <ul style="margin:0.4em 0 0 1.2em;padding:0;">
+    <li><strong>Circular, compact core</strong> &mdash; ideal outcome: good focus,
+        stable atmosphere, no significant aberrations.</li>
+    <li><strong>Elliptical core</strong> &mdash; the elongation direction indicates
+        the dominant cause: tracking drift (RA or Dec axis), astigmatism
+        (diagonal elongation), or field rotation (curved smear on Alt-Az mounts).
+        The eccentricity and position angle metrics in the table quantify this.</li>
+    <li><strong>Asymmetric tails extending to one side</strong> &mdash; most commonly
+        tracking or guiding drift in one axis, coma from the optical system
+        (particularly if stars across the whole field share the same tail direction),
+        or wind-induced mount vibration. If both filters show the same tail
+        direction and magnitude, the cause is common to both capture sessions
+        (optical or tracking), not filter-specific.</li>
+    <li><strong>Extended, diffuse wings</strong> &mdash; poor seeing, thermal
+        currents in the optical path, or vibration broadening the PSF without
+        a directional bias.</li>
+    <li><strong>Steep, clean falloff</strong> &mdash; the flux drops 2&ndash;3 orders of
+        magnitude within a few FWHM. This is ideal: most of the star&rsquo;s light
+        is in the core, minimising contamination of adjacent nebula structure.
+        A steeper falloff (higher Moffat &beta;) is always better for contrast on
+        fine detail next to bright stars.</li>
+    <li><strong>Airy-ring structure</strong> &mdash; concentric rings around the
+        core indicate near-diffraction-limited performance (exceptional seeing
+        and optics, rarely seen in long-exposure deep-sky imaging).</li>
+  </ul>
+</div>
+
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_epsf_a}</div>
   <div style="flex:1;">{img_epsf_b}</div>
 </div>
-<p class="caption">Empirical PSFs (log scale). Tighter, rounder cores indicate
-better optical quality. Ellipticity &gt; 0.1 may indicate filter tilt or astigmatism.</p>
+<p class="caption">Empirical PSFs (log&#x2081;&#x208a; scale, viridis colormap). The ePSF is
+built at 2&times; oversampling from all quality-filtered stars in the field. A circular,
+compact core with rapid falloff is ideal. Asymmetric tails indicate tracking,
+guiding, or optical aberrations &mdash; compare tail direction and magnitude between the
+two images to distinguish session-specific from system-wide causes.</p>
 
 {self._psf_simulation_html(ra, rb)}
 
-<div class="info-box"><strong>What to look for:</strong> A smaller FWHM and higher
-MTF50 indicate sharper image resolution. A higher Moffat β (steeper wing falloff)
-indicates less scattered light. Ellipticity should be similar between filters;
-large differences may indicate filter flatness issues.</div>"""
+<div class="info-box"><strong>Comparing the two images:</strong>
+A smaller FWHM (arcsec) and higher MTF50 indicate sharper resolution &mdash;
+these are the primary quality indicators for filter comparison. A higher
+Moffat &beta; indicates less scattered light in the wings. Ellipticity should be
+similar between filters; a large difference suggests filter tilt, substrate
+wedge, or different seeing conditions between sessions. If the ePSFs show
+the same asymmetric tail in both images, the cause is common to both (optics
+or tracking) and does not reflect a filter quality difference &mdash; what matters
+for comparison is whether the tail is <em>more pronounced</em> in one image.</div>"""
 
     @staticmethod
     def _plot_psf_spatial_map(
@@ -489,7 +618,7 @@ large differences may indicate filter flatness issues.</div>"""
         def _make_map(pts, img_h, img_w):
             if not pts:
                 return None
-            # Grid with same aspect ratio as image; long axis = 400 px
+            # Grid with same aspect ratio as image; long axis = 300 px
             if img_w >= img_h:
                 gw, gh = 300, max(1, int(300 * img_h / img_w))
             else:
@@ -538,10 +667,10 @@ large differences may indicate filter flatness issues.</div>"""
         rng = (float(min(all_vals)), float(max(all_vals)))
         fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
         if vals_a:
-            ax.hist(vals_a, bins=20, range=rng, alpha=XS_LINE_ALPHA,
+            ax.hist(vals_a, bins=40, range=rng, alpha=XS_LINE_ALPHA,
                     color="#ff7f0e", label=label_a, edgecolor="none")
         if vals_b:
-            ax.hist(vals_b, bins=20, range=rng, alpha=XS_LINE_ALPHA,
+            ax.hist(vals_b, bins=40, range=rng, alpha=XS_LINE_ALPHA,
                     color="#1f77b4", label=label_b, edgecolor="none")
         ax.set_xlabel(xlabel)
         ax.set_ylabel("Count")
@@ -589,18 +718,15 @@ large differences may indicate filter flatness issues.</div>"""
         fig.tight_layout()
         return fig
 
-    def _overlay_mtf(self, fig_a: plt.Figure, fig_b: plt.Figure,
+    def _overlay_mtf(self,
+                      freq_a: "np.ndarray | None", mtf_a: "np.ndarray | None",
+                      freq_b: "np.ndarray | None", mtf_b: "np.ndarray | None",
                       label_a: str, label_b: str) -> plt.Figure:
         fig, ax = plt.subplots(figsize=(7, 4))
-        for fig_src, label, color in [(fig_a, label_a, "steelblue"),
-                                       (fig_b, label_b, "tomato")]:
-            try:
-                src_ax = fig_src.axes[0]
-                line = src_ax.lines[0]
-                ax.plot(line.get_xdata(), line.get_ydata(),
-                        color=color, linewidth=2, label=label)
-            except (IndexError, AttributeError):
-                pass
+        if freq_a is not None and mtf_a is not None:
+            ax.plot(freq_a, mtf_a, color="steelblue", linewidth=2, label=label_a)
+        if freq_b is not None and mtf_b is not None:
+            ax.plot(freq_b, mtf_b, color="tomato", linewidth=2, label=label_b)
         ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
         ax.axvline(0.5, color="red", linestyle=":", linewidth=0.8, label="Nyquist")
         ax.set_xlabel("Spatial frequency (cycles/pixel)")
@@ -707,21 +833,103 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
                                       higher_is_better=False)
         prof_a = _img_tag((ha.get("figures") or {}).get("halo_profile"), f"Halo {ra.label}")
         prof_b = _img_tag((hb.get("figures") or {}).get("halo_profile"), f"Halo {rb.label}")
-        grid_tag = _img_tag(self._plot_halo_star_grid(ra, rb, img_a, img_b),
+        matched = self._match_halo_stars(ra, rb)
+        matched_sat = self._match_saturated_stars(ra, rb)
+        sat_stars_a = [sa for sa, _sb in matched_sat]
+        star_map_tag = _img_tag(self._plot_halo_star_map(matched, img_a,
+                                                          saturated=sat_stars_a),
+                                "Halo star field overview")
+        grid_tag = _img_tag(self._plot_halo_star_grid(matched, img_a, img_b),
                             "Halo star comparison grid")
+        sat_grid_tag = _img_tag(self._plot_saturated_star_grid(matched_sat, img_a, img_b),
+                                "Saturated star cross-sections")
+
+        rdf_unsat_fig = _img_tag(
+            self._plot_rdf_comparison(
+                ha, hb, ra.label, rb.label,
+                "Aggregate RDF — unsaturated halo stars"),
+            "Aggregate RDF unsaturated")
+
+        sat_ha = {k.replace("sat_rdf_", "rdf_"): v
+                  for k, v in ha.items() if k.startswith("sat_rdf_")}
+        sat_hb = {k.replace("sat_rdf_", "rdf_"): v
+                  for k, v in hb.items() if k.startswith("sat_rdf_")}
+        rdf_sat_fig = _img_tag(
+            self._plot_rdf_comparison(
+                sat_ha, sat_hb, ra.label, rb.label,
+                "Aggregate RDF — saturated stars"),
+            "Aggregate RDF saturated")
+
+        # Build dynamic optics note from FITS headers
+        f_rat = _focal_ratio(img_a)
+        pix_mm = _pixel_size_mm(img_a)
+        t_mm = img_a.filter_thickness_mm
+        if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
+            r_expected = t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm)
+            optics_note = (
+                f'<div class="info-box">'
+                f'<strong>Expected halo size for this telescope</strong> '
+                f'(f/{f_rat:.1f}, {pix_mm*1000:.2f} µm pixels, '
+                f'{t_mm:.1f} mm filter thickness): '
+                f'halo radius ≈ <strong>{r_expected:.0f} px</strong>. '
+                f'The cutout windows in the grid below are sized to '
+                f'2× this expected radius to ensure the full halo extent is visible.'
+                f'</div>'
+            )
+        else:
+            optics_note = ""
 
         return f"""
-<h2>4. Halo Analysis &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
+<h2>4. Halo Analysis &nbsp;<span class="metric-label-ok">&#10003; bandwidth-independent</span></h2>
 {err}
-<div class="info-box">Halos around bright stars result from internal reflections
-within the filter substrate and AR coatings. The halo-to-core ratio measures the
-amplitude of the broad halo component relative to the star core. This ratio is
-normalised and valid across different filter bandwidths.</div>
+<div class="info-box">
+  <strong>What causes halos?</strong>
+  Halos around bright stars in narrowband images arise from internal reflections
+  within the filter substrate and its AR coatings. A fraction of the incoming
+  light reflects off the back surface of the filter glass, travels back through
+  the substrate, reflects off the front surface, and then exits &mdash; offset laterally
+  from the direct beam. This offset is what appears as the circular glow surrounding
+  bright stars.<br><br>
+  <strong>Focal ratio and halo size.</strong>
+  The halo radius at the focal plane is approximately:<br>
+  <code>R &asymp; t / (n &times; f_ratio &times; pixel_size)</code><br>
+  where <em>t</em> is the filter substrate thickness, <em>n</em> &asymp; 1.9 (dichroic
+  filter glass refractive index), and <em>pixel_size</em> is in mm. Because f-ratio appears in
+  the denominator, <strong>faster telescopes (lower f-ratio) produce proportionally
+  larger halos</strong> for the same filter. A narrowband filter that shows no
+  visible halo on a slow f/10 refractor may produce a prominent halo on an f/4
+  Newtonian. This is a property of the optical system, not the filter quality alone.
+  The halo-to-core <em>ratio</em> (amplitude of the halo relative to the star core)
+  is a more filter-specific quality indicator than the raw halo size.
+</div>
+{optics_note}
+<div class="info-box">
+  <strong>How halo/core ratio and halo radius are computed.</strong>
+  For each bright unsaturated star, the background-subtracted radial intensity profile
+  (median-binned in 0.5&thinsp;px annuli out to {HALO_FIT_RADIUS_PX}&thinsp;px) is fitted
+  with a <em>two-component Moffat model</em>:<br>
+  <code>I(r) = A<sub>core</sub> &middot; Moffat(r; &gamma;<sub>core</sub>, &alpha;<sub>core</sub>)
+             + A<sub>halo</sub> &middot; Moffat(r; &gamma;<sub>halo</sub>, &alpha;<sub>halo</sub>)</code><br>
+  The fit is performed in log<sub>10</sub> space so the profile&rsquo;s wide dynamic range is
+  weighted uniformly rather than being dominated by the bright core.<br><br>
+  <strong>Halo / core ratio</strong> = A<sub>halo</sub> / A<sub>core</sub> &mdash; the
+  amplitude of the wide Moffat component relative to the core peak. A value of 0 means no
+  detectable halo; values above 0.15 indicate significant internal reflection. Because both
+  amplitudes are normalised to the same star, the ratio is independent of absolute brightness
+  and directly comparable between filters.<br><br>
+  <strong>Halo radius</strong> = HWHM of the halo Moffat component:
+  R&thinsp;=&thinsp;&gamma;<sub>halo</sub>&thinsp;&middot;&thinsp;&radic;(2<sup>1/&alpha;<sub>halo</sub></sup>&thinsp;&minus;&thinsp;1).
+  If this value exceeds the {HALO_FIT_RADIUS_PX}&thinsp;px fit window it is marked
+  <em>N/A</em> — the data do not yet show the halo half-power point, so the width cannot
+  be reliably measured. In that case the halo/core ratio is the more reliable indicator.
+  For strongly saturated stars the core is clipped and no Moffat fit is attempted; their
+  halo structure is visible in the cross-sections and RDF plots instead.
+</div>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Stars fitted</td><td>{_val(ha.get("n_stars_fitted"), "d")}</td><td>{_val(hb.get("n_stars_fitted"), "d")}</td></tr>
-  <tr><td>Halo / core ratio</td><td class="{ca}">{_val(ha.get("halo_to_core_ratio"))}</td><td class="{cb}">{_val(hb.get("halo_to_core_ratio"))}</td></tr>
+  <tr><td>Halo / core ratio</td><td class="{ca}">{_val(ha.get("halo_to_core_ratio"), ".5f")}</td><td class="{cb}">{_val(hb.get("halo_to_core_ratio"), ".5f")}</td></tr>
   <tr><td>Halo radius (px)</td><td>{_val(ha.get("halo_radius_px"))}</td><td>{_val(hb.get("halo_radius_px"))}</td></tr>
 </table>
 
@@ -732,11 +940,33 @@ normalised and valid across different filter bandwidths.</div>
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
+{rdf_unsat_fig}
+<p class="caption">Aggregate Radial Distribution Function — unsaturated halo stars.
+Mean normalised intensity vs. radius (blue = Image A, red = Image B). Shaded band = ±1σ
+within-annulus variability averaged over all fitted stars. A wider band at a given radius
+indicates angular asymmetry in the halo (not a perfect ring). Comparing the falloff slope
+between the two images gives a filter-independent measure of halo extent.</p>
+
+{rdf_sat_fig}
+<p class="caption">Aggregate RDF — saturated stars only. The flat plateau at small radii
+reflects the saturated core; the slope beyond the plateau shows the halo ring structure.
+Meaningful even when the core is clipped.</p>
+
+{star_map_tag}
+<p class="caption">STF-stretched overview of {ra.label}.
+<span style="color:red"><strong>Red circles</strong></span> mark the top {len(matched)}
+brightest unsaturated halo stars (rank matches the cutout grid below).
+<span style="color:magenta"><strong>Magenta dashed circles</strong></span> mark the top {len(matched_sat)}
+brightest saturated stars (S1–S{len(matched_sat)}) shown in the saturated star grid below.</p>
+
 {grid_tag}
-<p class="caption">Top-ranked halo stars side-by-side (Image A left, Image B right per
-pair). Both cutouts in each pair share the same brightness scale so halo brightness is
-directly comparable. Stars sorted by halo/core ratio (highest first). √ stretch applied
-to reveal faint halo structure. <em>Inferno</em> colormap: bright = high intensity.</p>
+<p class="caption">Top {len(matched)} brightest stars common to both images, side-by-side
+(Image A left, Image B right per pair). STF stretch applied per image to reveal
+faint halo structure. Stars ranked by peak brightness (brightest first).
+<em>Turbo</em> colormap: bright = high intensity.</p>
+
+{sat_grid_tag}
+{"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped.</p>'}
 
 <div class="info-box"><strong>Ideal:</strong> Halo/core ratio &lt; 0.05 is excellent;
 &gt; 0.15 indicates significant internal reflection that will reduce contrast on
@@ -745,47 +975,157 @@ bright stars.</div>"""
     def _extract_cutout(self, data: np.ndarray,
                          xc: float, yc: float, half: int) -> np.ndarray:
         h, w = data.shape
-        x0 = max(0, int(xc) - half)
-        x1 = min(w, int(xc) + half + 1)
-        y0 = max(0, int(yc) - half)
-        y1 = min(h, int(yc) + half + 1)
-        return data[y0:y1, x0:x1].copy()
+        size = 2 * half + 1
+        cut = np.zeros((size, size), dtype=np.float64)
+        x0_src = max(0, int(xc) - half)
+        x1_src = min(w, int(xc) + half + 1)
+        y0_src = max(0, int(yc) - half)
+        y1_src = min(h, int(yc) + half + 1)
+        x0_dst = x0_src - (int(xc) - half)
+        x1_dst = x0_dst + (x1_src - x0_src)
+        y0_dst = y0_src - (int(yc) - half)
+        y1_dst = y0_dst + (y1_src - y0_src)
+        cut[y0_dst:y1_dst, x0_dst:x1_dst] = data[y0_src:y1_src, x0_src:x1_src]
+        return cut
 
-    def _plot_halo_star_grid(self, ra: AnalysisResult, rb: AnalysisResult,
-                              img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+    @staticmethod
+    def _match_halo_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
+        """Return up to 10 (sa, sb) pairs ranked by image-A peak brightness."""
         stars_a = (ra.halo_metrics or {}).get("star_data", [])
         stars_b = (rb.halo_metrics or {}).get("star_data", [])
         if not stars_a:
-            return None
-
-        top_a = stars_a[:20]
-
-        # Nearest-neighbour match in B within 20 px
-        matched = []
+            return []
         if stars_b:
             xs_b = np.array([s["xc"] for s in stars_b])
             ys_b = np.array([s["yc"] for s in stars_b])
-            for sa in top_a:
+            all_matched = []
+            for sa in stars_a:
                 dists = np.sqrt((xs_b - sa["xc"]) ** 2 + (ys_b - sa["yc"]) ** 2)
                 idx = int(np.argmin(dists))
-                matched.append((sa, stars_b[idx] if dists[idx] <= 20.0 else None))
+                if dists[idx] <= 20.0:
+                    all_matched.append((sa, stars_b[idx]))
+            all_matched.sort(key=lambda pair: pair[0].get("peak", 0.0), reverse=True)
+            return all_matched[:10]
         else:
-            matched = [(sa, None) for sa in top_a]
+            sorted_a = sorted(stars_a, key=lambda s: s.get("peak", 0.0), reverse=True)
+            return [(sa, None) for sa in sorted_a[:10]]
 
+    @staticmethod
+    def _match_saturated_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
+        """Return up to 10 (sa, sb) pairs of saturated stars, sorted by image-A peak."""
+        stars_a = (ra.halo_metrics or {}).get("saturated_star_data", [])
+        stars_b = (rb.halo_metrics or {}).get("saturated_star_data", [])
+        if not stars_a:
+            return []
+        if stars_b:
+            xs_b = np.array([s["xc"] for s in stars_b])
+            ys_b = np.array([s["yc"] for s in stars_b])
+            matched = []
+            for sa in stars_a:
+                dists = np.sqrt((xs_b - sa["xc"]) ** 2 + (ys_b - sa["yc"]) ** 2)
+                idx = int(np.argmin(dists))
+                if dists[idx] <= 20.0:
+                    matched.append((sa, stars_b[idx]))
+            matched.sort(key=lambda p: p[0].get("peak", 0.0), reverse=True)
+            return matched[:10]
+        else:
+            return [(sa, None) for sa in stars_a[:10]]
+
+    def _plot_halo_star_map(self, matched: list, img_a: AstroImage,
+                             saturated: list = ()) -> plt.Figure | None:
+        """Full-field STF-stretched overview with top-N halo stars circled and ranked."""
+        if not matched:
+            return None
+
+        bgsub = img_a.background_subtracted() if img_a.background is not None else img_a.data
+        from core.stretch import stf_stretch
+        display = stf_stretch(bgsub).astype(np.float64)
+
+        h, w = display.shape
+        if max(h, w) > 1200:
+            zoom_f = 1200.0 / max(h, w)
+            display = _ndimage_zoom(display, zoom_f, order=1)
+            scale = zoom_f
+        else:
+            scale = 1.0
+        dh, dw = display.shape
+
+        fig_w = 10.0 * (dw / max(dh, dw))
+        fig_h = 10.0 * (dh / max(dh, dw))
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        ax.imshow(display, origin="lower", cmap="gray", aspect="equal",
+                  interpolation="nearest", vmin=0, vmax=1)
+
+        circle_r = max(dw, dh) * 0.012
+        font_size = max(6, int(circle_r * 0.6))
+
+        for rank, (sa, _sb) in enumerate(matched, start=1):
+            xd = sa["xc"] * scale
+            yd = sa["yc"] * scale
+            circ = plt.Circle((xd, yd), circle_r, color="red",
+                               fill=False, linewidth=1.2)
+            ax.add_patch(circ)
+            ax.text(xd + circle_r * 0.8, yd + circle_r * 0.8,
+                    str(rank), color="red", fontsize=font_size,
+                    fontweight="bold", ha="left", va="bottom",
+                    clip_on=True)
+
+        for i, sa in enumerate(saturated, start=1):
+            xd = sa["xc"] * scale
+            yd = sa["yc"] * scale
+            circ = plt.Circle((xd, yd), circle_r, color="magenta",
+                               fill=False, linewidth=1.2, linestyle="--")
+            ax.add_patch(circ)
+            ax.text(xd + circle_r * 0.8, yd + circle_r * 0.8,
+                    f"S{i}", color="magenta", fontsize=font_size,
+                    fontweight="bold", ha="left", va="bottom",
+                    clip_on=True)
+
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor="none", edgecolor="red", label="Unsaturated halo stars"),
+            Patch(facecolor="none", edgecolor="magenta", linestyle="--",
+                  label="Saturated stars"),
+        ]
+        ax.legend(handles=legend_elements, loc="upper right", fontsize=font_size,
+                  framealpha=0.6, facecolor="black", labelcolor="white")
+
+        n_sat = len(saturated)
+        title = f"{img_a.label} — top {len(matched)} brightest halo stars"
+        if n_sat:
+            title += f" + {n_sat} saturated"
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+        fig.tight_layout(pad=0.3)
+        return fig
+
+    def _plot_halo_star_grid(self, matched: list,
+                              img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
         if not matched:
             return None
 
         bgsub_a = img_a.background_subtracted() if img_a.background is not None else img_a.data
         bgsub_b = img_b.background_subtracted() if img_b.background is not None else img_b.data
 
+        from core.stretch import stf_stretch
+
+        # Compute optics-based cutout size once from image headers
+        f_rat = _focal_ratio(img_a)
+        pix_mm = _pixel_size_mm(img_a)
+        t_mm = img_a.filter_thickness_mm
+        if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
+            optics_half = int(t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm))
+        else:
+            optics_half = HALO_FIT_RADIUS_PX
+
         n = len(matched)
-        pairs_per_row = min(2, n)
-        cols_per_pair = 3   # img A | img B | cross-section
+        pairs_per_row = 1
+        cols_per_pair = 4   # img A | img B | cross-section | RDF
         n_rows = (n + pairs_per_row - 1) // pairs_per_row
         n_cols = pairs_per_row * cols_per_pair
 
         fig, axes = plt.subplots(n_rows, n_cols,
-                                  figsize=(n_cols * 2.2, n_rows * 2.8))
+                                  figsize=(n_cols * 3.5, n_rows * 3.5))
         if n_rows == 1:
             axes = axes[np.newaxis, :]
         for ax in axes.flat:
@@ -795,51 +1135,52 @@ bright stars.</div>"""
             row = idx // pairs_per_row
             col_base = (idx % pairs_per_row) * cols_per_pair
 
-            r_a = sa.get("halo_radius_px") or HALO_FIT_RADIUS_PX
-            r_b = (sb.get("halo_radius_px") if sb else r_a) or HALO_FIT_RADIUS_PX
-            half = max(int(max(r_a, r_b) * 2.5), HALO_FIT_RADIUS_PX)
+            r_a = sa.get("halo_radius_px") or optics_half
+            r_b = (sb.get("halo_radius_px") if sb else r_a) or optics_half
+            # 1.5× shows out to well past the halo half-power point; cap at 200 px
+            # to guard against unreliable extrapolated radii from sparse data
+            half = min(max(int(max(r_a, r_b) * 1.5), optics_half), 200)
 
             cut_a = self._extract_cutout(bgsub_a, sa["xc"], sa["yc"], half)
             cut_b = (self._extract_cutout(bgsub_b, sb["xc"], sb["yc"], half)
                      if sb is not None else np.zeros_like(cut_a))
 
-            # Shared normalisation: scale to 99.9th-pct peak so core clips, halos visible
+            # shared_max retained for cross-section noise floor
             peak_a = float(np.percentile(cut_a, 99.9)) if cut_a.size > 0 else 1.0
             peak_b = float(np.percentile(cut_b, 99.9)) if cut_b.size > 0 else 1.0
             shared_max = max(peak_a, peak_b, 1e-9)
 
-            # Asinh stretch: softening=0.005 maps 5% of peak to ~50% of display range,
-            # making faint halo emission clearly visible while the core clips cleanly.
-            _soft = 0.005
-            _norm = np.arcsinh(1.0 / _soft)
-            def _asinh(arr):
-                return np.arcsinh(np.clip(arr / shared_max, 0.0, None) / _soft) / _norm
+            disp_a = stf_stretch(cut_a)
+            disp_b = stf_stretch(cut_b)
 
-            disp_a = np.clip(_asinh(cut_a), 0.0, 1.0)
-            disp_b = np.clip(_asinh(cut_b), 0.0, 1.0)
-
-            ax_a = axes[row, col_base]
-            ax_b = axes[row, col_base + 1]
-            ax_xs = axes[row, col_base + 2]
+            ax_a   = axes[row, col_base]
+            ax_b   = axes[row, col_base + 1]
+            ax_xs  = axes[row, col_base + 2]
+            ax_rdf = axes[row, col_base + 3]
 
             ax_a.imshow(disp_a, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             h2c_a = sa.get("halo_to_core_ratio")
-            ax_a.set_title(f"#{idx+1} {ra.label}"
-                           + (f"\nh/c={h2c_a:.3f}" if h2c_a is not None else ""),
-                           fontsize=7)
+            ax_a.set_title(f"#{idx+1} {img_a.label}"
+                           + (f"\nh/c={h2c_a:.5f}" if h2c_a is not None else ""),
+                           fontsize=9)
             ax_a.axis("off")
+            ax_a.plot(half, half, '+', color='magenta', markersize=12,
+                      markeredgewidth=1.5, zorder=5)
 
             ax_b.imshow(disp_b, origin="lower", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             if sb is not None:
                 h2c_b = sb.get("halo_to_core_ratio")
-                ax_b.set_title(f"#{idx+1} {rb.label}"
-                               + (f"\nh/c={h2c_b:.3f}" if h2c_b is not None else ""),
-                               fontsize=7)
+                ax_b.set_title(f"#{idx+1} {img_b.label}"
+                               + (f"\nh/c={h2c_b:.5f}" if h2c_b is not None else ""),
+                               fontsize=9)
             else:
-                ax_b.set_title(f"#{idx+1} {rb.label}\n(no match)", fontsize=7)
+                ax_b.set_title(f"#{idx+1} {img_b.label}\n(no match)", fontsize=9)
             ax_b.axis("off")
+            if sb is not None:
+                ax_b.plot(half, half, '+', color='magenta', markersize=12,
+                          markeredgewidth=1.5, zorder=5)
 
             # Horizontal cross-section through the star centre — log y-axis
             if cut_a.shape[0] > 0 and cut_a.shape[1] > 0:
@@ -853,22 +1194,195 @@ bright stars.</div>"""
                 xs_b_vals = (np.maximum(cut_b[mid_row, :w_min], noise_floor)
                              if sb is not None else None)
                 ax_xs.semilogy(px_offset, xs_a, color="steelblue",
-                               linewidth=1.0, alpha=XS_LINE_ALPHA, label=ra.label)
+                               linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_a.label)
                 if xs_b_vals is not None:
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
-                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=rb.label)
-                ax_xs.set_title(f"#{idx+1} cross-section", fontsize=7)
-                ax_xs.set_xlabel("px from centre", fontsize=6)
-                ax_xs.tick_params(labelsize=6)
-                ax_xs.legend(fontsize=6)
+                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
+                ax_xs.set_title(f"#{idx+1} cross-section", fontsize=8)
+                ax_xs.set_xlabel("px from centre", fontsize=7)
+                ax_xs.tick_params(labelsize=7)
+                ax_xs.legend(fontsize=7)
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
 
-        fig.suptitle(
-            f"Top {n} halo stars — {ra.label} (left) vs {rb.label} (right) "
-            f"per pair  |  shared scale per pair  |  asinh stretch (softening=0.005, turbo colormap)",
-            fontsize=9,
-        )
+            # Per-star RDF (log10-space stats, inverse-transformed for display)
+            rdf_r_a = sa.get("rdf_radii")
+            rdf_m_a = sa.get("rdf_mean")
+            rdf_s_a = sa.get("rdf_std")
+            rdf_r_b = sb.get("rdf_radii") if sb else None
+            rdf_m_b = sb.get("rdf_mean")  if sb else None
+            rdf_s_b = sb.get("rdf_std")   if sb else None
+            if rdf_m_a is not None:
+                ax_rdf.semilogy(rdf_r_a, 10**rdf_m_a, color="steelblue",
+                                linewidth=1.0, label=img_a.label)
+                ax_rdf.fill_between(rdf_r_a,
+                                    10**(rdf_m_a - rdf_s_a),
+                                    10**(rdf_m_a + rdf_s_a),
+                                    alpha=0.25, color="steelblue")
+            if rdf_m_b is not None:
+                ax_rdf.semilogy(rdf_r_b, 10**rdf_m_b, color="tomato",
+                                linewidth=1.0, label=img_b.label)
+                ax_rdf.fill_between(rdf_r_b,
+                                    10**(rdf_m_b - rdf_s_b),
+                                    10**(rdf_m_b + rdf_s_b),
+                                    alpha=0.25, color="tomato")
+            if rdf_m_a is not None or rdf_m_b is not None:
+                ax_rdf.set_title(f"#{idx+1} RDF", fontsize=8)
+                ax_rdf.set_xlabel("px from centre", fontsize=7)
+                ax_rdf.tick_params(labelsize=7)
+                ax_rdf.legend(fontsize=6)
+                ax_rdf.grid(True, alpha=0.25, which="both")
+                ax_rdf.axis("on")
+
+        fig.tight_layout()
+        return fig
+
+    def _plot_saturated_star_grid(self, matched: list,
+                                   img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+        """Cutout + cross-section grid for saturated bright stars (no Moffat fit)."""
+        if not matched:
+            return None
+
+        bgsub_a = img_a.background_subtracted() if img_a.background is not None else img_a.data
+        bgsub_b = img_b.background_subtracted() if img_b.background is not None else img_b.data
+
+        from core.stretch import stf_stretch
+
+        f_rat = _focal_ratio(img_a)
+        pix_mm = _pixel_size_mm(img_a)
+        t_mm = img_a.filter_thickness_mm
+        if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
+            half = int(t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm))
+        else:
+            half = HALO_FIT_RADIUS_PX
+        half = max(half, HALO_FIT_RADIUS_PX)   # at least HALO_FIT_RADIUS_PX to show the ring
+
+        n = len(matched)
+        n_rows = n
+        n_cols = 4   # img A | img B | cross-section | RDF
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3.5, n_rows * 3.5))
+        if n_rows == 1:
+            axes = axes[np.newaxis, :]
+        for ax in axes.flat:
+            ax.axis("off")
+
+        for idx, (sa, sb) in enumerate(matched):
+            cut_a = self._extract_cutout(bgsub_a, sa["xc"], sa["yc"], half)
+            cut_b = (self._extract_cutout(bgsub_b, sb["xc"], sb["yc"], half)
+                     if sb is not None else np.zeros_like(cut_a))
+
+            peak_a = float(np.percentile(cut_a, 99.9)) if cut_a.size > 0 else 1.0
+            peak_b = float(np.percentile(cut_b, 99.9)) if cut_b.size > 0 else 1.0
+            shared_max = max(peak_a, peak_b, 1e-9)
+
+            disp_a = stf_stretch(cut_a)
+            disp_b = stf_stretch(cut_b)
+
+            ax_a   = axes[idx, 0]
+            ax_b   = axes[idx, 1]
+            ax_xs  = axes[idx, 2]
+            ax_rdf = axes[idx, 3]
+
+            ax_a.imshow(disp_a, origin="lower", cmap="turbo",
+                        vmin=0, vmax=1, interpolation="nearest", aspect="equal")
+            ax_a.set_title(f"S{idx+1} {img_a.label}\n⚠ saturated core", fontsize=9)
+            ax_a.axis("off")
+            ax_a.plot(half, half, '+', color='magenta', markersize=12,
+                      markeredgewidth=1.5, zorder=5)
+
+            ax_b.imshow(disp_b, origin="lower", cmap="turbo",
+                        vmin=0, vmax=1, interpolation="nearest", aspect="equal")
+            title_b = (f"S{idx+1} {img_b.label}\n"
+                       + ("⚠ saturated core" if sb is not None else "(no match)"))
+            ax_b.set_title(title_b, fontsize=9)
+            ax_b.axis("off")
+            if sb is not None:
+                ax_b.plot(half, half, '+', color='magenta', markersize=12,
+                          markeredgewidth=1.5, zorder=5)
+
+            if cut_a.shape[0] > 0:
+                mid_row = cut_a.shape[0] // 2
+                w_min = (min(cut_a.shape[1], cut_b.shape[1]) if sb is not None
+                         else cut_a.shape[1])
+                px_offset = np.arange(w_min) - w_min // 2
+                noise_floor = shared_max * 1e-4
+                xs_a = np.maximum(cut_a[mid_row, :w_min], noise_floor)
+                ax_xs.semilogy(px_offset, xs_a, color="steelblue",
+                               linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_a.label)
+                if sb is not None:
+                    xs_b_vals = np.maximum(cut_b[mid_row, :w_min], noise_floor)
+                    ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
+                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
+                ax_xs.set_title(f"S{idx+1} cross-section", fontsize=8)
+                ax_xs.set_xlabel("px from centre", fontsize=7)
+                ax_xs.tick_params(labelsize=7)
+                ax_xs.legend(fontsize=7)
+                ax_xs.grid(True, alpha=0.25, which="both")
+                ax_xs.axis("on")
+
+            # Per-star RDF (log10-space stats, inverse-transformed for display)
+            rdf_r_a = sa.get("rdf_radii")
+            rdf_m_a = sa.get("rdf_mean")
+            rdf_s_a = sa.get("rdf_std")
+            rdf_r_b = sb.get("rdf_radii") if sb else None
+            rdf_m_b = sb.get("rdf_mean")  if sb else None
+            rdf_s_b = sb.get("rdf_std")   if sb else None
+            if rdf_m_a is not None:
+                ax_rdf.semilogy(rdf_r_a, 10**rdf_m_a, color="steelblue",
+                                linewidth=1.0, label=img_a.label)
+                ax_rdf.fill_between(rdf_r_a,
+                                    10**(rdf_m_a - rdf_s_a),
+                                    10**(rdf_m_a + rdf_s_a),
+                                    alpha=0.25, color="steelblue")
+            if rdf_m_b is not None:
+                ax_rdf.semilogy(rdf_r_b, 10**rdf_m_b, color="tomato",
+                                linewidth=1.0, label=img_b.label)
+                ax_rdf.fill_between(rdf_r_b,
+                                    10**(rdf_m_b - rdf_s_b),
+                                    10**(rdf_m_b + rdf_s_b),
+                                    alpha=0.25, color="tomato")
+            if rdf_m_a is not None or rdf_m_b is not None:
+                ax_rdf.set_title(f"S{idx+1} RDF", fontsize=8)
+                ax_rdf.set_xlabel("px from centre", fontsize=7)
+                ax_rdf.tick_params(labelsize=7)
+                ax_rdf.legend(fontsize=6)
+                ax_rdf.grid(True, alpha=0.25, which="both")
+                ax_rdf.axis("on")
+
+        fig.tight_layout()
+        return fig
+
+    def _plot_rdf_comparison(self, ha: dict, hb: dict,
+                              label_a: str, label_b: str,
+                              title: str) -> "plt.Figure | None":
+        """Overlay Image A (steelblue) and Image B (tomato) aggregate RDFs with ±1σ bands."""
+        r_a = ha.get("rdf_radii")
+        m_a = ha.get("rdf_mean")
+        s_a = ha.get("rdf_std")
+        r_b = hb.get("rdf_radii")
+        m_b = hb.get("rdf_mean")
+        s_b = hb.get("rdf_std")
+
+        if m_a is None and m_b is None:
+            return None
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        if m_a is not None:
+            ax.semilogy(r_a, 10**m_a, color="steelblue", linewidth=1.8, label=label_a)
+            ax.fill_between(r_a,
+                            10**(m_a - s_a), 10**(m_a + s_a),
+                            alpha=0.25, color="steelblue")
+        if m_b is not None:
+            ax.semilogy(r_b, 10**m_b, color="tomato", linewidth=1.8, label=label_b)
+            ax.fill_between(r_b,
+                            10**(m_b - s_b), 10**(m_b + s_b),
+                            alpha=0.25, color="tomato")
+        ax.set_xlabel("Radius (pixels)")
+        ax.set_ylabel("Normalised mean intensity")
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
         fig.tight_layout()
         return fig
 
@@ -946,12 +1460,39 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 <h2>6. Local Contrast / Edge Analysis</h2>
 {err}
 {sl_note}
-<div class="info-box">The Edge Spread Function (ESF) is extracted across a nebula
-emission boundary. Its derivative is the Line Spread Function (LSF). The 10–90%
-edge width measures how sharply the transition is rendered — a smaller value indicates
-better local contrast and resolution of fine structure.
-The normalised ESF shape is <strong>bandwidth-independent ✓</strong>.
-The edge contrast ratio (bright/dark side signal) is <strong>bandwidth-sensitive ⚠</strong>.</div>
+<div class="info-box">
+  <strong>Edge Spread Function (ESF)</strong> — A 1-D intensity profile sampled
+  perpendicular to the detected edge, averaged across the full height of the ROI
+  after rotating so the edge runs vertically. An ideal ESF is a smooth sigmoid:
+  the steeper the transition, the better the local contrast and resolution.
+  Normalised to [0, 1], the ESF shape is <strong>bandwidth-independent ✓</strong>
+  and directly comparable between filters.<br><br>
+  <strong>Line Spread Function (LSF)</strong> — The derivative of the ESF.
+  Ideally a narrow, symmetric peak centred on the edge. A broader LSF peak
+  indicates softer resolution at that spatial frequency. Asymmetry or secondary
+  lobes can indicate optical aberrations, atmospheric dispersion, or poor focus
+  stability during the integration.<br><br>
+  <strong>10–90% edge width</strong> — The pixel (or arcsec) distance between
+  the 10% and 90% intensity points on the ESF. Smaller values indicate a
+  sharper, better-resolved edge. Use the arcsec figure for cross-image comparison
+  if the pixel scales differ.<br><br>
+  The <strong>edge contrast ratio</strong> (bright-side / dark-side mean signal)
+  is <strong>bandwidth-sensitive ⚠</strong>: a narrower filter rejects more
+  continuum background, which can raise this ratio independently of optical quality.
+</div>
+
+<div class="info-box">
+  <strong>How the edge region was selected:</strong>
+  The analysis applies an STF stretch to the background-subtracted image to bring
+  faint emission boundaries into relief, then computes the Sobel gradient magnitude
+  across the whole frame. A 60 × 60 px window is centred on the pixel with the
+  strongest gradient — the sharpest visible edge in the image. If a starless image
+  was provided it is used in place of the stacked image, so the search locates a
+  nebula emission boundary rather than a star profile. Both images are measured over
+  the <em>identical</em> pixel region: Image A's detected ROI coordinates are reused
+  for Image B after alignment, ensuring a direct like-for-like comparison of the
+  same feature.
+</div>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -961,12 +1502,46 @@ The edge contrast ratio (bright/dark side signal) is <strong>bandwidth-sensitive
   <tr><td>Gradient magnitude</td><td>{_val(ea.get("gradient_magnitude"), ".2f")}</td><td>{_val(eb.get("gradient_magnitude"), ".2f")}</td></tr>
 </table>
 
-{"".join([f'<div style="flex:1;">{img}</div>' for img in [img_a, img_b] if img])}
-<div class="info-box"><strong>What to look for:</strong> Both filters should show
-similar edge widths if the images are seeing-limited. A filter with poorer substrate
-quality may show a broader LSF. The edge contrast ratio may differ legitimately
-between bandwidths — a narrower filter rejects more continuum background, which can
-increase this ratio even with identical optical quality.</div>"""
+<div style="display:flex;gap:10px;">
+  {"".join([f'<div style="flex:1;">{img}</div>' for img in [img_a, img_b] if img])}
+</div>
+<div class="info-box" style="font-size:0.9em;">
+  <strong>Figure panels (left → right):</strong>
+  <em>Edge ROI</em> — the 60 × 60 px detected region.
+  The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF
+  scan direction (perpendicular to the edge);
+  the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows
+  the detected edge orientation. &nbsp;
+  <em>ESF</em> — normalised intensity transition; dashed lines mark the 10% and 90%
+  levels used for the edge width measurement. &nbsp;
+  <em>LSF</em> — derivative of the ESF; peak width and symmetry indicate local
+  resolution quality.
+</div>
+
+<div class="info-box">
+  <strong>Interpreting the comparison:</strong>
+  <ul style="margin:0.4em 0 0 1.2em;padding:0;">
+    <li><strong>Edge width (arcsec)</strong> is the primary comparator — it is
+        scale-independent. Prefer the arcsec figure when the two images have
+        different pixel scales.</li>
+    <li>A difference of less than ~10% in edge width is typically within
+        measurement uncertainty for a single edge sample; larger differences
+        are likely real.</li>
+    <li>A <strong>broader LSF peak</strong> in one image suggests lower resolution
+        at the edge spatial frequency. Common causes: worse seeing during that
+        integration, softer focus, or greater atmospheric dispersion from a filter
+        with a very wide bandpass.</li>
+    <li>An <strong>asymmetric or multi-lobed LSF</strong> can indicate optical
+        aberrations, trailing, or non-uniform atmospheric refraction.</li>
+    <li>If edge widths are similar but <strong>gradient magnitude</strong> differs
+        substantially, the difference is likely signal level or background contrast
+        rather than resolution — gradient magnitude is intensity-dependent and
+        should not be used alone to rank image quality.</li>
+    <li>The <strong>edge contrast ratio</strong> is only directly comparable between
+        images of identical bandwidth. A narrower filter naturally yields a higher
+        ratio by suppressing continuum background.</li>
+  </ul>
+</div>"""
 
     def _plot_radial_overlay(self, ra: AnalysisResult, rb: AnalysisResult) -> plt.Figure | None:
         """Overlay both radial power curves on a single axes."""
@@ -1252,7 +1827,7 @@ between the two filters.</p>
             row("MTF50 (cyc/px)", psf_a.get("mtf50_cycles_per_px"),
                 psf_b.get("mtf50_cycles_per_px"), fmt=".4f"),
             row("Halo/core ratio", halo_a.get("halo_to_core_ratio"),
-                halo_b.get("halo_to_core_ratio"), higher_is_better=False),
+                halo_b.get("halo_to_core_ratio"), fmt=".5f", higher_is_better=False),
             row("Edge width 10–90% (px)", edge_a.get("edge_width_10_90_px"),
                 edge_b.get("edge_width_10_90_px"), higher_is_better=False),
             row(f"Edge contrast ratio", edge_a.get("edge_contrast_ratio"),

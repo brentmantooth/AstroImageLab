@@ -136,9 +136,11 @@ class MainWindow(QMainWindow):
             self._control.set_run_enabled(True)
             return
 
-        # Push bandwidth values from the input fields into the image objects
+        # Push bandwidth and filter thickness values from the input fields into the image objects
         self._panel_a.apply_bandwidth_from_field()
         self._panel_b.apply_bandwidth_from_field()
+        self._panel_a.apply_filter_thickness_from_field()
+        self._panel_b.apply_filter_thickness_from_field()
 
         # Warn if either image has no bandwidth set
         missing = [img.label for img in (img_a, img_b) if img.bandwidth_nm is None]

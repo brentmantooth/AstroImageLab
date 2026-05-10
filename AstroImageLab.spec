@@ -1,47 +1,57 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
-from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import copy_metadata
 
 datas = []
 binaries = []
 
-# xisf (XISF image format support) — same treatment as AstroCross template
+# xisf (XISF image format support)
 hiddenimports = ["xisf", "zstandard", "lz4", "lz4.block"]
-datas += collect_data_files("xisf")
 datas += copy_metadata("xisf")
-hiddenimports += collect_submodules("xisf")
-hiddenimports += collect_submodules("zstandard")
-hiddenimports += collect_submodules("lz4")
 binaries += collect_dynamic_libs("zstandard")
 binaries += collect_dynamic_libs("lz4")
 
-# astropy — ships coordinate/FITS reference data files
+# astropy — ships coordinate/FITS reference data files needed at runtime
 datas += collect_data_files("astropy")
-hiddenimports += collect_submodules("astropy")
-
-# photutils — submodule-heavy package
-hiddenimports += collect_submodules("photutils")
-
-# scipy — C extensions and submodules often missed by static analysis
-hiddenimports += collect_submodules("scipy")
 
 # matplotlib — ships mpl-data (fonts, styles, colormaps)
 datas += collect_data_files("matplotlib")
-hiddenimports += collect_submodules("matplotlib")
-
-# pywavelets
-hiddenimports += collect_submodules("pywt")
-
-# astroalign
-hiddenimports += collect_submodules("astroalign")
-
-# Pillow
-hiddenimports += collect_submodules("PIL")
 
 # Bundle the resources/ directory (PNG assets used at runtime)
 datas += [("resources", "resources")]
+
+# Targeted hidden imports — only the subpackages actually used by the app
+hiddenimports += [
+    # astropy
+    "astropy.io.fits",
+    "astropy.nddata",
+    "astropy.stats",
+    "astropy.modeling",
+    "astropy.modeling.models",
+    "astropy.modeling.fitting",
+    "astropy.table",
+    "astropy.visualization",
+    # scipy
+    "scipy.ndimage",
+    "scipy.interpolate",
+    "scipy.optimize",
+    "scipy.signal",
+    # matplotlib
+    "matplotlib.pyplot",
+    "matplotlib.colors",
+    "matplotlib.figure",
+    "matplotlib.backends.backend_agg",
+    # photutils
+    "photutils.background",
+    "photutils.detection",
+    "photutils.psf",
+    "photutils.morphology",
+    # other libraries
+    "pywt",
+    "astroalign",
+    "PIL.Image",
+]
 
 
 a = Analysis(
@@ -53,9 +63,26 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # AstroImageLab uses PyQt6; exclude PySide6 (also installed in conda env) to avoid
-    # PyInstaller's "multiple Qt bindings" error, and Tkinter to reduce bundle size.
-    excludes=["PySide6", "tkinter"],
+    excludes=[
+        "PySide6",
+        "tkinter",
+        # Dev tools dragged in as transitive deps — not needed at runtime
+        "IPython",
+        "sphinx",
+        "docutils",
+        "pytest",
+        "_pytest",
+        "black",
+        "jedi",
+        "parso",
+        "nbformat",
+        "zmq",
+        "astroid",
+        "yapf",
+        "yapf_third_party",
+        "blib2to3",
+        "psutil",
+    ],
     noarchive=False,
     optimize=0,
 )

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures
-import math as _math
 from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.astro_image import AstroImage
-from core.models import AnalysisResult, EDGE_ROI_HALF_WIDTH as _EDGE_HALF
+from core.models import AnalysisResult
 from analysis.psf_analyzer import PSFAnalyzer
 from analysis.halo_analyzer import HaloAnalyzer
 from analysis.ghost_detector import GhostDetector
@@ -16,19 +15,6 @@ from analysis.power_spectrum import PowerSpectrumAnalyzer
 from analysis.image_filters import SpatialDetailAnalyzer
 from report.report_builder import ReportBuilder
 
-
-def _crosshair_to_edge_roi(img: AstroImage,
-                            ch: dict) -> tuple[int, int, int, int]:
-    """Derive a square pixel-space ROI centred on the crosshair midpoint."""
-    H, W = img.data.shape[:2]
-    x0, y0 = ch["x0"] * W, ch["y0"] * H
-    x1, y1 = ch["x1"] * W, ch["y1"] * H
-    mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-    half = max(_EDGE_HALF, int(_math.hypot(x1 - x0, y1 - y0) / 2))
-    return (
-        int(max(0, mx - half)), int(max(0, my - half)),
-        int(min(W, mx + half)), int(min(H, my + half)),
-    )
 
 
 class AnalysisThread(QThread):
@@ -111,29 +97,21 @@ class AnalysisThread(QThread):
         if metrics.get("edge"):
             sl_a = self._starless_a
             sl_b = self._starless_b
-            edge_crosshair = s.get("crosshair")
             if sl_a is not None:
                 sl_a.pixel_scale = img_a.pixel_scale
             if sl_b is not None:
                 sl_b.pixel_scale = img_b.pixel_scale
 
-            def _edge(src_a=sl_a or img_a, src_b=sl_b or img_b,
-                      _aligned=aligned, _ch=edge_crosshair):
+            def _edge(src_a=sl_a or img_a, src_b=sl_b or img_b, _aligned=aligned):
                 ea = EdgeAnalyzer()
-                if _ch is not None:
-                    # User drew a crosshair — use it to pin the edge ROI for both images
-                    roi_a = _crosshair_to_edge_roi(src_a, _ch)
-                    roi_b = _crosshair_to_edge_roi(src_b, _ch)
-                    result_a.edge_metrics = ea.analyze(src_a, roi=roi_a)
-                    result_b.edge_metrics = ea.analyze(src_b, roi=roi_b)
-                else:
-                    result_a.edge_metrics = ea.analyze(src_a, roi=roi)
-                    # When alignment succeeded and no explicit ROI was given, reuse
-                    # A's auto-detected ROI for B so both profiles cover the same
-                    # pixel region (valid because A was registered to B's frame).
-                    shared_roi = (result_a.edge_metrics.get("roi_used")
-                                  if _aligned and roi is None else roi)
-                    result_b.edge_metrics = ea.analyze(src_b, roi=shared_roi)
+                # ESF/LSF always use the EdgeAnalyzer's auto-detected ROI — crosshair
+                # is used by Spatial Detail, not by edge analysis.
+                result_a.edge_metrics = ea.analyze(src_a, roi=roi)
+                # Reuse A's detected ROI for B so both profiles cover the same pixel
+                # region (valid because A was registered to B's frame after alignment).
+                shared_roi = (result_a.edge_metrics.get("roi_used")
+                              if _aligned and roi is None else roi)
+                result_b.edge_metrics = ea.analyze(src_b, roi=shared_roi)
                 result_a.edge_metrics["used_starless"] = sl_a is not None
                 result_b.edge_metrics["used_starless"] = sl_b is not None
             tasks.append(("edge", "Extracting edge spread function", _edge))
