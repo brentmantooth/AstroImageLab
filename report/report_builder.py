@@ -15,7 +15,7 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA
+from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -833,17 +833,22 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
         prof_a = _img_tag((ha.get("figures") or {}).get("halo_profile"), f"Halo {ra.label}")
         prof_b = _img_tag((hb.get("figures") or {}).get("halo_profile"), f"Halo {rb.label}")
         matched = self._match_halo_stars(ra, rb)
-        star_map_tag = _img_tag(self._plot_halo_star_map(matched, img_a),
+        matched_sat = self._match_saturated_stars(ra, rb)
+        sat_stars_a = [sa for sa, _sb in matched_sat]
+        star_map_tag = _img_tag(self._plot_halo_star_map(matched, img_a,
+                                                          saturated=sat_stars_a),
                                 "Halo star field overview")
         grid_tag = _img_tag(self._plot_halo_star_grid(matched, img_a, img_b),
                             "Halo star comparison grid")
+        sat_grid_tag = _img_tag(self._plot_saturated_star_grid(matched_sat, img_a, img_b),
+                                "Saturated star cross-sections")
 
         # Build dynamic optics note from FITS headers
         f_rat = _focal_ratio(img_a)
         pix_mm = _pixel_size_mm(img_a)
         t_mm = img_a.filter_thickness_mm
         if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
-            r_expected = t_mm / (1.5 * f_rat * pix_mm)
+            r_expected = t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm)
             optics_note = (
                 f'<div class="info-box">'
                 f'<strong>Expected halo size for this telescope</strong> '
@@ -871,8 +876,8 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
   <strong>Focal ratio and halo size.</strong>
   The halo radius at the focal plane is approximately:<br>
   <code>R &asymp; t / (n &times; f_ratio &times; pixel_size)</code><br>
-  where <em>t</em> is the filter substrate thickness, <em>n</em> &asymp; 1.5 (glass
-  refractive index), and <em>pixel_size</em> is in mm. Because f-ratio appears in
+  where <em>t</em> is the filter substrate thickness, <em>n</em> &asymp; 1.9 (dichroic
+  filter glass refractive index), and <em>pixel_size</em> is in mm. Because f-ratio appears in
   the denominator, <strong>faster telescopes (lower f-ratio) produce proportionally
   larger halos</strong> for the same filter. A narrowband filter that shows no
   visible halo on a slow f/10 refractor may produce a prominent halo on an f/4
@@ -897,15 +902,20 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
 {star_map_tag}
-<p class="caption">STF-stretched overview of {ra.label}. Red circles mark the top {len(matched)}
-brightest stars common to both images; the rank number matches the pair numbering in the
-cutout grid below.</p>
+<p class="caption">STF-stretched overview of {ra.label}.
+<span style="color:red"><strong>Red circles</strong></span> mark the top {len(matched)}
+brightest unsaturated halo stars (rank matches the cutout grid below).
+<span style="color:magenta"><strong>Magenta dashed circles</strong></span> mark the top {len(matched_sat)}
+brightest saturated stars (S1–S{len(matched_sat)}) shown in the saturated star grid below.</p>
 
 {grid_tag}
 <p class="caption">Top {len(matched)} brightest stars common to both images, side-by-side
 (Image A left, Image B right per pair). STF stretch applied per image to reveal
 faint halo structure. Stars ranked by peak brightness (brightest first).
 <em>Turbo</em> colormap: bright = high intensity.</p>
+
+{sat_grid_tag}
+{"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped.</p>'}
 
 <div class="info-box"><strong>Ideal:</strong> Halo/core ratio &lt; 0.05 is excellent;
 &gt; 0.15 indicates significant internal reflection that will reduce contrast on
@@ -949,7 +959,29 @@ bright stars.</div>"""
             sorted_a = sorted(stars_a, key=lambda s: s.get("peak", 0.0), reverse=True)
             return [(sa, None) for sa in sorted_a[:20]]
 
-    def _plot_halo_star_map(self, matched: list, img_a: AstroImage) -> plt.Figure | None:
+    @staticmethod
+    def _match_saturated_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
+        """Return up to 10 (sa, sb) pairs of saturated stars, sorted by image-A peak."""
+        stars_a = (ra.halo_metrics or {}).get("saturated_star_data", [])
+        stars_b = (rb.halo_metrics or {}).get("saturated_star_data", [])
+        if not stars_a:
+            return []
+        if stars_b:
+            xs_b = np.array([s["xc"] for s in stars_b])
+            ys_b = np.array([s["yc"] for s in stars_b])
+            matched = []
+            for sa in stars_a:
+                dists = np.sqrt((xs_b - sa["xc"]) ** 2 + (ys_b - sa["yc"]) ** 2)
+                idx = int(np.argmin(dists))
+                if dists[idx] <= 20.0:
+                    matched.append((sa, stars_b[idx]))
+            matched.sort(key=lambda p: p[0].get("peak", 0.0), reverse=True)
+            return matched[:10]
+        else:
+            return [(sa, None) for sa in stars_a[:10]]
+
+    def _plot_halo_star_map(self, matched: list, img_a: AstroImage,
+                             saturated: list = ()) -> plt.Figure | None:
         """Full-field STF-stretched overview with top-N halo stars circled and ranked."""
         if not matched:
             return None
@@ -987,8 +1019,31 @@ bright stars.</div>"""
                     fontweight="bold", ha="left", va="bottom",
                     clip_on=True)
 
-        ax.set_title(f"{img_a.label} — top {len(matched)} brightest halo stars",
-                     fontsize=10)
+        for i, sa in enumerate(saturated, start=1):
+            xd = sa["xc"] * scale
+            yd = sa["yc"] * scale
+            circ = plt.Circle((xd, yd), circle_r, color="magenta",
+                               fill=False, linewidth=1.2, linestyle="--")
+            ax.add_patch(circ)
+            ax.text(xd + circle_r * 0.8, yd + circle_r * 0.8,
+                    f"S{i}", color="magenta", fontsize=font_size,
+                    fontweight="bold", ha="left", va="bottom",
+                    clip_on=True)
+
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor="none", edgecolor="red", label="Unsaturated halo stars"),
+            Patch(facecolor="none", edgecolor="magenta", linestyle="--",
+                  label="Saturated stars"),
+        ]
+        ax.legend(handles=legend_elements, loc="upper right", fontsize=font_size,
+                  framealpha=0.6, facecolor="black", labelcolor="white")
+
+        n_sat = len(saturated)
+        title = f"{img_a.label} — top {len(matched)} brightest halo stars"
+        if n_sat:
+            title += f" + {n_sat} saturated"
+        ax.set_title(title, fontsize=10)
         ax.axis("off")
         fig.tight_layout(pad=0.3)
         return fig
@@ -1008,18 +1063,18 @@ bright stars.</div>"""
         pix_mm = _pixel_size_mm(img_a)
         t_mm = img_a.filter_thickness_mm
         if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
-            optics_half = int(t_mm / (2.0 * f_rat * pix_mm))
+            optics_half = int(t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm))
         else:
             optics_half = HALO_FIT_RADIUS_PX
 
         n = len(matched)
-        pairs_per_row = min(2, n)
+        pairs_per_row = 1
         cols_per_pair = 3   # img A | img B | cross-section
         n_rows = (n + pairs_per_row - 1) // pairs_per_row
         n_cols = pairs_per_row * cols_per_pair
 
         fig, axes = plt.subplots(n_rows, n_cols,
-                                  figsize=(n_cols * 2.2, n_rows * 2.8))
+                                  figsize=(n_cols * 4.0, n_rows * 3.5))
         if n_rows == 1:
             axes = axes[np.newaxis, :]
         for ax in axes.flat:
@@ -1056,7 +1111,7 @@ bright stars.</div>"""
             h2c_a = sa.get("halo_to_core_ratio")
             ax_a.set_title(f"#{idx+1} {img_a.label}"
                            + (f"\nh/c={h2c_a:.5f}" if h2c_a is not None else ""),
-                           fontsize=7)
+                           fontsize=9)
             ax_a.axis("off")
 
             ax_b.imshow(disp_b, origin="lower", cmap="turbo",
@@ -1065,9 +1120,9 @@ bright stars.</div>"""
                 h2c_b = sb.get("halo_to_core_ratio")
                 ax_b.set_title(f"#{idx+1} {img_b.label}"
                                + (f"\nh/c={h2c_b:.5f}" if h2c_b is not None else ""),
-                               fontsize=7)
+                               fontsize=9)
             else:
-                ax_b.set_title(f"#{idx+1} {img_b.label}\n(no match)", fontsize=7)
+                ax_b.set_title(f"#{idx+1} {img_b.label}\n(no match)", fontsize=9)
             ax_b.axis("off")
 
             # Horizontal cross-section through the star centre — log y-axis
@@ -1086,16 +1141,102 @@ bright stars.</div>"""
                 if xs_b_vals is not None:
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
                                    linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
-                ax_xs.set_title(f"#{idx+1} cross-section", fontsize=7)
-                ax_xs.set_xlabel("px from centre", fontsize=6)
-                ax_xs.tick_params(labelsize=6)
-                ax_xs.legend(fontsize=6)
+                ax_xs.set_title(f"#{idx+1} cross-section", fontsize=8)
+                ax_xs.set_xlabel("px from centre", fontsize=7)
+                ax_xs.tick_params(labelsize=7)
+                ax_xs.legend(fontsize=7)
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
 
         fig.suptitle(
             f"Top {n} brightest stars common to both images — {img_a.label} (left) vs {img_b.label} (right) "
             f"per pair  |  STF stretch per image  |  turbo colormap",
+            fontsize=9,
+        )
+        fig.tight_layout()
+        return fig
+
+    def _plot_saturated_star_grid(self, matched: list,
+                                   img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+        """Cutout + cross-section grid for saturated bright stars (no Moffat fit)."""
+        if not matched:
+            return None
+
+        bgsub_a = img_a.background_subtracted() if img_a.background is not None else img_a.data
+        bgsub_b = img_b.background_subtracted() if img_b.background is not None else img_b.data
+
+        from core.stretch import stf_stretch
+
+        f_rat = _focal_ratio(img_a)
+        pix_mm = _pixel_size_mm(img_a)
+        t_mm = img_a.filter_thickness_mm
+        if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
+            half = int(t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm))
+        else:
+            half = HALO_FIT_RADIUS_PX
+        half = max(half, HALO_FIT_RADIUS_PX)   # at least HALO_FIT_RADIUS_PX to show the ring
+
+        n = len(matched)
+        n_rows = n
+        n_cols = 3   # img A | img B | cross-section
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4.0, n_rows * 3.5))
+        if n_rows == 1:
+            axes = axes[np.newaxis, :]
+        for ax in axes.flat:
+            ax.axis("off")
+
+        for idx, (sa, sb) in enumerate(matched):
+            cut_a = self._extract_cutout(bgsub_a, sa["xc"], sa["yc"], half)
+            cut_b = (self._extract_cutout(bgsub_b, sb["xc"], sb["yc"], half)
+                     if sb is not None else np.zeros_like(cut_a))
+
+            peak_a = float(np.percentile(cut_a, 99.9)) if cut_a.size > 0 else 1.0
+            peak_b = float(np.percentile(cut_b, 99.9)) if cut_b.size > 0 else 1.0
+            shared_max = max(peak_a, peak_b, 1e-9)
+
+            disp_a = stf_stretch(cut_a)
+            disp_b = stf_stretch(cut_b)
+
+            ax_a  = axes[idx, 0]
+            ax_b  = axes[idx, 1]
+            ax_xs = axes[idx, 2]
+
+            ax_a.imshow(disp_a, origin="lower", cmap="turbo",
+                        vmin=0, vmax=1, interpolation="nearest", aspect="equal")
+            ax_a.set_title(f"S{idx+1} {img_a.label}\n⚠ saturated core", fontsize=9)
+            ax_a.axis("off")
+
+            ax_b.imshow(disp_b, origin="lower", cmap="turbo",
+                        vmin=0, vmax=1, interpolation="nearest", aspect="equal")
+            title_b = (f"S{idx+1} {img_b.label}\n"
+                       + ("⚠ saturated core" if sb is not None else "(no match)"))
+            ax_b.set_title(title_b, fontsize=9)
+            ax_b.axis("off")
+
+            if cut_a.shape[0] > 0:
+                mid_row = cut_a.shape[0] // 2
+                w_min = (min(cut_a.shape[1], cut_b.shape[1]) if sb is not None
+                         else cut_a.shape[1])
+                px_offset = np.arange(w_min) - w_min // 2
+                noise_floor = shared_max * 1e-4
+                xs_a = np.maximum(cut_a[mid_row, :w_min], noise_floor)
+                ax_xs.semilogy(px_offset, xs_a, color="steelblue",
+                               linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_a.label)
+                if sb is not None:
+                    xs_b_vals = np.maximum(cut_b[mid_row, :w_min], noise_floor)
+                    ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
+                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
+                ax_xs.set_title(f"S{idx+1} cross-section", fontsize=8)
+                ax_xs.set_xlabel("px from centre", fontsize=7)
+                ax_xs.tick_params(labelsize=7)
+                ax_xs.legend(fontsize=7)
+                ax_xs.grid(True, alpha=0.25, which="both")
+                ax_xs.axis("on")
+
+        fig.suptitle(
+            f"Saturated bright stars — {img_a.label} (left) vs {img_b.label} (right)  |  "
+            f"STF stretch  |  turbo colormap  |  halo/core ratio not computed (core saturated)",
             fontsize=9,
         )
         fig.tight_layout()

@@ -14,6 +14,7 @@ from core.models import HALO_FIT_RADIUS_PX, HALO_MIN_STAR_SNR
 from analysis.star_catalog import StarCatalogBuilder
 
 RADIAL_BIN_WIDTH = 0.5   # px
+N_SATURATED_DISPLAY = 10
 
 
 def _moffat1d(r: np.ndarray, amp: float, gamma: float, alpha: float) -> np.ndarray:
@@ -96,6 +97,8 @@ class HaloAnalyzer:
                     common_r, stacked, fit, image.label)
             })
 
+        result["saturated_star_data"] = self._collect_saturated_stars(catalog, image)
+
         return result
 
     def _select_halo_stars(self, catalog, image: AstroImage):
@@ -136,6 +139,36 @@ class HaloAnalyzer:
         if not isolated:
             return catalog[:0]
         return Table(rows=isolated)
+
+    def _collect_saturated_stars(self, catalog, image: AstroImage) -> list:
+        """Return the top N brightest saturated stars (display-only — no Moffat fit)."""
+        sat = image.saturation_threshold()
+        h, w = image.data.shape
+        margin = HALO_FIT_RADIUS_PX + 5
+
+        candidates = []
+        for row in catalog:
+            if row["peak"] < sat:
+                continue
+            x, y = float(row["xcentroid"]), float(row["ycentroid"])
+            if x < margin or x > w - margin or y < margin or y > h - margin:
+                continue
+            candidates.append({"xc": x, "yc": y, "peak": float(row["peak"])})
+
+        # Basic isolation: drop if another saturated candidate is within 50 px
+        isolated = []
+        for i, ca in enumerate(candidates):
+            too_close = any(
+                j != i
+                and abs(cb["xc"] - ca["xc"]) < 50
+                and abs(cb["yc"] - ca["yc"]) < 50
+                for j, cb in enumerate(candidates)
+            )
+            if not too_close:
+                isolated.append(ca)
+
+        isolated.sort(key=lambda s: s["peak"], reverse=True)
+        return isolated[:N_SATURATED_DISPLAY]
 
     def _extract_radial_profile(self, data: np.ndarray,
                                   xc: float, yc: float,
