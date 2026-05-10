@@ -272,6 +272,17 @@ class ImagePanel(QWidget):
         bw_row.addStretch()
         meta_outer.addLayout(bw_row)
 
+        # Filter thickness field (editable)
+        self._thickness_edit = QLineEdit()
+        self._thickness_edit.setText("1")
+        self._thickness_edit.setMaximumWidth(80)
+        thickness_row = QHBoxLayout()
+        thickness_row.addWidget(QLabel("Filter thickness:"))
+        thickness_row.addWidget(self._thickness_edit)
+        thickness_row.addWidget(QLabel("mm"))
+        thickness_row.addStretch()
+        meta_outer.addLayout(thickness_row)
+
         # Starless filename label
         sl_row = QHBoxLayout()
         sl_row.addWidget(QLabel("Starless:"))
@@ -373,6 +384,19 @@ class ImagePanel(QWidget):
         if txt:
             try:
                 self._image.bandwidth_nm = float(txt)
+            except ValueError:
+                pass
+
+    def apply_filter_thickness_from_field(self) -> None:
+        """Push the filter thickness QLineEdit value into the AstroImage."""
+        if self._image is None:
+            return
+        txt = self._thickness_edit.text().strip()
+        if txt:
+            try:
+                val = float(txt)
+                if val > 0:
+                    self._image.filter_thickness_mm = val
             except ValueError:
                 pass
 

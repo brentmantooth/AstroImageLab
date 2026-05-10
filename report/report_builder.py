@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import io
@@ -119,6 +119,31 @@ def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[st
     if higher_is_better:
         return ("better", "worse") if val_a >= val_b else ("worse", "better")
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
+
+
+def _focal_ratio(img: AstroImage) -> float | None:
+    hdr = img.header
+    if hdr is None:
+        return None
+    for kw in ("FOCRATIO", "FRATIO", "FNUMBER"):
+        try:
+            return float(hdr[kw])
+        except (KeyError, ValueError, TypeError):
+            pass
+    try:
+        return float(hdr["FOCALLEN"]) / float(hdr["APTDIA"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _pixel_size_mm(img: AstroImage) -> float | None:
+    hdr = img.header
+    if hdr is None:
+        return None
+    try:
+        return float(hdr["XPIXSZ"]) / 1000.0
+    except (KeyError, ValueError, TypeError):
+        return None
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
@@ -423,6 +448,53 @@ These metrics are normalised to unit amplitude and are valid regardless of filte
   <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td></tr>
 </table>
 
+<div class="info-box">
+  <strong>Understanding the PSF metrics:</strong><br><br>
+
+  <strong>FWHM (Full Width at Half Maximum)</strong> &mdash; The diameter of a star
+  image at half its peak brightness. Smaller = sharper. Ground-based imaging is
+  typically seeing-limited (1&ndash;3 arcsec); the best sites achieve sub-arcsecond
+  FWHM. For filter comparison the arcsec value is the primary metric (it is
+  scale-independent). A larger FWHM in one image may indicate that session had
+  worse seeing, or that the filter introduces additional softening (e.g. from
+  substrate wedge or coating scatter).<br><br>
+
+  <strong>Moffat &beta; (beta)</strong> &mdash; The wing-falloff exponent of the Moffat
+  profile fitted to each star: I(r) = A &times; (1 + (r/&gamma;)&sup2;)<sup>&minus;&beta;</sup>. Higher &beta;
+  means the stellar wings fall off more steeply, leaving less scattered light
+  outside the core. Pure Kolmogorov atmospheric turbulence predicts &beta; &asymp; 4.765;
+  in practice values of 2&ndash;6 are typical. <strong>Ideal: &beta; &gt; 3.</strong> Low
+  &beta; (1&ndash;2) indicates extended wings from vibration, wind shake, or poor tracking;
+  very high &beta; (&gt; 6) suggests an unusually compact PSF or unusually thin
+  atmosphere. A consistently lower &beta; for one filter implies it scatters more light
+  into the halo/wing region &mdash; compare with the Halo Analysis section.<br><br>
+
+  <strong>Ellipticity</strong> &mdash; How non-circular the average star shape is,
+  measured from second-order image moments (0 = perfectly round, 1 = infinitely
+  elongated). <strong>Ideal: &lt; 0.05.</strong> Values of 0.05&ndash;0.10 are
+  borderline; &gt; 0.10 indicates a significant elongation that may reduce
+  effective resolution in one axis. Common causes: tracking drift, autoguider
+  lag, astigmatism, or filter substrate wedge. A large difference in ellipticity
+  between the two filters is a specific indicator of filter tilt or wedge.<br><br>
+
+  <strong>Eccentricity</strong> &mdash; A complementary measure of star elongation
+  derived from the ratio of semi-minor to semi-major axis: e = &radic;(1 &minus; (b/a)&sup2;).
+  <strong>Ideal: &lt; 0.10.</strong> Unlike ellipticity, eccentricity weights
+  extreme elongation more strongly.<br><br>
+
+  <strong>MTF50 (cycles/pixel)</strong> &mdash; The spatial frequency at which the
+  Modulation Transfer Function falls to 50% of its peak. Higher MTF50 = the
+  system preserves contrast at finer scales. The maximum physically possible
+  value is 0.5 cyc/px (Nyquist limit for fully-sampled images).
+  <strong>Ideal: as high as possible; typical ground-based: 0.1&ndash;0.3 cyc/px.</strong>
+  MTF50 is the single most useful number for ranking overall sharpness.<br><br>
+
+  <strong>MTF @ Nyquist</strong> &mdash; The residual MTF at exactly 0.5 cyc/px.
+  For a well-sampled, diffraction-limited system this should approach 0.
+  <strong>Ideal: close to 0.</strong> A notably non-zero value at Nyquist can
+  indicate undersampling (FWHM &lt; ~2 px) or aliasing from a very sharp PSF.
+</div>
+
 {img_fwhm_map}
 <p class="caption">Smoothed FWHM map (px) across the field. Shared colour scale between both images. Dots mark individual star measurements.</p>
 {img_fwhm_hist}
@@ -457,19 +529,68 @@ filter flatness and seating.</div>
 consistent star size between filters. Systematic offset reveals which filter produces
 tighter stars. Points far from the line indicate individual star measurement scatter.</p>
 
+<div class="info-box">
+  <strong>How the Empirical PSF (ePSF) was built.</strong>
+  The ePSF is constructed from all stars that passed the quality filters
+  (unsaturated, adequate SNR, isolated from neighbours). Cutouts of each star
+  are extracted from the background-subtracted image with a box size of
+  max(25 px, 6 &times; FWHM) to capture the full wing extent. The
+  <em>photutils</em> <code>EPSFBuilder</code> iteratively stacks these cutouts
+  at <strong>2&times; oversampling</strong>, aligning each star to its sub-pixel
+  centroid position to fill in the finer spatial grid. After 5 iterations the
+  model converges to the average PSF across all selected stars. The result is
+  displayed on a logarithmic scale to reveal structure spanning several orders
+  of magnitude in brightness.<br><br>
+
+  <strong>What to look for:</strong>
+  <ul style="margin:0.4em 0 0 1.2em;padding:0;">
+    <li><strong>Circular, compact core</strong> &mdash; ideal outcome: good focus,
+        stable atmosphere, no significant aberrations.</li>
+    <li><strong>Elliptical core</strong> &mdash; the elongation direction indicates
+        the dominant cause: tracking drift (RA or Dec axis), astigmatism
+        (diagonal elongation), or field rotation (curved smear on Alt-Az mounts).
+        The eccentricity and position angle metrics in the table quantify this.</li>
+    <li><strong>Asymmetric tails extending to one side</strong> &mdash; most commonly
+        tracking or guiding drift in one axis, coma from the optical system
+        (particularly if stars across the whole field share the same tail direction),
+        or wind-induced mount vibration. If both filters show the same tail
+        direction and magnitude, the cause is common to both capture sessions
+        (optical or tracking), not filter-specific.</li>
+    <li><strong>Extended, diffuse wings</strong> &mdash; poor seeing, thermal
+        currents in the optical path, or vibration broadening the PSF without
+        a directional bias.</li>
+    <li><strong>Steep, clean falloff</strong> &mdash; the flux drops 2&ndash;3 orders of
+        magnitude within a few FWHM. This is ideal: most of the star&rsquo;s light
+        is in the core, minimising contamination of adjacent nebula structure.
+        A steeper falloff (higher Moffat &beta;) is always better for contrast on
+        fine detail next to bright stars.</li>
+    <li><strong>Airy-ring structure</strong> &mdash; concentric rings around the
+        core indicate near-diffraction-limited performance (exceptional seeing
+        and optics, rarely seen in long-exposure deep-sky imaging).</li>
+  </ul>
+</div>
+
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_epsf_a}</div>
   <div style="flex:1;">{img_epsf_b}</div>
 </div>
-<p class="caption">Empirical PSFs (log scale). Tighter, rounder cores indicate
-better optical quality. Ellipticity &gt; 0.1 may indicate filter tilt or astigmatism.</p>
+<p class="caption">Empirical PSFs (log&#x2081;&#x208a; scale, viridis colormap). The ePSF is
+built at 2&times; oversampling from all quality-filtered stars in the field. A circular,
+compact core with rapid falloff is ideal. Asymmetric tails indicate tracking,
+guiding, or optical aberrations &mdash; compare tail direction and magnitude between the
+two images to distinguish session-specific from system-wide causes.</p>
 
 {self._psf_simulation_html(ra, rb)}
 
-<div class="info-box"><strong>What to look for:</strong> A smaller FWHM and higher
-MTF50 indicate sharper image resolution. A higher Moffat β (steeper wing falloff)
-indicates less scattered light. Ellipticity should be similar between filters;
-large differences may indicate filter flatness issues.</div>"""
+<div class="info-box"><strong>Comparing the two images:</strong>
+A smaller FWHM (arcsec) and higher MTF50 indicate sharper resolution &mdash;
+these are the primary quality indicators for filter comparison. A higher
+Moffat &beta; indicates less scattered light in the wings. Ellipticity should be
+similar between filters; a large difference suggests filter tilt, substrate
+wedge, or different seeing conditions between sessions. If the ePSFs show
+the same asymmetric tail in both images, the cause is common to both (optics
+or tracking) and does not reflect a filter quality difference &mdash; what matters
+for comparison is whether the tail is <em>more pronounced</em> in one image.</div>"""
 
     @staticmethod
     def _plot_psf_spatial_map(
@@ -710,13 +831,49 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
         grid_tag = _img_tag(self._plot_halo_star_grid(ra, rb, img_a, img_b),
                             "Halo star comparison grid")
 
+        # Build dynamic optics note from FITS headers
+        f_rat = _focal_ratio(img_a)
+        pix_mm = _pixel_size_mm(img_a)
+        t_mm = img_a.filter_thickness_mm
+        if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
+            r_expected = t_mm / (1.5 * f_rat * pix_mm)
+            optics_note = (
+                f'<div class="info-box">'
+                f'<strong>Expected halo size for this telescope</strong> '
+                f'(f/{f_rat:.1f}, {pix_mm*1000:.2f} µm pixels, '
+                f'{t_mm:.1f} mm filter thickness): '
+                f'halo radius ≈ <strong>{r_expected:.0f} px</strong>. '
+                f'The cutout windows in the grid below are sized to '
+                f'2× this expected radius to ensure the full halo extent is visible.'
+                f'</div>'
+            )
+        else:
+            optics_note = ""
+
         return f"""
-<h2>4. Halo Analysis &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
+<h2>4. Halo Analysis &nbsp;<span class="metric-label-ok">&#10003; bandwidth-independent</span></h2>
 {err}
-<div class="info-box">Halos around bright stars result from internal reflections
-within the filter substrate and AR coatings. The halo-to-core ratio measures the
-amplitude of the broad halo component relative to the star core. This ratio is
-normalised and valid across different filter bandwidths.</div>
+<div class="info-box">
+  <strong>What causes halos?</strong>
+  Halos around bright stars in narrowband images arise from internal reflections
+  within the filter substrate and its AR coatings. A fraction of the incoming
+  light reflects off the back surface of the filter glass, travels back through
+  the substrate, reflects off the front surface, and then exits &mdash; offset laterally
+  from the direct beam. This offset is what appears as the circular glow surrounding
+  bright stars.<br><br>
+  <strong>Focal ratio and halo size.</strong>
+  The halo radius at the focal plane is approximately:<br>
+  <code>R &asymp; t / (n &times; f_ratio &times; pixel_size)</code><br>
+  where <em>t</em> is the filter substrate thickness, <em>n</em> &asymp; 1.5 (glass
+  refractive index), and <em>pixel_size</em> is in mm. Because f-ratio appears in
+  the denominator, <strong>faster telescopes (lower f-ratio) produce proportionally
+  larger halos</strong> for the same filter. A narrowband filter that shows no
+  visible halo on a slow f/10 refractor may produce a prominent halo on an f/4
+  Newtonian. This is a property of the optical system, not the filter quality alone.
+  The halo-to-core <em>ratio</em> (amplitude of the halo relative to the star core)
+  is a more filter-specific quality indicator than the raw halo size.
+</div>
+{optics_note}
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -733,10 +890,10 @@ normalised and valid across different filter bandwidths.</div>
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
 {grid_tag}
-<p class="caption">Top-ranked halo stars side-by-side (Image A left, Image B right per
-pair). Both cutouts in each pair share the same brightness scale so halo brightness is
-directly comparable. Stars sorted by halo/core ratio (highest first). √ stretch applied
-to reveal faint halo structure. <em>Inferno</em> colormap: bright = high intensity.</p>
+<p class="caption">Top 20 brightest stars common to both images, side-by-side
+(Image A left, Image B right per pair). STF stretch applied per image to reveal
+faint halo structure. Stars ranked by peak brightness (brightest first).
+<em>Turbo</em> colormap: bright = high intensity.</p>
 
 <div class="info-box"><strong>Ideal:</strong> Halo/core ratio &lt; 0.05 is excellent;
 &gt; 0.15 indicates significant internal reflection that will reduce contrast on
@@ -745,11 +902,18 @@ bright stars.</div>"""
     def _extract_cutout(self, data: np.ndarray,
                          xc: float, yc: float, half: int) -> np.ndarray:
         h, w = data.shape
-        x0 = max(0, int(xc) - half)
-        x1 = min(w, int(xc) + half + 1)
-        y0 = max(0, int(yc) - half)
-        y1 = min(h, int(yc) + half + 1)
-        return data[y0:y1, x0:x1].copy()
+        size = 2 * half + 1
+        cut = np.zeros((size, size), dtype=np.float64)
+        x0_src = max(0, int(xc) - half)
+        x1_src = min(w, int(xc) + half + 1)
+        y0_src = max(0, int(yc) - half)
+        y1_src = min(h, int(yc) + half + 1)
+        x0_dst = x0_src - (int(xc) - half)
+        x1_dst = x0_dst + (x1_src - x0_src)
+        y0_dst = y0_src - (int(yc) - half)
+        y1_dst = y0_dst + (y1_src - y0_src)
+        cut[y0_dst:y1_dst, x0_dst:x1_dst] = data[y0_src:y1_src, x0_src:x1_src]
+        return cut
 
     def _plot_halo_star_grid(self, ra: AnalysisResult, rb: AnalysisResult,
                               img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
@@ -758,25 +922,38 @@ bright stars.</div>"""
         if not stars_a:
             return None
 
-        top_a = stars_a[:20]
-
-        # Nearest-neighbour match in B within 20 px
-        matched = []
+        # Match all stars from A to B within 20 px, rank by brightness, take top 20
         if stars_b:
             xs_b = np.array([s["xc"] for s in stars_b])
             ys_b = np.array([s["yc"] for s in stars_b])
-            for sa in top_a:
+            all_matched = []
+            for sa in stars_a:
                 dists = np.sqrt((xs_b - sa["xc"]) ** 2 + (ys_b - sa["yc"]) ** 2)
                 idx = int(np.argmin(dists))
-                matched.append((sa, stars_b[idx] if dists[idx] <= 20.0 else None))
+                if dists[idx] <= 20.0:
+                    all_matched.append((sa, stars_b[idx]))
+            all_matched.sort(key=lambda pair: pair[0].get("peak", 0.0), reverse=True)
+            matched = all_matched[:20]
         else:
-            matched = [(sa, None) for sa in top_a]
+            sorted_a = sorted(stars_a, key=lambda s: s.get("peak", 0.0), reverse=True)
+            matched = [(sa, None) for sa in sorted_a[:20]]
 
         if not matched:
             return None
 
         bgsub_a = img_a.background_subtracted() if img_a.background is not None else img_a.data
         bgsub_b = img_b.background_subtracted() if img_b.background is not None else img_b.data
+
+        from core.stretch import stf_stretch
+
+        # Compute optics-based cutout size once from image headers
+        f_rat = _focal_ratio(img_a)
+        pix_mm = _pixel_size_mm(img_a)
+        t_mm = img_a.filter_thickness_mm
+        if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
+            optics_half = int(t_mm / (2.0 * f_rat * pix_mm))
+        else:
+            optics_half = HALO_FIT_RADIUS_PX
 
         n = len(matched)
         pairs_per_row = min(2, n)
@@ -795,28 +972,21 @@ bright stars.</div>"""
             row = idx // pairs_per_row
             col_base = (idx % pairs_per_row) * cols_per_pair
 
-            r_a = sa.get("halo_radius_px") or HALO_FIT_RADIUS_PX
-            r_b = (sb.get("halo_radius_px") if sb else r_a) or HALO_FIT_RADIUS_PX
-            half = max(int(max(r_a, r_b) * 2.5), HALO_FIT_RADIUS_PX)
+            r_a = sa.get("halo_radius_px") or optics_half
+            r_b = (sb.get("halo_radius_px") if sb else r_a) or optics_half
+            half = max(int(max(r_a, r_b) * 2.0), optics_half)
 
             cut_a = self._extract_cutout(bgsub_a, sa["xc"], sa["yc"], half)
             cut_b = (self._extract_cutout(bgsub_b, sb["xc"], sb["yc"], half)
                      if sb is not None else np.zeros_like(cut_a))
 
-            # Shared normalisation: scale to 99.9th-pct peak so core clips, halos visible
+            # shared_max retained for cross-section noise floor
             peak_a = float(np.percentile(cut_a, 99.9)) if cut_a.size > 0 else 1.0
             peak_b = float(np.percentile(cut_b, 99.9)) if cut_b.size > 0 else 1.0
             shared_max = max(peak_a, peak_b, 1e-9)
 
-            # Asinh stretch: softening=0.005 maps 5% of peak to ~50% of display range,
-            # making faint halo emission clearly visible while the core clips cleanly.
-            _soft = 0.005
-            _norm = np.arcsinh(1.0 / _soft)
-            def _asinh(arr):
-                return np.arcsinh(np.clip(arr / shared_max, 0.0, None) / _soft) / _norm
-
-            disp_a = np.clip(_asinh(cut_a), 0.0, 1.0)
-            disp_b = np.clip(_asinh(cut_b), 0.0, 1.0)
+            disp_a = stf_stretch(cut_a)
+            disp_b = stf_stretch(cut_b)
 
             ax_a = axes[row, col_base]
             ax_b = axes[row, col_base + 1]
@@ -865,8 +1035,8 @@ bright stars.</div>"""
                 ax_xs.axis("on")
 
         fig.suptitle(
-            f"Top {n} halo stars — {ra.label} (left) vs {rb.label} (right) "
-            f"per pair  |  shared scale per pair  |  asinh stretch (softening=0.005, turbo colormap)",
+            f"Top {n} brightest stars common to both images — {ra.label} (left) vs {rb.label} (right) "
+            f"per pair  |  STF stretch per image  |  turbo colormap",
             fontsize=9,
         )
         fig.tight_layout()
@@ -946,12 +1116,39 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 <h2>6. Local Contrast / Edge Analysis</h2>
 {err}
 {sl_note}
-<div class="info-box">The Edge Spread Function (ESF) is extracted across a nebula
-emission boundary. Its derivative is the Line Spread Function (LSF). The 10–90%
-edge width measures how sharply the transition is rendered — a smaller value indicates
-better local contrast and resolution of fine structure.
-The normalised ESF shape is <strong>bandwidth-independent ✓</strong>.
-The edge contrast ratio (bright/dark side signal) is <strong>bandwidth-sensitive ⚠</strong>.</div>
+<div class="info-box">
+  <strong>Edge Spread Function (ESF)</strong> — A 1-D intensity profile sampled
+  perpendicular to the detected edge, averaged across the full height of the ROI
+  after rotating so the edge runs vertically. An ideal ESF is a smooth sigmoid:
+  the steeper the transition, the better the local contrast and resolution.
+  Normalised to [0, 1], the ESF shape is <strong>bandwidth-independent ✓</strong>
+  and directly comparable between filters.<br><br>
+  <strong>Line Spread Function (LSF)</strong> — The derivative of the ESF.
+  Ideally a narrow, symmetric peak centred on the edge. A broader LSF peak
+  indicates softer resolution at that spatial frequency. Asymmetry or secondary
+  lobes can indicate optical aberrations, atmospheric dispersion, or poor focus
+  stability during the integration.<br><br>
+  <strong>10–90% edge width</strong> — The pixel (or arcsec) distance between
+  the 10% and 90% intensity points on the ESF. Smaller values indicate a
+  sharper, better-resolved edge. Use the arcsec figure for cross-image comparison
+  if the pixel scales differ.<br><br>
+  The <strong>edge contrast ratio</strong> (bright-side / dark-side mean signal)
+  is <strong>bandwidth-sensitive ⚠</strong>: a narrower filter rejects more
+  continuum background, which can raise this ratio independently of optical quality.
+</div>
+
+<div class="info-box">
+  <strong>How the edge region was selected:</strong>
+  The analysis applies an STF stretch to the background-subtracted image to bring
+  faint emission boundaries into relief, then computes the Sobel gradient magnitude
+  across the whole frame. A 60 × 60 px window is centred on the pixel with the
+  strongest gradient — the sharpest visible edge in the image. If a starless image
+  was provided it is used in place of the stacked image, so the search locates a
+  nebula emission boundary rather than a star profile. Both images are measured over
+  the <em>identical</em> pixel region: Image A's detected ROI coordinates are reused
+  for Image B after alignment, ensuring a direct like-for-like comparison of the
+  same feature.
+</div>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -961,12 +1158,46 @@ The edge contrast ratio (bright/dark side signal) is <strong>bandwidth-sensitive
   <tr><td>Gradient magnitude</td><td>{_val(ea.get("gradient_magnitude"), ".2f")}</td><td>{_val(eb.get("gradient_magnitude"), ".2f")}</td></tr>
 </table>
 
-{"".join([f'<div style="flex:1;">{img}</div>' for img in [img_a, img_b] if img])}
-<div class="info-box"><strong>What to look for:</strong> Both filters should show
-similar edge widths if the images are seeing-limited. A filter with poorer substrate
-quality may show a broader LSF. The edge contrast ratio may differ legitimately
-between bandwidths — a narrower filter rejects more continuum background, which can
-increase this ratio even with identical optical quality.</div>"""
+<div style="display:flex;gap:10px;">
+  {"".join([f'<div style="flex:1;">{img}</div>' for img in [img_a, img_b] if img])}
+</div>
+<div class="info-box" style="font-size:0.9em;">
+  <strong>Figure panels (left → right):</strong>
+  <em>Edge ROI</em> — the 60 × 60 px detected region.
+  The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF
+  scan direction (perpendicular to the edge);
+  the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows
+  the detected edge orientation. &nbsp;
+  <em>ESF</em> — normalised intensity transition; dashed lines mark the 10% and 90%
+  levels used for the edge width measurement. &nbsp;
+  <em>LSF</em> — derivative of the ESF; peak width and symmetry indicate local
+  resolution quality.
+</div>
+
+<div class="info-box">
+  <strong>Interpreting the comparison:</strong>
+  <ul style="margin:0.4em 0 0 1.2em;padding:0;">
+    <li><strong>Edge width (arcsec)</strong> is the primary comparator — it is
+        scale-independent. Prefer the arcsec figure when the two images have
+        different pixel scales.</li>
+    <li>A difference of less than ~10% in edge width is typically within
+        measurement uncertainty for a single edge sample; larger differences
+        are likely real.</li>
+    <li>A <strong>broader LSF peak</strong> in one image suggests lower resolution
+        at the edge spatial frequency. Common causes: worse seeing during that
+        integration, softer focus, or greater atmospheric dispersion from a filter
+        with a very wide bandpass.</li>
+    <li>An <strong>asymmetric or multi-lobed LSF</strong> can indicate optical
+        aberrations, trailing, or non-uniform atmospheric refraction.</li>
+    <li>If edge widths are similar but <strong>gradient magnitude</strong> differs
+        substantially, the difference is likely signal level or background contrast
+        rather than resolution — gradient magnitude is intensity-dependent and
+        should not be used alone to rank image quality.</li>
+    <li>The <strong>edge contrast ratio</strong> is only directly comparable between
+        images of identical bandwidth. A narrower filter naturally yields a higher
+        ratio by suppressing continuum background.</li>
+  </ul>
+</div>"""
 
     def _plot_radial_overlay(self, ra: AnalysisResult, rb: AnalysisResult) -> plt.Figure | None:
         """Overlay both radial power curves on a single axes."""

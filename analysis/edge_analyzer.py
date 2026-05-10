@@ -78,8 +78,12 @@ class EdgeAnalyzer:
     def _auto_detect_roi(self, bgsub: np.ndarray, image: AstroImage
                           ) -> tuple[np.ndarray | None, tuple | None]:
         """Find a patch centred on the strongest gradient in the image."""
-        sx = sobel(bgsub, axis=1)
-        sy = sobel(bgsub, axis=0)
+        from core.stretch import stf_stretch
+        # STF stretch amplifies faint nebula edges before gradient detection;
+        # bgsub (linear) is still returned as roi_data for accurate ESF measurement.
+        stretched = stf_stretch(bgsub).astype(np.float64)
+        sx = sobel(stretched, axis=1)
+        sy = sobel(stretched, axis=0)
         gm = np.sqrt(sx**2 + sy**2)
 
         # Avoid borders

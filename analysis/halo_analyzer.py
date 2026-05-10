@@ -66,6 +66,7 @@ class HaloAnalyzer:
             if fit is not None:
                 per_star.append({
                     "xc": xc, "yc": yc,
+                    "peak": float(row["peak"]),
                     "halo_to_core_ratio": fit["halo_to_core_ratio"],
                     "halo_radius_px": fit["halo_radius_px"],
                 })
@@ -73,7 +74,6 @@ class HaloAnalyzer:
         if not profiles:
             return result
 
-        per_star.sort(key=lambda s: s["halo_to_core_ratio"], reverse=True)
         result["star_data"] = per_star
 
         # Median stack normalized profiles

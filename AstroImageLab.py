@@ -1,5 +1,5 @@
 #build with: pyinstaller AstroImageLab.spec
-
+#build with full recompile: pyinstaller --clean AstroImageLab.spec
 import sys
 from PyQt6.QtWidgets import QApplication
 from gui.main_window import MainWindow
