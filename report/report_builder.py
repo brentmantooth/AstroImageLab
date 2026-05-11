@@ -158,13 +158,14 @@ class ReportBuilder:
     def generate(self, image_a: AstroImage, image_b: AstroImage,
                   result_a: AnalysisResult, result_b: AnalysisResult,
                   output_dir: str | Path,
-                  open_browser: bool = True) -> Path:
+                  open_browser: bool = True,
+                  report_format: str = "html") -> Path:
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"report_{result_a.label}_{result_b.label}_{ts}.html".replace(" ", "_")
-        out_path = output_dir / filename
+        stem = f"report_{result_a.label}_{result_b.label}_{ts}".replace(" ", "_")
+        filename = stem + ".html"
 
         bw_a = image_a.bandwidth_nm
         bw_b = image_b.bandwidth_nm
@@ -199,7 +200,22 @@ class ReportBuilder:
 </body>
 </html>"""
 
-        out_path.write_text(html, encoding="utf-8")
+        if report_format == "pdf":
+            try:
+                from weasyprint import HTML as _WPHTML
+                out_path = output_dir / (stem + ".pdf")
+                _WPHTML(string=html, base_url=str(output_dir)).write_pdf(str(out_path))
+            except ImportError:
+                result_a.warnings.append(
+                    "WeasyPrint not installed — report saved as HTML. "
+                    "Install with: pip install weasyprint"
+                )
+                out_path = output_dir / filename
+                out_path.write_text(html, encoding="utf-8")
+        else:
+            out_path = output_dir / filename
+            out_path.write_text(html, encoding="utf-8")
+
         if open_browser:
             webbrowser.open(out_path.as_uri())
         return out_path
@@ -770,6 +786,19 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             conv_b = np.clip(fftconvolve(test_arr, kern_b, mode="same"), 0.0, 1.0)
             diff = conv_a - conv_b
 
+            # Cross-section extraction — must happen before downsampling
+            _XS_Y_ROWS = {"high": 105, "medium": 425, "low": 670}
+            _XS_X = slice(70, 831)
+            xs_data: dict = {}
+            for level, y_px in _XS_Y_ROWS.items():
+                if 0 <= y_px < test_arr.shape[0] and 830 < test_arr.shape[1]:
+                    xs_data[level] = {
+                        "y_px":     y_px,
+                        "original": test_arr[y_px, _XS_X].copy(),
+                        "conv_a":   conv_a[y_px, _XS_X].copy(),
+                        "conv_b":   conv_b[y_px, _XS_X].copy(),
+                    }
+
             # Downsample for display if image is very large (cap at 1200 px on long edge)
             h, w = test_arr.shape
             if max(h, w) > 1200:
@@ -792,9 +821,83 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 "diff_max": d_max,
                 "label_a":  ra.label,
                 "label_b":  rb.label,
+                "xs_data":  xs_data,
             }
         except Exception:
             return None
+
+    def _plot_psf_crosssections(self, sim: dict) -> "plt.Figure | None":
+        """Three-panel horizontal cross-section through Block 1 at high/medium/low contrast."""
+        xs_data = sim.get("xs_data", {})
+        if not xs_data:
+            return None
+
+        levels = [("high", "High contrast"), ("medium", "Medium contrast"), ("low", "Low contrast")]
+        n = len([lv for lv, _ in levels if lv in xs_data])
+        if n == 0:
+            return None
+
+        fig, axes = plt.subplots(1, len(levels), figsize=(5 * len(levels), 4), sharey=False)
+        if len(levels) == 1:
+            axes = [axes]
+
+        for ax, (level, title) in zip(axes, levels):
+            if level not in xs_data:
+                ax.set_title(f"{title}\n(data unavailable)", fontsize=9)
+                ax.axis("off")
+                continue
+            d = xs_data[level]
+            x = np.arange(len(d["original"])) + 70
+            ax.plot(x, d["original"], color="black",     linewidth=1.0,
+                    alpha=XS_LINE_ALPHA, label="Original")
+            ax.plot(x, d["conv_a"],   color="steelblue", linewidth=1.0,
+                    alpha=XS_LINE_ALPHA, label=sim["label_a"])
+            ax.plot(x, d["conv_b"],   color="tomato",    linewidth=1.0,
+                    alpha=XS_LINE_ALPHA, label=sim["label_b"])
+            ax.set_title(f"{title}\n(y = {d['y_px']} px)", fontsize=9)
+            ax.set_xlabel("Image column (px)", fontsize=8)
+            ax.set_ylabel("Intensity [0–1]", fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+
+        fig.suptitle("Test chart horizontal cross-sections at three contrast levels", fontsize=10)
+        fig.tight_layout()
+        return fig
+
+    def _plot_psf_modulation(self, sim: dict) -> "plt.Figure | None":
+        """Bar chart of Michelson contrast at each contrast level for original vs both filters."""
+        xs_data = sim.get("xs_data", {})
+        if not xs_data:
+            return None
+
+        def modulation(arr: np.ndarray) -> float:
+            lo, hi = float(np.min(arr)), float(np.max(arr))
+            denom = hi + lo
+            return (hi - lo) / denom if denom > 0 else 0.0
+
+        levels = ["high", "medium", "low"]
+        x = np.arange(len(levels))
+        width = 0.25
+
+        orig_m   = [modulation(xs_data[lv]["original"]) if lv in xs_data else 0.0 for lv in levels]
+        conv_a_m = [modulation(xs_data[lv]["conv_a"])   if lv in xs_data else 0.0 for lv in levels]
+        conv_b_m = [modulation(xs_data[lv]["conv_b"])   if lv in xs_data else 0.0 for lv in levels]
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar(x - width, orig_m,   width, label="Original",        color="black",     alpha=0.75)
+        ax.bar(x,         conv_a_m, width, label=sim["label_a"],    color="steelblue", alpha=0.85)
+        ax.bar(x + width, conv_b_m, width, label=sim["label_b"],    color="tomato",    alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels(["High contrast", "Medium contrast", "Low contrast"])
+        ax.set_ylabel("Michelson contrast  (Imax − Imin) / (Imax + Imin)")
+        ax.set_ylim(0, 1.08)
+        ax.set_title("Contrast modulation preserved after PSF convolution\n"
+                     "(higher = better contrast retention)")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        return fig
 
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
         """Return HTML block with four PSF simulation panels at 1:1 pixel resolution."""
@@ -812,6 +915,39 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             "Red = A brighter after convolution; blue = B brighter. "
             "Larger values in fine-detail regions indicate a measurable sharpness difference."
         )
+
+        xs_fig  = _img_tag(self._plot_psf_crosssections(sim), "Test chart cross-sections")
+        mod_fig = _img_tag(self._plot_psf_modulation(sim),    "Contrast modulation summary")
+
+        xs_caption = (
+            "Cross-sections at three contrast levels. "
+            f"Black = original test chart; blue = convolved with {sim['label_a']} PSF; "
+            f"red = convolved with {sim['label_b']} PSF. "
+            "High-contrast bars (top of Block 1) show the maximum theoretical resolution of each "
+            "PSF; medium and low bars reveal whether the PSF difference remains significant at "
+            "reduced contrast."
+        )
+        mod_caption = (
+            "Michelson contrast (I<sub>max</sub> &minus; I<sub>min</sub>) / "
+            "(I<sub>max</sub> + I<sub>min</sub>) for each bar group. "
+            "A value of 1.0 = perfect black-to-white swing; 0 = bars completely blurred. "
+            "The reduction from <em>Original</em> to each filter column quantifies how much "
+            "contrast that filter's PSF costs at each spatial frequency represented by the bar width."
+        )
+
+        xs_block = ""
+        if xs_fig:
+            xs_block = f"""
+<h4>Horizontal cross-sections — test chart contrast bars</h4>
+<p>Each panel samples a horizontal strip through Block 1 of the test chart at the indicated
+pixel row. The bars within each strip cycle from opaque to transparent, so the cross-section
+reveals how the PSF smooths the edges of each bar. A filter with a tighter PSF retains
+sharper transitions and higher peak-to-valley swing.</p>
+{xs_fig}
+<p class="caption">{xs_caption}</p>
+{mod_fig}
+<p class="caption">{mod_caption}</p>"""
+
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
 <p>Each image is rendered at 1 image-pixel : 1 screen-pixel so fine detail differences
@@ -819,7 +955,7 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
 {panel(sim['original'], 'Original test chart')}
 {panel(sim['conv_a'],   f"Convolved — {sim['label_a']}")}
 {panel(sim['conv_b'],   f"Convolved — {sim['label_b']}")}
-{panel(sim['diff'],     'Difference (A − B)', diff_caption)}"""
+{panel(sim['diff'],     'Difference (A − B)', diff_caption)}{xs_block}"""
 
     # ── Section 4: Halo ───────────────────────────────────────────────────────
 
@@ -940,17 +1076,41 @@ are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
+<div class="info-box">
+  <strong>Radial Distribution Function (RDF) — how it is computed and how to read it.</strong><br>
+  For each star, the background-subtracted image is log<sub>10</sub>-transformed (compressing
+  the 3&ndash;5 decade dynamic range of a stellar halo into a manageable linear scale) and then
+  binned into concentric 1-pixel-wide annuli centred on the detected star centre. The
+  <em>mean</em> and <em>standard deviation</em> of the log-transformed pixel values in each
+  annulus are recorded, normalised so the profile starts at 1.0 (log<sub>10</sub> = 0 at
+  r&thinsp;=&thinsp;0), and then inverse-transformed (10<sup>x</sup>) for display on a
+  logarithmic intensity axis. Individual per-star profiles are stacked and averaged to produce
+  the aggregate curves shown below. The shaded band shows the ±1&sigma; within-annulus spread —
+  a wide band at a given radius means the halo is angularly asymmetric at that distance
+  (not a perfect ring).<br><br>
+  <strong>How to interpret the profile.</strong>
+  For an ideal star with no halo the profile follows a smooth, monotonically decreasing curve
+  set by the PSF shape: a Gaussian gives a downward-curving parabola on the log intensity axis;
+  a Moffat (more realistic for astronomical seeing) gives a gentler, power-law-like tail.
+  The key indicator of a halo is a <em>shoulder</em> — a point where the profile levels off,
+  rises slightly, or decays noticeably more slowly than the extrapolated core trend at
+  intermediate radii (typically 10&ndash;60 px from the star centre). This shoulder represents
+  the reflected light that forms the circular glow around bright stars. A profile that tracks
+  a smooth, featureless decay with no shoulder indicates little or no halo contribution.
+  Comparing the two overlaid profiles shows which filter produces more halo light at each
+  radius, independent of the absolute brightness of the stars used.
+</div>
+
 {rdf_unsat_fig}
-<p class="caption">Aggregate Radial Distribution Function — unsaturated halo stars.
-Mean normalised intensity vs. radius (blue = Image A, red = Image B). Shaded band = ±1σ
-within-annulus variability averaged over all fitted stars. A wider band at a given radius
-indicates angular asymmetry in the halo (not a perfect ring). Comparing the falloff slope
-between the two images gives a filter-independent measure of halo extent.</p>
+<p class="caption">Aggregate RDF — unsaturated halo stars. Mean normalised intensity vs. radius
+(blue = Image A, red = Image B). Shaded band = ±1&sigma; within-annulus variability averaged
+over all fitted stars. A shoulder or elevated tail relative to the other filter indicates
+stronger halo contribution at that radius.</p>
 
 {rdf_sat_fig}
 <p class="caption">Aggregate RDF — saturated stars only. The flat plateau at small radii
-reflects the saturated core; the slope beyond the plateau shows the halo ring structure.
-Meaningful even when the core is clipped.</p>
+reflects the clipped core; the slope beyond the plateau shows the halo ring structure.
+Meaningful even when the core is fully overexposed.</p>
 
 {star_map_tag}
 <p class="caption">STF-stretched overview of {ra.label}.

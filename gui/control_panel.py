@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox,
     QLabel, QLineEdit, QPushButton, QProgressBar, QFileDialog,
     QFormLayout, QDoubleSpinBox, QSpinBox, QSizePolicy,
+    QGridLayout, QComboBox,
 )
 
 from core.models import (
@@ -47,20 +48,33 @@ class AnalysisControlPanel(QWidget):
 
         # ── Metrics group ──────────────────────────────────────────────
         metrics_box = QGroupBox("Metrics")
-        metrics_layout = QVBoxLayout(metrics_box)
+        metrics_layout = QGridLayout(metrics_box)
+        metrics_layout.setColumnStretch(0, 1)
+
+        hdr = QLabel("Export")
+        hdr.setStyleSheet("color: #444; font-size: 9pt;")
+        metrics_layout.addWidget(hdr, 0, 1, Qt.AlignmentFlag.AlignHCenter)
+
         self._checks: dict[str, QCheckBox] = {}
-        for key, label in [
+        self._export_checks: dict[str, QCheckBox] = {}
+        for row, (key, label) in enumerate([
             ("psf",     "PSF / MTF"),
             ("halo",    "Halo analysis"),
             ("ghost",   "Ghost detection"),
             ("edge",    "Edge analysis (LSF)"),
             ("power",   "Power spectrum"),
             ("spatial", "Spatial detail (std / LoG / wavelet)"),
-        ]:
+        ], start=1):
             cb = QCheckBox(label)
             cb.setChecked(True)
-            metrics_layout.addWidget(cb)
+            metrics_layout.addWidget(cb, row, 0)
             self._checks[key] = cb
+
+            ecb = QCheckBox()
+            ecb.setChecked(False)
+            ecb.setToolTip(f"Export {label} figures as PNG files to the output folder")
+            metrics_layout.addWidget(ecb, row, 1, Qt.AlignmentFlag.AlignHCenter)
+            self._export_checks[key] = ecb
 
         root.addWidget(metrics_box)
 
@@ -101,6 +115,18 @@ class AnalysisControlPanel(QWidget):
 
         # ── Left column: all selection / status controls ────────────────
         left_col = QVBoxLayout()
+
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Report format:"))
+        self._report_fmt = QComboBox()
+        self._report_fmt.addItems(["HTML", "PDF"])
+        self._report_fmt.setToolTip(
+            "PDF requires WeasyPrint (pip install weasyprint).\n"
+            "If unavailable the report is saved as HTML automatically."
+        )
+        fmt_row.addWidget(self._report_fmt)
+        fmt_row.addStretch()
+        left_col.addLayout(fmt_row)
 
         out_row = QHBoxLayout()
         self._out_dir = QLineEdit()
@@ -241,6 +267,8 @@ class AnalysisControlPanel(QWidget):
         pso = self._pixel_scale_override.value()
         return {
             "metrics": {k: cb.isChecked() for k, cb in self._checks.items()},
+            "export_figures": {k: cb.isChecked() for k, cb in self._export_checks.items()},
+            "report_format": self._report_fmt.currentText().lower(),
             "min_snr": self._min_snr.value(),
             "seeing_warn_arcsec": self._seeing_thresh.value(),
             "pixel_scale_override": pso if pso > 0 else None,

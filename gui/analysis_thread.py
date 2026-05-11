@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64 as _base64
 import concurrent.futures
+from datetime import datetime as _dt
+from pathlib import Path as _Path
 from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -145,7 +148,8 @@ class AnalysisThread(QThread):
             self._run_serial(tasks, result_a, result_b)
 
         # Report generation (always serial — needs all results)
-        self.progress.emit(96, "Generating HTML report…")
+        fmt = s.get("report_format", "html")
+        self.progress.emit(96, f"Generating {fmt.upper()} report…")
         report_path = ""
         try:
             builder = ReportBuilder()
@@ -153,6 +157,7 @@ class AnalysisThread(QThread):
                 img_a, img_b, result_a, result_b,
                 output_dir=s.get("output_dir", "."),
                 open_browser=True,
+                report_format=fmt,
             )
             report_path = str(out)
         except Exception as e:
@@ -160,6 +165,17 @@ class AnalysisThread(QThread):
             detail = _tb.format_exc()
             result_a.warnings.append(f"Report generation failed: {e}\n{detail}")
             self.progress.emit(97, f"⚠ Report failed — see completion dialog")
+
+        # Optional per-metric figure export
+        n_exported = self._export_figures(
+            result_a, result_b,
+            s.get("output_dir", "."),
+            s.get("export_figures", {}),
+        )
+        if n_exported:
+            result_a.warnings.insert(
+                0, f"Exported {n_exported} figure PNG(s) to {s.get('output_dir', '.')}"
+            )
 
         self.progress.emit(100, "Done")
         self.finished.emit(result_a, result_b, report_path)
@@ -209,6 +225,38 @@ class AnalysisThread(QThread):
                     result_a.errors[key] = msg
                     result_b.errors[key] = msg
                     self.progress.emit(pct, f"✗ {labels[key]} failed")
+
+    # ------------------------------------------------------------------
+    # Figure export
+    # ------------------------------------------------------------------
+
+    def _export_figures(self, result_a: AnalysisResult, result_b: AnalysisResult,
+                         output_dir: str, export_flags: dict) -> int:
+        out = _Path(output_dir)
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        metric_pairs = [
+            ("psf",     result_a.psf_metrics,     result_b.psf_metrics),
+            ("halo",    result_a.halo_metrics,     result_b.halo_metrics),
+            ("ghost",   result_a.ghost_metrics,    result_b.ghost_metrics),
+            ("edge",    result_a.edge_metrics,     result_b.edge_metrics),
+            ("power",   result_a.power_metrics,    result_b.power_metrics),
+            ("spatial", result_a.spatial_metrics,  result_b.spatial_metrics),
+        ]
+        exported = 0
+        for key, m_a, m_b in metric_pairs:
+            if not export_flags.get(key, False):
+                continue
+            for lbl, metrics in [(result_a.label, m_a), (result_b.label, m_b)]:
+                if not metrics:
+                    continue
+                for fig_key, b64 in (metrics.get("figures") or {}).items():
+                    if not isinstance(b64, str):
+                        continue
+                    safe_lbl = lbl.replace(" ", "_")
+                    fname = out / f"{key}_{fig_key}_{safe_lbl}_{ts}.png"
+                    fname.write_bytes(_base64.b64decode(b64))
+                    exported += 1
+        return exported
 
     # ------------------------------------------------------------------
     # Image alignment
