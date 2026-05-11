@@ -18,7 +18,7 @@ from analysis.star_catalog import StarCatalogBuilder
 
 CUTOUT_SIZE = 25   # pixels per side for per-star cutouts
 EPSF_OVERSAMPLING = 2
-EPSF_MAXITERS = 5
+EPSF_MAXITERS = 15
 
 
 def _moffat_fwhm(gamma: float, alpha: float) -> float:
@@ -99,6 +99,8 @@ class PSFAnalyzer:
             result["mtf_nyquist"] = mtf_nyq
             result["epsf_data"] = epsf                       # raw 2D array for convolution
             result["epsf_oversampling"] = EPSF_OVERSAMPLING  # = 2
+            result["epsf_converged"]  = getattr(self, "_last_epsf_converged",  None)
+            result["epsf_iterations"] = getattr(self, "_last_epsf_iterations", None)
             result["mtf_freq"] = freq
             result["mtf_curve"] = mtf
             result["figures"] = figs_to_b64({
@@ -219,8 +221,13 @@ class PSFAnalyzer:
                     maxiters=EPSF_MAXITERS,
                     progress_bar=False,
                 )
-                epsf, _ = builder(extracted)
+                epsf, epsf_result = builder(extracted)
             epsf_data = epsf.data
+            # EPSFBuilder returns (EPSFModel, EPSFStars) in most photutils versions;
+            # newer builds may return a result object with .converged/.iterations.
+            # Use getattr so either API works without raising AttributeError.
+            self._last_epsf_converged  = getattr(epsf_result, "converged",  None)
+            self._last_epsf_iterations = getattr(epsf_result, "iterations", None)
         except Exception:
             return None, np.array([]), np.array([])
 

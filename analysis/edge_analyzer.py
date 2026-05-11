@@ -11,6 +11,8 @@ from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
 from core.models import EDGE_ROI_HALF_WIDTH
 
+EDGE_DISPLAY_HALF_WIDTH = 250   # half-side of the context window shown in the report figure
+
 
 class EdgeAnalyzer:
     """Extract edge spread function (ESF) and line spread function (LSF)
@@ -65,9 +67,25 @@ class EdgeAnalyzer:
         ecr = self._measure_edge_contrast_ratio(roi_data, edge_info)
         result["edge_contrast_ratio"] = ecr
 
+        # Build 300×300 display context centred on the gradient peak
+        x0, y0, x1, y1 = roi
+        xc_full = x0 + edge_info["center_x"]
+        yc_full = y0 + edge_info["center_y"]
+        dw = EDGE_DISPLAY_HALF_WIDTH
+        dx0 = max(0, xc_full - dw)
+        dy0 = max(0, yc_full - dw)
+        dx1 = min(bgsub.shape[1], xc_full + dw)
+        dy1 = min(bgsub.shape[0], yc_full + dw)
+        display_roi = bgsub[dy0:dy1, dx0:dx1]
+        analysis_rect = (x0 - dx0, y0 - dy0, x1 - dx0, y1 - dy0)
+        edge_info_display = dict(edge_info)
+        edge_info_display["center_x"] = xc_full - dx0
+        edge_info_display["center_y"] = yc_full - dy0
+
         result["figures"] = figs_to_b64({
-            "edge": self._plot_results(roi_data, positions, esf, lsf, width,
-                                       image.label, edge_info)
+            "edge": self._plot_results(roi_data, display_roi, analysis_rect,
+                                       positions, esf, lsf, width, image.label,
+                                       edge_info_display)
         })
 
         return result
@@ -199,44 +217,66 @@ class EdgeAnalyzer:
     # ------------------------------------------------------------------
 
     def _plot_results(self, roi_data: np.ndarray,
+                       display_roi: np.ndarray,
+                       analysis_rect: tuple,
                        positions: np.ndarray,
                        esf: np.ndarray,
                        lsf: np.ndarray,
                        width: float | None,
                        label: str,
                        edge_info: dict | None = None) -> plt.Figure:
+        from matplotlib.patches import Rectangle
+
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-        # ROI image
-        axes[0].imshow(roi_data, origin="lower", cmap="gray",
-                       aspect="auto", interpolation="nearest")
+        # ROI context image (500×500 display region)
+        h_disp, w_disp = display_roi.shape
+        axes[0].imshow(display_roi, origin="lower", cmap="gray",
+                       aspect="equal", interpolation="nearest",
+                       extent=[0, w_disp, 0, h_disp])
         axes[0].set_title(f"Edge ROI — {label}")
         axes[0].set_xlabel("X (px)")
         axes[0].set_ylabel("Y (px)")
+
+        # Dashed lime rectangle marking the actual 60×60 analysis region
+        bx0, by0, bx1, by1 = analysis_rect
+        rect = Rectangle(
+            (bx0, by0), bx1 - bx0, by1 - by0,
+            linewidth=1.5, edgecolor="lime", facecolor="none",
+            linestyle="--", zorder=5, label="Analysis region",
+        )
+        axes[0].add_patch(rect)
 
         # Overlay lines showing the edge location and ESF scan direction
         if edge_info is not None:
             xc = edge_info["center_x"]
             yc = edge_info["center_y"]
             angle = edge_info["angle_rad"]
-            h, w = roi_data.shape
+            h, w = display_roi.shape
             t = max(h, w)
 
-            # Cyan line: scan direction (perpendicular to edge, i.e. gradient direction)
-            axes[0].plot(
-                [xc - t * np.cos(angle), xc + t * np.cos(angle)],
-                [yc - t * np.sin(angle), yc + t * np.sin(angle)],
-                color="cyan", linewidth=1.5, alpha=0.85, label="ESF scan direction",
-            )
-            # Yellow dashed line: edge orientation (along the edge)
+            def _clipped_line(cx, cy, ang):
+                """Return line endpoints clipped to the image bounds [0,w] x [0,h]."""
+                x0 = np.clip(cx - t * np.cos(ang), 0, w_disp)
+                x1 = np.clip(cx + t * np.cos(ang), 0, w_disp)
+                y0 = np.clip(cy - t * np.sin(ang), 0, h_disp)
+                y1 = np.clip(cy + t * np.sin(ang), 0, h_disp)
+                return [x0, x1], [y0, y1]
+
+            xs, ys = _clipped_line(xc, yc, angle)
+            axes[0].plot(xs, ys, color="cyan", linewidth=1.5, alpha=0.85,
+                         label="ESF scan direction")
+
             perp = angle + np.pi / 2
-            axes[0].plot(
-                [xc - t * np.cos(perp), xc + t * np.cos(perp)],
-                [yc - t * np.sin(perp), yc + t * np.sin(perp)],
-                color="yellow", linewidth=1.2, linestyle="--", alpha=0.75,
-                label="Edge orientation",
-            )
+            xs, ys = _clipped_line(xc, yc, perp)
+            axes[0].plot(xs, ys, color="yellow", linewidth=1.2, linestyle="--",
+                         alpha=0.75, label="Edge orientation")
+
             axes[0].legend(fontsize=7, loc="lower right")
+
+        # Pin axis to the image data — must come after all plot calls
+        axes[0].set_xlim(0, w_disp)
+        axes[0].set_ylim(0, h_disp)
 
         # ESF
         axes[1].plot(positions, esf, "b-", linewidth=1.5)

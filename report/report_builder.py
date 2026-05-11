@@ -109,6 +109,18 @@ def _val(v, fmt=".3f", fallback="—") -> str:
     return str(v)
 
 
+def _epsf_iter_cell(psf_metrics: dict) -> str:
+    """Format ePSF iteration count with a warning if it did not converge."""
+    iters = psf_metrics.get("epsf_iterations")
+    conv  = psf_metrics.get("epsf_converged")
+    if iters is None:
+        return "—"
+    if conv is False:
+        return (f'<span style="color:#c0392b;font-weight:bold;">'
+                f'{iters} ⚠ not converged</span>')
+    return str(iters)
+
+
 def _error_box(metric_key: str, ra: AnalysisResult, rb: AnalysisResult) -> str:
     """Return an error box HTML if the metric failed, else empty string."""
     err = ra.errors.get(metric_key) or rb.errors.get(metric_key)
@@ -154,6 +166,62 @@ def _pixel_size_mm(img: AstroImage) -> float | None:
 
 class ReportBuilder:
     """Generate a self-contained HTML comparison report."""
+
+    # ------------------------------------------------------------------
+    # PDF writing — WeasyPrint preferred, xhtml2pdf fallback
+    # ------------------------------------------------------------------
+
+    def _write_pdf(self, html: str, output_dir: Path, stem: str,
+                   html_filename: str, result_a: AnalysisResult) -> Path:
+        """Try WeasyPrint, fall back to xhtml2pdf, then fall back to HTML."""
+        pdf_path  = output_dir / (stem + ".pdf")
+        html_path = output_dir / html_filename
+
+        # ── Attempt 1: WeasyPrint ──────────────────────────────────────
+        try:
+            from weasyprint import HTML as _WPHTML
+            _WPHTML(string=html, base_url=str(output_dir)).write_pdf(str(pdf_path))
+            return pdf_path
+        except ImportError:
+            wp_reason = "not installed"
+        except OSError as e:
+            wp_reason = (
+                "missing native GTK/Pango libraries — "
+                "install via 'conda install -c conda-forge weasyprint' "
+                "or download the GTK3 runtime installer for Windows"
+                if ("libpango" in str(e) or "pango" in str(e).lower() or "0x7e" in str(e))
+                else str(e)
+            )
+        except Exception as e:
+            wp_reason = str(e)
+
+        # ── Attempt 2: xhtml2pdf ───────────────────────────────────────
+        try:
+            from xhtml2pdf import pisa as _pisa
+            with open(pdf_path, "wb") as _f:
+                result = _pisa.CreatePDF(html, dest=_f, encoding="utf-8")
+            if not result.err:
+                result_a.warnings.append(
+                    f"WeasyPrint unavailable ({wp_reason}); PDF rendered with xhtml2pdf — "
+                    "complex CSS layout may differ slightly from the HTML version."
+                )
+                return pdf_path
+            xp_reason = f"xhtml2pdf reported errors (code {result.err})"
+        except ImportError:
+            xp_reason = "not installed"
+        except Exception as e:
+            xp_reason = str(e)
+
+        # ── Fallback: HTML ─────────────────────────────────────────────
+        result_a.warnings.append(
+            f"PDF generation failed — WeasyPrint: {wp_reason}; "
+            f"xhtml2pdf: {xp_reason}. "
+            "Report saved as HTML instead. "
+            "Install a PDF renderer: pip install xhtml2pdf  "
+            "or conda install -c conda-forge weasyprint"
+        )
+        html_path.write_text(html, encoding="utf-8")
+        return html_path
 
     def generate(self, image_a: AstroImage, image_b: AstroImage,
                   result_a: AnalysisResult, result_b: AnalysisResult,
@@ -201,17 +269,7 @@ class ReportBuilder:
 </html>"""
 
         if report_format == "pdf":
-            try:
-                from weasyprint import HTML as _WPHTML
-                out_path = output_dir / (stem + ".pdf")
-                _WPHTML(string=html, base_url=str(output_dir)).write_pdf(str(out_path))
-            except ImportError:
-                result_a.warnings.append(
-                    "WeasyPrint not installed — report saved as HTML. "
-                    "Install with: pip install weasyprint"
-                )
-                out_path = output_dir / filename
-                out_path.write_text(html, encoding="utf-8")
+            out_path = self._write_pdf(html, output_dir, stem, filename, result_a)
         else:
             out_path = output_dir / filename
             out_path.write_text(html, encoding="utf-8")
@@ -470,6 +528,7 @@ These metrics are normalised to unit amplitude and are valid regardless of filte
   <tr><td>Eccentricity</td><td>{_val(pa.get("eccentricity"))}</td><td>{_val(pb.get("eccentricity"))}</td></tr>
   <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td></tr>
   <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td></tr>
+  <tr><td>ePSF iterations</td><td>{_epsf_iter_cell(pa)}</td><td>{_epsf_iter_cell(pb)}</td></tr>
 </table>
 
 <div class="info-box">
@@ -837,9 +896,18 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         if n == 0:
             return None
 
-        fig, axes = plt.subplots(1, len(levels), figsize=(5 * len(levels), 4), sharey=False)
+        fig, axes = plt.subplots(len(levels), 1, figsize=(10, 4 * len(levels)), sharey=False)
         if len(levels) == 1:
             axes = [axes]
+
+        def _envelope(arr: np.ndarray, half: int = 5) -> np.ndarray:
+            """Rolling peak-to-valley swing (local contrast envelope)."""
+            n = len(arr)
+            env = np.empty(n)
+            for i in range(n):
+                window = arr[max(0, i - half): min(n, i + half + 1)]
+                env[i] = window.max() - window.min()
+            return env
 
         for ax, (level, title) in zip(axes, levels):
             if level not in xs_data:
@@ -847,19 +915,36 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 ax.axis("off")
                 continue
             d = xs_data[level]
-            x = np.arange(len(d["original"])) + 70
-            ax.plot(x, d["original"], color="black",     linewidth=1.0,
+            n_pts = len(d["original"])
+            # x=1 = finest bars (rightmost pixel of slice); increases toward coarser bars.
+            # Log scale then spreads fine detail where PSF differences matter most.
+            x = np.arange(1, n_pts + 1)
+            orig  = d["original"][::-1]
+            a_arr = d["conv_a"][::-1]
+            b_arr = d["conv_b"][::-1]
+
+            # Raw traces — light so they don't obscure the envelope
+            ax.plot(x, orig,  color="black",     linewidth=0.6, alpha=0.25)
+            ax.plot(x, a_arr, color="steelblue", linewidth=0.6, alpha=0.25)
+            ax.plot(x, b_arr, color="tomato",    linewidth=0.6, alpha=0.25)
+
+            # Local contrast envelope — rolling peak-to-valley over ±5 px window
+            ax.plot(x, _envelope(orig),  color="black",     linewidth=1.4,
                     alpha=XS_LINE_ALPHA, label="Original")
-            ax.plot(x, d["conv_a"],   color="steelblue", linewidth=1.0,
+            ax.plot(x, _envelope(a_arr), color="steelblue", linewidth=1.4,
                     alpha=XS_LINE_ALPHA, label=sim["label_a"])
-            ax.plot(x, d["conv_b"],   color="tomato",    linewidth=1.0,
+            ax.plot(x, _envelope(b_arr), color="tomato",    linewidth=1.4,
                     alpha=XS_LINE_ALPHA, label=sim["label_b"])
+
+            ax.set_xscale("log")
+            ax.set_xlim(1, n_pts)
             ax.set_title(f"{title}\n(y = {d['y_px']} px)", fontsize=9)
-            ax.set_xlabel("Image column (px)", fontsize=8)
-            ax.set_ylabel("Intensity [0–1]", fontsize=8)
+            ax.set_xlabel("Distance from finest bars (px, log scale)  —  fine ← | → coarse",
+                          fontsize=8)
+            ax.set_ylabel("Local contrast (peak − valley)", fontsize=8)
             ax.tick_params(labelsize=7)
             ax.legend(fontsize=7)
-            ax.grid(True, alpha=0.3)
+            ax.grid(True, alpha=0.3, which="both")
 
         fig.suptitle("Test chart horizontal cross-sections at three contrast levels", fontsize=10)
         fig.tight_layout()
@@ -920,12 +1005,13 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         mod_fig = _img_tag(self._plot_psf_modulation(sim),    "Contrast modulation summary")
 
         xs_caption = (
-            "Cross-sections at three contrast levels. "
-            f"Black = original test chart; blue = convolved with {sim['label_a']} PSF; "
-            f"red = convolved with {sim['label_b']} PSF. "
-            "High-contrast bars (top of Block 1) show the maximum theoretical resolution of each "
-            "PSF; medium and low bars reveal whether the PSF difference remains significant at "
-            "reduced contrast."
+            "Local contrast envelope (rolling peak&minus;valley over a ±5 px window) at three "
+            "contrast levels. X-axis is log-scale with x&thinsp;=&thinsp;1 at the finest bars "
+            "(right edge of the slice) increasing toward coarser bars, so the resolution-critical "
+            "fine-bar region is spread across the left portion of each panel. "
+            "Light traces show raw intensity; bold lines show the contrast envelope. "
+            f"Black = original; blue = {sim['label_a']}; red = {sim['label_b']}. "
+            "A filter with a tighter PSF retains a higher envelope at small x (fine bars)."
         )
         mod_caption = (
             "Michelson contrast (I<sub>max</sub> &minus; I<sub>min</sub>) / "
@@ -950,8 +1036,34 @@ sharper transitions and higher peak-to-valley swing.</p>
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
-<p>Each image is rendered at 1 image-pixel : 1 screen-pixel so fine detail differences
-are fully visible. Brighter, higher-contrast features indicate a tighter PSF.</p>
+<p>
+  <strong>How this simulation works:</strong> During PSF analysis, the empirical Point Spread
+  Function (ePSF) is built by aligning and stacking the pixel profiles of the brightest, most
+  isolated stars detected in each filter image (typically 5&ndash;30 stars, depending on field
+  density and the minimum S/N threshold). The stacked profile is iteratively refined to
+  sub-pixel accuracy using an oversampled 2&times; grid, producing a 2-D kernel that captures
+  the combined blurring from the telescope optics, filter glass, atmospheric seeing, and sensor
+  sampling for that specific image.
+</p>
+<p>
+  Each ePSF is then down-sampled back to native pixel scale (dividing out the 2&times;
+  oversampling) and normalised to unit sum so that total flux is conserved. A high-resolution
+  ISO&thinsp;12233 resolution test chart (a standardised slanted-edge and bar-pattern target)
+  is loaded as a reference scene and convolved with each kernel using FFT-based convolution
+  (<code>scipy.signal.fftconvolve</code>, mode=&ldquo;same&rdquo;). The result simulates what
+  the test chart <em>would look like</em> if imaged through that filter and telescope
+  combination &mdash; that is, how much spatial detail the optical + atmospheric + filter
+  system can resolve under the conditions that produced each image.
+</p>
+<p>
+  A pixel-level difference map (A &minus; B) is computed and displayed with the RdBu_r
+  diverging colormap, centred at zero. Red regions indicate pixels where filter A produced
+  higher intensity after convolution (A&rsquo;s PSF is locally tighter and preserved more
+  contrast); blue regions indicate B is locally brighter. The horizontal cross-sections below
+  isolate three contrast levels from Block&thinsp;1 of the chart and quantify the
+  peak-to-valley swing preserved by each PSF.
+</p>
+<p>Each image is rendered at 1 image-pixel&thinsp;:&thinsp;1 screen-pixel.</p>
 {panel(sim['original'], 'Original test chart')}
 {panel(sim['conv_a'],   f"Convolved — {sim['label_a']}")}
 {panel(sim['conv_b'],   f"Convolved — {sim['label_b']}")}
@@ -1645,13 +1757,14 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
   <strong>How the edge region was selected:</strong>
   The analysis applies an STF stretch to the background-subtracted image to bring
   faint emission boundaries into relief, then computes the Sobel gradient magnitude
-  across the whole frame. A 60 × 60 px window is centred on the pixel with the
-  strongest gradient — the sharpest visible edge in the image. If a starless image
-  was provided it is used in place of the stacked image, so the search locates a
-  nebula emission boundary rather than a star profile. Both images are measured over
-  the <em>identical</em> pixel region: Image A's detected ROI coordinates are reused
-  for Image B after alignment, ensuring a direct like-for-like comparison of the
-  same feature.
+  across the whole frame. A 500 × 500 px context window is displayed in the report,
+  centred on the pixel with the strongest gradient — the sharpest visible edge in the
+  image. The 60 × 60 px analysis region (dashed lime box) is highlighted within this
+  context. If a starless image was provided it is used in place of the stacked image,
+  so the search locates a nebula emission boundary rather than a star profile. Both
+  images are measured over the <em>identical</em> pixel region: Image A's detected ROI
+  coordinates are reused for Image B after alignment, ensuring a direct like-for-like
+  comparison of the same feature.
 </div>
 
 <table>
@@ -1667,7 +1780,9 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 </div>
 <div class="info-box" style="font-size:0.9em;">
   <strong>Figure panels (left → right):</strong>
-  <em>Edge ROI</em> — the 60 × 60 px detected region.
+  <em>Edge ROI</em> — 500 × 500 px context window centred on the detected gradient peak.
+  The <span style="color:#90ee90;font-weight:bold;">dashed lime rectangle</span> marks
+  the 60 × 60 px analysis region used for ESF/LSF extraction.
   The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF
   scan direction (perpendicular to the edge);
   the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows

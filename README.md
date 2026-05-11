@@ -39,10 +39,21 @@ conda install -c conda-forge pyqt6 astropy photutils scipy numpy matplotlib astr
 
 ### Pip packages
 ```bash
-pip install xisf
+pip install xisf xhtml2pdf
 ```
 
-`xisf` provides support for PixInsight's native `.xisf` format. All other dependencies are available via conda-forge.
+`xisf` provides support for PixInsight's native `.xisf` format. `xhtml2pdf` enables PDF report export (pure-Python, no native library dependencies). All other dependencies are available via conda-forge.
+
+### PDF report export (optional)
+
+The **PDF** format option in the report panel requires a PDF renderer. Two options are supported — the app tries them in order and falls back to HTML if neither is available:
+
+| Renderer | Install | Notes |
+|----------|---------|-------|
+| **WeasyPrint** | `conda install -c conda-forge weasyprint` | Best layout fidelity. Requires GTK3/Pango native libraries. The conda-forge package bundles these automatically. On Windows with pip, the GTK3 runtime must be installed separately. |
+| **xhtml2pdf** | `pip install xhtml2pdf` | Pure-Python fallback. No native dependencies. Complex CSS (flexbox, grid) renders at reduced fidelity. |
+
+If neither renderer is installed, the report is saved as HTML and a warning is shown in the completion dialog.
 
 ---
 
@@ -95,7 +106,7 @@ python AstroImageLab.py
 4. **Draw a cross-section line** *(recommended)* — Click **Select Line…** and drag a line across a region of interest. The line appears overlaid on both images. This drives cross-section profile analysis in the report.
 5. **Select ROI** *(optional)* — Click **Select ROI…** and draw a rectangle to target a specific nebula region for edge and power spectrum analysis. If no ROI is selected, the app auto-detects the strongest edge and a star-free region automatically.
 6. **Select metrics** — Check or uncheck the metrics you want to run in the control panel.
-7. **Set output directory** — Browse to where the HTML report should be saved.
+7. **Set output directory and format** — Browse to where the report should be saved. Choose HTML (default) or PDF from the format selector. PDF requires WeasyPrint or xhtml2pdf (see Requirements).
 8. **Run** — Click **Run Analysis**. Images are aligned automatically using `astroalign` before per-pixel comparisons. A progress bar and elapsed timer are shown during analysis.
 9. **Review report** — The HTML report opens automatically in your default browser when analysis completes.
 
@@ -103,7 +114,7 @@ python AstroImageLab.py
 
 ## Output Report
 
-The report is a self-contained HTML file (all plots embedded as base64 PNG) saved to your chosen output directory. It contains nine sections:
+The report is saved to your chosen output directory as a self-contained HTML file (all plots embedded as base64 PNG) or as a PDF if a renderer is installed. HTML is the default and requires no additional packages. It contains nine sections:
 
 1. **Image metadata** — Side-by-side header info for both filters; bandwidth warning banner if bandwidths differ
 2. **Observation context** — Seeing warning if FWHM > 3″; notes on valid comparison conditions
@@ -194,6 +205,8 @@ gui/
 | [xisf](https://pypi.org/project/xisf/) | PixInsight XISF format support |
 | [PyQt6](https://riverbankcomputing.com/software/pyqt/) | GUI framework |
 | [matplotlib](https://matplotlib.org/) | All plots and figures |
+| [WeasyPrint](https://weasyprint.org/) *(optional)* | High-fidelity HTML→PDF rendering |
+| [xhtml2pdf](https://xhtml2pdf.readthedocs.io/) *(optional)* | Pure-Python HTML→PDF fallback |
 
 Statistical stretch algorithm adapted from [SETIAstroSuite](https://www.setiastro.com/statistical-stretch) (MTF-based autostretch, equivalent to PixInsight STF).
 
