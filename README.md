@@ -208,8 +208,6 @@ gui/
 | [WeasyPrint](https://weasyprint.org/) *(optional)* | High-fidelity HTML→PDF rendering |
 | [xhtml2pdf](https://xhtml2pdf.readthedocs.io/) *(optional)* | Pure-Python HTML→PDF fallback |
 
-Statistical stretch algorithm adapted from [SETIAstroSuite](https://www.setiastro.com/statistical-stretch) (MTF-based autostretch, equivalent to PixInsight STF).
-
 Wavelet noise estimation uses the robust MAD estimator from Donoho & Johnstone (1994).
 
 ---
