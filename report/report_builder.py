@@ -109,16 +109,21 @@ def _val(v, fmt=".3f", fallback="—") -> str:
     return str(v)
 
 
-def _epsf_iter_cell(psf_metrics: dict) -> str:
-    """Format ePSF iteration count with a warning if it did not converge."""
-    iters = psf_metrics.get("epsf_iterations")
-    conv  = psf_metrics.get("epsf_converged")
-    if iters is None:
+def _epsf_stars_cell(psf_metrics: dict) -> str:
+    """Format the number of stars used to build the ePSF."""
+    n = psf_metrics.get("epsf_n_stars")
+    if n is None:
         return "—"
+    # If newer photutils exposes convergence, flag non-convergence in red.
+    conv = psf_metrics.get("epsf_converged")
+    iters = psf_metrics.get("epsf_iterations")
+    suffix = ""
     if conv is False:
-        return (f'<span style="color:#c0392b;font-weight:bold;">'
-                f'{iters} ⚠ not converged</span>')
-    return str(iters)
+        suffix = (f' &nbsp;<span style="color:#c0392b;font-weight:bold;">'
+                  f'⚠ not converged ({iters} iters)</span>')
+    elif iters is not None:
+        suffix = f" ({iters} iters)"
+    return f"{n}{suffix}"
 
 
 def _error_box(metric_key: str, ra: AnalysisResult, rb: AnalysisResult) -> str:
@@ -528,7 +533,7 @@ These metrics are normalised to unit amplitude and are valid regardless of filte
   <tr><td>Eccentricity</td><td>{_val(pa.get("eccentricity"))}</td><td>{_val(pb.get("eccentricity"))}</td></tr>
   <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td></tr>
   <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td></tr>
-  <tr><td>ePSF iterations</td><td>{_epsf_iter_cell(pa)}</td><td>{_epsf_iter_cell(pb)}</td></tr>
+  <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td></tr>
 </table>
 
 <div class="info-box">
@@ -588,25 +593,6 @@ These metrics are normalised to unit amplitude and are valid regardless of filte
 {img_ecc_hist}
 <p class="caption">Distribution of per-star eccentricity values.</p>
 
-{img_mtf}
-<p class="caption">MTF curves for both filters overlaid. Higher curve = better
-contrast preservation at fine scales.</p>
-<div class="info-box"><strong>Reading the MTF plot:</strong>
-An ideal MTF starts at 1.0 (zero frequency) and decreases monotonically to 0 at
-the Nyquist frequency (0.5 cycles/pixel). Optical aberrations, atmospheric seeing,
-and focus errors lower the curve — especially at higher spatial frequencies.
-A higher MTF means better contrast preservation for fine detail: sharper stars and
-more distinct nebula filaments.<br><br>
-<strong>MTF50</strong> is the spatial frequency where contrast falls to 50% —
-analogous to a "half-power" point. Higher MTF50 = sharper images. If one filter's
-curve lies consistently above the other, it delivers better sharpness at all scales.
-If the curves cross, one filter may be sharper at fine scales while the other
-preserves mid-scale contrast better.<br><br>
-<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset,
-filter tilt, or optical aberrations introduced by the filter glass. A significant
-MTF difference between filters that should be optically identical warrants checking
-filter flatness and seating.</div>
-
 {img_scatter}
 <p class="caption">Per-star FWHM correlation. Points near the slope = 1 line indicate
 consistent star size between filters. Systematic offset reveals which filter produces
@@ -617,13 +603,24 @@ tighter stars. Points far from the line indicate individual star measurement sca
   The ePSF is constructed from all stars that passed the quality filters
   (unsaturated, adequate SNR, isolated from neighbours). Cutouts of each star
   are extracted from the background-subtracted image with a box size of
-  max(25 px, 6 &times; FWHM) to capture the full wing extent. The
-  <em>photutils</em> <code>EPSFBuilder</code> iteratively stacks these cutouts
-  at <strong>2&times; oversampling</strong>, aligning each star to its sub-pixel
-  centroid position to fill in the finer spatial grid. After 5 iterations the
-  model converges to the average PSF across all selected stars. The result is
-  displayed on a logarithmic scale to reveal structure spanning several orders
-  of magnitude in brightness.<br><br>
+  max(25 px, 6 &times; FWHM) to capture the full wing extent.
+  The <a href="https://photutils.readthedocs.io/en/stable/api/photutils.psf.EPSFBuilder.html"
+  target="_blank"><em>photutils</em> <code>EPSFBuilder</code></a>
+  (<a href="https://photutils.readthedocs.io/en/stable/user_guide/epsf_building.html"
+  target="_blank">building guide</a>) iteratively stacks these cutouts at
+  <strong>2&times; oversampling</strong>, aligning each star to its fitted
+  sub-pixel centroid position to fill in the finer spatial grid. At each iteration
+  the ePSF model is updated and each star is re-centred; the process repeats until
+  the maximum centroid shift across all stars falls below
+  <strong>0.001 px</strong> (the <code>center_accuracy</code> convergence
+  criterion), or until the hard limit of <strong>15 iterations</strong> is
+  reached. The number of stars actually used in the fit is shown in the table above.
+  The result is displayed on a logarithmic scale to reveal structure spanning
+  several orders of magnitude in brightness.
+  <em>Note:</em> the current version of photutils does not expose the actual
+  iteration count or a per-star residual metric through its public API; these
+  fields will be populated automatically if a future photutils release returns
+  them.<br><br>
 
   <strong>What to look for:</strong>
   <ul style="margin:0.4em 0 0 1.2em;padding:0;">
@@ -662,6 +659,41 @@ built at 2&times; oversampling from all quality-filtered stars in the field. A c
 compact core with rapid falloff is ideal. Asymmetric tails indicate tracking,
 guiding, or optical aberrations &mdash; compare tail direction and magnitude between the
 two images to distinguish session-specific from system-wide causes.</p>
+
+{img_mtf}
+<p class="caption">MTF curves for both filters overlaid, derived from the ePSF shown above.
+Higher curve = better contrast preservation at fine scales.</p>
+<div class="info-box"><strong>Reading the MTF plot — and how it is derived from the ePSF:</strong><br><br>
+<strong>From ePSF to MTF:</strong>
+The empirical PSF is first normalised to unit sum so that it represents a probability
+distribution of where a point source&rsquo;s photons land on the detector.
+A 2-D Fast Fourier Transform (FFT) is then applied, producing the complex-valued
+<em>Optical Transfer Function</em> (OTF). The MTF is the magnitude of the OTF:
+MTF(f<sub>x</sub>, f<sub>y</sub>) = |OTF(f<sub>x</sub>, f<sub>y</sub>)|, normalised
+so that MTF(0, 0) = 1. Because the ePSF is built at 2&times; oversampling, the
+frequency axes are divided by the oversampling factor so that the final MTF is
+expressed in <strong>cycles per native image pixel</strong>, with the Nyquist limit
+at exactly 0.5 cyc/px.<br><br>
+<strong>Radial average:</strong>
+The 2-D MTF is isotropically averaged into a 1-D curve by computing the mean MTF
+value within concentric annular bins of width 1 sample, centred on the zero-frequency
+origin. This azimuthal average assumes the PSF is roughly circular; if the ePSF
+shows significant ellipticity, the radial curve represents the geometric mean of the
+MTF along the major and minor axes and will understate the best-case resolution in
+one direction.<br><br>
+<strong>Interpreting the curve:</strong>
+An ideal MTF starts at 1.0 (zero frequency) and decreases monotonically to 0 at
+the Nyquist frequency (0.5 cycles/pixel). Optical aberrations, atmospheric seeing,
+and focus errors lower the curve — especially at higher spatial frequencies.
+<strong>MTF50</strong> is the spatial frequency where contrast falls to 50% —
+analogous to a half-power point; higher MTF50 = sharper images.
+If one filter&rsquo;s curve lies consistently above the other it delivers better
+sharpness at all scales. If the curves cross, one filter is sharper at fine scales
+while the other preserves mid-scale contrast better.<br><br>
+<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset,
+filter tilt, or optical aberrations introduced by the filter glass. A significant
+MTF difference between filters that should be optically identical warrants checking
+filter flatness and seating.</div>
 
 {self._psf_simulation_html(ra, rb)}
 
@@ -885,23 +917,15 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         except Exception:
             return None
 
-    def _plot_psf_crosssections(self, sim: dict) -> "plt.Figure | None":
-        """Three-panel horizontal cross-section through Block 1 at high/medium/low contrast."""
+    def _plot_psf_crosssections(self, sim: dict) -> "list[plt.Figure]":
+        """One dual-subplot figure per contrast level (raw + envelope, sqrt x-axis)."""
         xs_data = sim.get("xs_data", {})
         if not xs_data:
-            return None
+            return []
 
         levels = [("high", "High contrast"), ("medium", "Medium contrast"), ("low", "Low contrast")]
-        n = len([lv for lv, _ in levels if lv in xs_data])
-        if n == 0:
-            return None
-
-        fig, axes = plt.subplots(len(levels), 1, figsize=(10, 4 * len(levels)), sharey=False)
-        if len(levels) == 1:
-            axes = [axes]
 
         def _envelope(arr: np.ndarray, half: int = 5) -> np.ndarray:
-            """Rolling peak-to-valley swing (local contrast envelope)."""
             n = len(arr)
             env = np.empty(n)
             for i in range(n):
@@ -909,46 +933,59 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 env[i] = window.max() - window.min()
             return env
 
-        for ax, (level, title) in zip(axes, levels):
+        figs = []
+        for level, title in levels:
             if level not in xs_data:
-                ax.set_title(f"{title}\n(data unavailable)", fontsize=9)
-                ax.axis("off")
                 continue
             d = xs_data[level]
             n_pts = len(d["original"])
-            # x=1 = finest bars (rightmost pixel of slice); increases toward coarser bars.
-            # Log scale then spreads fine detail where PSF differences matter most.
+            # x=1 = finest bars; increases toward coarser bars (data reversed).
             x = np.arange(1, n_pts + 1)
             orig  = d["original"][::-1]
             a_arr = d["conv_a"][::-1]
             b_arr = d["conv_b"][::-1]
 
-            # Raw traces — light so they don't obscure the envelope
-            ax.plot(x, orig,  color="black",     linewidth=0.6, alpha=0.25)
-            ax.plot(x, a_arr, color="steelblue", linewidth=0.6, alpha=0.25)
-            ax.plot(x, b_arr, color="tomato",    linewidth=0.6, alpha=0.25)
+            fig, (ax_raw, ax_env) = plt.subplots(
+                2, 1, figsize=(10, 6), sharex=True,
+                gridspec_kw={"height_ratios": [2, 1]},
+            )
 
-            # Local contrast envelope — rolling peak-to-valley over ±5 px window
-            ax.plot(x, _envelope(orig),  color="black",     linewidth=1.4,
-                    alpha=XS_LINE_ALPHA, label="Original")
-            ax.plot(x, _envelope(a_arr), color="steelblue", linewidth=1.4,
-                    alpha=XS_LINE_ALPHA, label=sim["label_a"])
-            ax.plot(x, _envelope(b_arr), color="tomato",    linewidth=1.4,
-                    alpha=XS_LINE_ALPHA, label=sim["label_b"])
+            # ── Top: raw intensity traces ──────────────────────────────
+            ax_raw.plot(x, orig,  color="black",     linewidth=1.0, alpha=XS_LINE_ALPHA,
+                        label="Original")
+            ax_raw.plot(x, a_arr, color="steelblue", linewidth=1.0, alpha=XS_LINE_ALPHA,
+                        label=sim["label_a"])
+            ax_raw.plot(x, b_arr, color="tomato",    linewidth=1.0, alpha=XS_LINE_ALPHA,
+                        label=sim["label_b"])
+            ax_raw.set_title(f"{title}  (y = {d['y_px']} px)", fontsize=9)
+            ax_raw.set_ylabel("Intensity [0–1]", fontsize=8)
+            ax_raw.tick_params(labelsize=7)
+            ax_raw.legend(fontsize=7)
+            ax_raw.grid(True, alpha=0.3, which="both")
 
-            ax.set_xscale("log")
-            ax.set_xlim(1, n_pts)
-            ax.set_title(f"{title}\n(y = {d['y_px']} px)", fontsize=9)
-            ax.set_xlabel("Distance from finest bars (px, log scale)  —  fine ← | → coarse",
-                          fontsize=8)
-            ax.set_ylabel("Local contrast (peak − valley)", fontsize=8)
-            ax.tick_params(labelsize=7)
-            ax.legend(fontsize=7)
-            ax.grid(True, alpha=0.3, which="both")
+            # ── Bottom: local contrast envelope ────────────────────────
+            ax_env.plot(x, _envelope(orig),  color="black",     linewidth=1.4,
+                        alpha=XS_LINE_ALPHA, label="Original")
+            ax_env.plot(x, _envelope(a_arr), color="steelblue", linewidth=1.4,
+                        alpha=XS_LINE_ALPHA, label=sim["label_a"])
+            ax_env.plot(x, _envelope(b_arr), color="tomato",    linewidth=1.4,
+                        alpha=XS_LINE_ALPHA, label=sim["label_b"])
+            ax_env.set_ylabel("Local contrast\n(peak − valley)", fontsize=8)
+            ax_env.set_xlabel(
+                "Distance from finest bars (px, √ scale)  —  fine ← | → coarse", fontsize=8)
+            ax_env.tick_params(labelsize=7)
+            ax_env.legend(fontsize=7)
+            ax_env.grid(True, alpha=0.3, which="both")
 
-        fig.suptitle("Test chart horizontal cross-sections at three contrast levels", fontsize=10)
-        fig.tight_layout()
-        return fig
+            # ── Square-root x-axis (shared) ────────────────────────────
+            for ax in (ax_raw, ax_env):
+                ax.set_xscale("function", functions=(np.sqrt, np.square))
+                ax.set_xlim(1, n_pts)
+
+            fig.tight_layout()
+            figs.append(fig)
+
+        return figs
 
     def _plot_psf_modulation(self, sim: dict) -> "plt.Figure | None":
         """Bar chart of Michelson contrast at each contrast level for original vs both filters."""
@@ -984,6 +1021,74 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         fig.tight_layout()
         return fig
 
+    def _plot_psf_band_modulation(self, sim: dict) -> "plt.Figure | None":
+        """Grouped bar chart: mean local contrast per spatial-frequency band, averaged
+        across the three contrast rows.  Four bands span fine → coarse bar periods."""
+        xs_data = sim.get("xs_data", {})
+        if not xs_data:
+            return None
+
+        def _envelope(arr: np.ndarray, half: int = 5) -> np.ndarray:
+            n = len(arr)
+            env = np.empty(n)
+            for i in range(n):
+                window = arr[max(0, i - half): min(n, i + half + 1)]
+                env[i] = window.max() - window.min()
+            return env
+
+        # Bands are index ranges into the *reversed* array (index 0 = finest bar).
+        bands = [
+            ("Fine\n(1–40 px)",       slice(0,   40)),
+            ("Mid-fine\n(41–120 px)", slice(40,  120)),
+            ("Mid\n(121–300 px)",     slice(120, 300)),
+            ("Coarse\n(301+ px)",     slice(300, None)),
+        ]
+        n_bands = len(bands)
+        orig_means = np.zeros(n_bands)
+        a_means    = np.zeros(n_bands)
+        b_means    = np.zeros(n_bands)
+        n_levels   = 0
+
+        for level in ("high", "medium", "low"):
+            if level not in xs_data:
+                continue
+            d = xs_data[level]
+            env_orig = _envelope(d["original"][::-1])
+            env_a    = _envelope(d["conv_a"][::-1])
+            env_b    = _envelope(d["conv_b"][::-1])
+            for i, (_, sl) in enumerate(bands):
+                orig_means[i] += float(np.mean(env_orig[sl]))
+                a_means[i]    += float(np.mean(env_a[sl]))
+                b_means[i]    += float(np.mean(env_b[sl]))
+            n_levels += 1
+
+        if n_levels == 0:
+            return None
+        orig_means /= n_levels
+        a_means    /= n_levels
+        b_means    /= n_levels
+
+        x = np.arange(n_bands)
+        width = 0.25
+
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.bar(x - width, orig_means, width, label="Original",      color="black",     alpha=0.75)
+        ax.bar(x,         a_means,   width, label=sim["label_a"],   color="steelblue", alpha=0.85)
+        ax.bar(x + width, b_means,   width, label=sim["label_b"],   color="tomato",    alpha=0.85)
+        ax.set_xticks(x)
+        ax.set_xticklabels([b[0] for b in bands], fontsize=8)
+        ax.set_ylabel("Mean local contrast (peak − valley)", fontsize=8)
+        ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=8)
+        ax.set_title(
+            "Spatial-frequency-resolved contrast retention\n"
+            "(mean rolling envelope averaged across high / medium / low contrast rows)",
+            fontsize=9,
+        )
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        return fig
+
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
         """Return HTML block with four PSF simulation panels at 1:1 pixel resolution."""
         sim = self._plot_psf_simulation(ra, rb)
@@ -1001,17 +1106,21 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             "Larger values in fine-detail regions indicate a measurable sharpness difference."
         )
 
-        xs_fig  = _img_tag(self._plot_psf_crosssections(sim), "Test chart cross-sections")
-        mod_fig = _img_tag(self._plot_psf_modulation(sim),    "Contrast modulation summary")
+        xs_figs      = self._plot_psf_crosssections(sim)
+        mod_fig      = _img_tag(self._plot_psf_modulation(sim),      "Contrast modulation summary")
+        band_mod_fig = _img_tag(self._plot_psf_band_modulation(sim), "Frequency-band contrast retention")
 
         xs_caption = (
-            "Local contrast envelope (rolling peak&minus;valley over a ±5 px window) at three "
-            "contrast levels. X-axis is log-scale with x&thinsp;=&thinsp;1 at the finest bars "
-            "(right edge of the slice) increasing toward coarser bars, so the resolution-critical "
-            "fine-bar region is spread across the left portion of each panel. "
-            "Light traces show raw intensity; bold lines show the contrast envelope. "
+            "<strong>Top subplot:</strong> raw intensity cross-section through the bar pattern "
+            "at the indicated pixel row. "
+            "<strong>Bottom subplot:</strong> rolling local contrast (peak&minus;valley over a "
+            "±5&thinsp;px window) — this is the envelope of the bar oscillations and directly "
+            "shows how much contrast each PSF preserves at each spatial scale. "
+            "X-axis uses a <strong>square-root scale</strong> (ticks show actual pixel distance "
+            "from the finest bars): fine bars are spread across the left portion of the panel "
+            "where PSF differences matter most, while the coarser end is gently compressed. "
             f"Black = original; blue = {sim['label_a']}; red = {sim['label_b']}. "
-            "A filter with a tighter PSF retains a higher envelope at small x (fine bars)."
+            "A filter with a tighter PSF retains a higher envelope as x approaches 1."
         )
         mod_caption = (
             "Michelson contrast (I<sub>max</sub> &minus; I<sub>min</sub>) / "
@@ -1020,19 +1129,41 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             "The reduction from <em>Original</em> to each filter column quantifies how much "
             "contrast that filter's PSF costs at each spatial frequency represented by the bar width."
         )
+        band_mod_caption = (
+            "Mean rolling local contrast (peak&minus;valley, ±5&thinsp;px window) "
+            "averaged across the high, medium, and low contrast rows, "
+            "grouped into four spatial-frequency bands. "
+            "The <strong>Fine</strong> band (1&ndash;40&thinsp;px bar period) is the most "
+            "sensitive to PSF width: a broader PSF smears the finest bars first, so a larger "
+            "drop from <em>Original</em> to the filter columns here indicates a resolution "
+            "penalty at high spatial frequencies. "
+            "The <strong>Coarse</strong> band (301+&thinsp;px) is largely PSF-insensitive "
+            "and should be near-identical for both filters — a useful sanity check. "
+            "Comparing the two filter bars within each band gives a frequency-resolved "
+            "contrast-retention profile that is directly analogous to the MTF curves derived "
+            "from the ePSF above."
+        )
 
         xs_block = ""
-        if xs_fig:
+        if xs_figs:
+            level_names = ["High contrast", "Medium contrast", "Low contrast"]
+            xs_imgs = "\n".join(
+                f'<h5 style="margin:1em 0 0.3em;">{level_names[i]}</h5>'
+                f'{_img_tag(fig, level_names[i])}'
+                for i, fig in enumerate(xs_figs)
+            )
             xs_block = f"""
 <h4>Horizontal cross-sections — test chart contrast bars</h4>
-<p>Each panel samples a horizontal strip through Block 1 of the test chart at the indicated
-pixel row. The bars within each strip cycle from opaque to transparent, so the cross-section
-reveals how the PSF smooths the edges of each bar. A filter with a tighter PSF retains
-sharper transitions and higher peak-to-valley swing.</p>
-{xs_fig}
+<p>Each figure samples a horizontal strip through Block 1 of the test chart at the indicated
+pixel row. The bar pattern cycles from coarse to fine across the strip, making it a direct
+probe of PSF resolution at multiple spatial frequencies in a single exposure.</p>
+{xs_imgs}
 <p class="caption">{xs_caption}</p>
 {mod_fig}
-<p class="caption">{mod_caption}</p>"""
+<p class="caption">{mod_caption}</p>
+<h4>Spatial-frequency-resolved contrast retention</h4>
+{band_mod_fig}
+<p class="caption">{band_mod_caption}</p>"""
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
@@ -1715,8 +1846,28 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
                                       higher_is_better=False)
         ecr_warn = (' &nbsp;<span class="metric-label-warn">⚠ bandwidth-sensitive</span>'
                     if bw_differ else "")
-        img_a = _img_tag((ea.get("figures") or {}).get("edge"), f"Edge {ra.label}")
-        img_b = _img_tag((eb.get("figures") or {}).get("edge"), f"Edge {rb.label}")
+
+        # Build per-edge figure rows (one pair per detected gradient peak)
+        edges_a = ea.get("edges") or []
+        edges_b = eb.get("edges") or []
+        n_edges = max(len(edges_a), len(edges_b))
+        edge_figures_html = ""
+        for i in range(n_edges):
+            ea_e = edges_a[i] if i < len(edges_a) else {}
+            eb_e = edges_b[i] if i < len(edges_b) else {}
+            img_a_i = _img_tag((ea_e.get("figures") or {}).get("edge"),
+                               f"Edge #{i+1} {ra.label}")
+            img_b_i = _img_tag((eb_e.get("figures") or {}).get("edge"),
+                               f"Edge #{i+1} {rb.label}")
+            if not img_a_i and not img_b_i:
+                continue
+            edge_figures_html += (
+                f'<h4 style="margin-top:1.2em;">Edge #{i+1}</h4>'
+                f'<div style="display:flex;gap:10px;">'
+                + "".join(f'<div style="flex:1;">{img}</div>'
+                          for img in [img_a_i, img_b_i] if img)
+                + "</div>"
+            )
 
         used_sl_a = ea.get("used_starless", False)
         used_sl_b = eb.get("used_starless", False)
@@ -1754,17 +1905,23 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 </div>
 
 <div class="info-box">
-  <strong>How the edge region was selected:</strong>
+  <strong>How the edge regions were selected:</strong>
   The analysis applies an STF stretch to the background-subtracted image to bring
   faint emission boundaries into relief, then computes the Sobel gradient magnitude
-  across the whole frame. A 500 × 500 px context window is displayed in the report,
-  centred on the pixel with the strongest gradient — the sharpest visible edge in the
-  image. The 60 × 60 px analysis region (dashed lime box) is highlighted within this
-  context. If a starless image was provided it is used in place of the stacked image,
-  so the search locates a nebula emission boundary rather than a star profile. Both
-  images are measured over the <em>identical</em> pixel region: Image A's detected ROI
-  coordinates are reused for Image B after alignment, ensuring a direct like-for-like
-  comparison of the same feature.
+  across the whole frame. The <strong>three strongest, well-separated gradient peaks</strong>
+  are located automatically (peaks are suppressed within a 90 px radius after each
+  detection to ensure the three regions sample distinct features). A 500 × 500 px
+  context window is shown for each, centred on the gradient peak; the 60 × 60 px
+  analysis region (dashed lime box) is highlighted within it.
+  If a starless image was provided it is used in place of the stacked image, so the
+  search locates nebula emission boundaries rather than star profiles.
+  Both images are measured over the <em>identical</em> pixel regions: Image A's
+  detected ROI coordinates are reused for Image B after alignment. The
+  <strong>ESF scan direction is taken from whichever image has the stronger overall
+  gradient</strong>, then applied to both, so the two ESF curves always sample the
+  same cross-section orientation and are directly comparable.
+  The table below shows metrics from the strongest of the three edges; individual
+  per-edge figures follow.
 </div>
 
 <table>
@@ -1775,18 +1932,16 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
   <tr><td>Gradient magnitude</td><td>{_val(ea.get("gradient_magnitude"), ".2f")}</td><td>{_val(eb.get("gradient_magnitude"), ".2f")}</td></tr>
 </table>
 
-<div style="display:flex;gap:10px;">
-  {"".join([f'<div style="flex:1;">{img}</div>' for img in [img_a, img_b] if img])}
-</div>
+{edge_figures_html}
 <div class="info-box" style="font-size:0.9em;">
   <strong>Figure panels (left → right):</strong>
   <em>Edge ROI</em> — 500 × 500 px context window centred on the detected gradient peak.
   The <span style="color:#90ee90;font-weight:bold;">dashed lime rectangle</span> marks
   the 60 × 60 px analysis region used for ESF/LSF extraction.
   The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF
-  scan direction (perpendicular to the edge);
+  scan direction (perpendicular to the edge), clipped to the analysis region;
   the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows
-  the detected edge orientation. &nbsp;
+  the detected edge orientation, also clipped to the analysis region. &nbsp;
   <em>ESF</em> — normalised intensity transition; dashed lines mark the 10% and 90%
   levels used for the edge width measurement. &nbsp;
   <em>LSF</em> — derivative of the ESF; peak width and symmetry indicate local

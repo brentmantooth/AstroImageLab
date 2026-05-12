@@ -99,6 +99,7 @@ class PSFAnalyzer:
             result["mtf_nyquist"] = mtf_nyq
             result["epsf_data"] = epsf                       # raw 2D array for convolution
             result["epsf_oversampling"] = EPSF_OVERSAMPLING  # = 2
+            result["epsf_n_stars"]    = getattr(self, "_last_epsf_n_stars",    None)
             result["epsf_converged"]  = getattr(self, "_last_epsf_converged",  None)
             result["epsf_iterations"] = getattr(self, "_last_epsf_iterations", None)
             result["mtf_freq"] = freq
@@ -223,9 +224,11 @@ class PSFAnalyzer:
                 )
                 epsf, epsf_result = builder(extracted)
             epsf_data = epsf.data
-            # EPSFBuilder returns (EPSFModel, EPSFStars) in most photutils versions;
-            # newer builds may return a result object with .converged/.iterations.
-            # Use getattr so either API works without raising AttributeError.
+            # EPSFBuilder returns (EPSFModel, EPSFStars) in most photutils versions.
+            # EPSFStars is a star collection — len() gives the count actually used.
+            # Newer photutils may return a result object with .converged/.iterations;
+            # getattr handles both APIs without raising AttributeError.
+            self._last_epsf_n_stars    = len(epsf_result)
             self._last_epsf_converged  = getattr(epsf_result, "converged",  None)
             self._last_epsf_iterations = getattr(epsf_result, "iterations", None)
         except Exception:

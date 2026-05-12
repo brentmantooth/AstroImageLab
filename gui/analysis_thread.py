@@ -107,14 +107,40 @@ class AnalysisThread(QThread):
 
             def _edge(src_a=sl_a or img_a, src_b=sl_b or img_b, _aligned=aligned):
                 ea = EdgeAnalyzer()
-                # ESF/LSF always use the EdgeAnalyzer's auto-detected ROI — crosshair
-                # is used by Spatial Detail, not by edge analysis.
+
+                # First pass: A auto-detects top-N ROIs (or uses user-drawn roi).
                 result_a.edge_metrics = ea.analyze(src_a, roi=roi)
-                # Reuse A's detected ROI for B so both profiles cover the same pixel
-                # region (valid because A was registered to B's frame after alignment).
-                shared_roi = (result_a.edge_metrics.get("roi_used")
-                              if _aligned and roi is None else roi)
-                result_b.edge_metrics = ea.analyze(src_b, roi=shared_roi)
+
+                # Share A's ROI list with B so both cover identical pixel regions.
+                rois_a = result_a.edge_metrics.get("rois_used")
+                if _aligned and roi is None:
+                    shared = rois_a          # list of (x0,y0,x1,y1) tuples
+                elif roi is not None:
+                    shared = roi             # single user-drawn tuple
+                else:
+                    shared = None
+
+                # First pass on B (auto-detects angles within A's regions).
+                result_b.edge_metrics = ea.analyze(src_b, roi=shared)
+
+                # Angle normalisation: use the scan direction from whichever image
+                # has the stronger overall gradient, so both ESFs measure the same
+                # cross-section orientation.
+                edges_a = result_a.edge_metrics.get("edges", [])
+                edges_b = result_b.edge_metrics.get("edges", [])
+                a_max = max((e.get("gradient_magnitude") or 0 for e in edges_a), default=0)
+                b_max = max((e.get("gradient_magnitude") or 0 for e in edges_b), default=0)
+
+                if edges_a and edges_b and a_max != b_max:
+                    if b_max > a_max:
+                        forced = [e["angle_rad"] for e in edges_b]
+                        result_a.edge_metrics = ea.analyze(src_a, roi=shared,
+                                                           forced_angles=forced)
+                    else:
+                        forced = [e["angle_rad"] for e in edges_a]
+                        result_b.edge_metrics = ea.analyze(src_b, roi=shared,
+                                                           forced_angles=forced)
+
                 result_a.edge_metrics["used_starless"] = sl_a is not None
                 result_b.edge_metrics["used_starless"] = sl_b is not None
             tasks.append(("edge", "Extracting edge spread function", _edge))
