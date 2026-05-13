@@ -152,6 +152,24 @@ class AnalysisThread(QThread):
                 result_b.power_metrics = pa.analyze(ps_b, roi=roi)
                 result_a.power_metrics["used_starless"] = self._starless_a is not None
                 result_b.power_metrics["used_starless"] = self._starless_b is not None
+                # When a starless image was the primary input, also run on the star
+                # image so the report can show the effect of stars on the spectrum.
+                if self._starless_a is not None:
+                    sm = pa.analyze(img_a, roi=roi)
+                    result_a.power_metrics["star_power"] = {
+                        "figures":        sm.get("figures"),
+                        "radial_power":   sm.get("radial_power"),
+                        "freq_axis":      sm.get("freq_axis"),
+                        "mid_high_ratio": sm.get("mid_high_ratio"),
+                    }
+                if self._starless_b is not None:
+                    sm = pa.analyze(img_b, roi=roi)
+                    result_b.power_metrics["star_power"] = {
+                        "figures":        sm.get("figures"),
+                        "radial_power":   sm.get("radial_power"),
+                        "freq_axis":      sm.get("freq_axis"),
+                        "mid_high_ratio": sm.get("mid_high_ratio"),
+                    }
             tasks.append(("power", "Computing power spectrum", _power))
 
         if metrics.get("spatial"):

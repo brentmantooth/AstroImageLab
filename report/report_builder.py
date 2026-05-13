@@ -183,9 +183,13 @@ class ReportBuilder:
         html_path = output_dir / html_filename
 
         # ── Attempt 1: WeasyPrint ──────────────────────────────────────
+        # importlib.import_module() is used deliberately so that PyInstaller's
+        # static AST scanner does not detect weasyprint as a dependency and
+        # bundle it (and its GTK3/Pango DLLs) into the compiled executable.
         try:
-            from weasyprint import HTML as _WPHTML
-            _WPHTML(string=html, base_url=str(output_dir)).write_pdf(str(pdf_path))
+            import importlib as _il
+            _weasy = _il.import_module("weasyprint")
+            _weasy.HTML(string=html, base_url=str(output_dir)).write_pdf(str(pdf_path))
             return pdf_path
         except ImportError:
             wp_reason = "not installed"
@@ -313,7 +317,7 @@ class ReportBuilder:
                          f"<td>{img.bandwidth_nm:.1f} nm</td></tr>")
             n_total = (result.psf_metrics or {}).get("n_stars_total")
             if n_total is not None:
-                rows += (f"<tr><td><strong>Stars detected</strong></td>"
+                rows += (f"<tr><td><strong>Stars detected (raw)</strong></td>"
                          f"<td>{n_total}</td></tr>")
             sl = getattr(img, "starless_image", None)
             if sl is not None:
@@ -321,22 +325,19 @@ class ReportBuilder:
                          f"<td>{sl.path.name}</td></tr>")
             return rows
 
-        # Compute linear stretch limits from main image data for starless thumbnails
-        lo_a, hi_a = np.percentile(img_a.data, [0.1, 99.9])
-        lo_b, hi_b = np.percentile(img_b.data, [0.1, 99.9])
         sl_a = getattr(img_a, "starless_image", None)
         sl_b = getattr(img_b, "starless_image", None)
 
         thumb_a = _img_tag(self._thumbnail_fig(img_a), f"Preview {img_a.label}")
         thumb_b = _img_tag(self._thumbnail_fig(img_b), f"Preview {img_b.label}")
-        thumb_sl_a = _img_tag(self._thumbnail_fig(sl_a, lo=lo_a, hi=hi_a),
+        thumb_sl_a = _img_tag(self._thumbnail_fig(sl_a, ref_data=img_a.data),
                                f"Starless {img_a.label}") if sl_a else ""
-        thumb_sl_b = _img_tag(self._thumbnail_fig(sl_b, lo=lo_b, hi=hi_b),
+        thumb_sl_b = _img_tag(self._thumbnail_fig(sl_b, ref_data=img_b.data),
                                f"Starless {img_b.label}") if sl_b else ""
 
-        sl_cap_a = ('<p class="caption">Starless (linear stretch, same scale)</p>'
+        sl_cap_a = ('<p class="caption">Starless (STF-matched stretch)</p>'
                     if sl_a else "")
-        sl_cap_b = ('<p class="caption">Starless (linear stretch, same scale)</p>'
+        sl_cap_b = ('<p class="caption">Starless (STF-matched stretch)</p>'
                     if sl_b else "")
 
         hist_tag = _img_tag(self._plot_image_histograms(img_a, img_b), "Pixel histograms")
@@ -402,19 +403,18 @@ class ReportBuilder:
             return None
 
     def _thumbnail_fig(self, img: AstroImage,
-                        lo: float | None = None,
-                        hi: float | None = None) -> plt.Figure | None:
+                        ref_data: np.ndarray | None = None) -> plt.Figure | None:
         """Return a small matplotlib figure with a stretched preview of the image.
 
-        If lo/hi are provided, apply a manual linear stretch using those clip limits
-        (used for starless thumbnails so the scale matches the main image).
+        If ref_data is provided, apply STF stretch parameters derived from ref_data
+        to img (used for starless thumbnails so the tonal curve matches the star image).
         """
         if img is None or img.data is None:
             return None
         try:
-            if lo is not None and hi is not None:
-                hi_eff = hi if hi > lo else lo + 1.0
-                arr_f = np.clip((img.data.astype(float) - lo) / (hi_eff - lo), 0.0, 1.0)
+            if ref_data is not None:
+                from core.stretch import stf_stretch_matched
+                arr_f = stf_stretch_matched(img.data, ref_data)
                 max_dim = max(arr_f.shape[:2])
                 if max_dim > 400:
                     step = max_dim // 400 + 1
@@ -521,10 +521,14 @@ shown in the metadata table above.</div>"""
 The Modulation Transfer Function (MTF) shows how well contrast is preserved at each
 spatial frequency; MTF50 is the frequency at which contrast falls to 50%.
 These metrics are normalised to unit amplitude and are valid regardless of filter bandwidth.</div>
+<div class="info-box">Stars are detected with DAOStarFinder at a 5σ threshold, which
+intentionally casts a wide net. Only isolated, high-quality stars (SNR ≥ 30,
+separation ≥ 5×FWHM from neighbours, 50-pixel border margin) are passed to PSF and
+ePSF fitting. A high raw detection count relative to stars used is normal and expected.</div>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
-  <tr><td>Stars in catalog</td><td>{_val(pa.get("n_stars_total"), "d")}</td><td>{_val(pb.get("n_stars_total"), "d")}</td></tr>
+  <tr><td>Stars detected (raw)</td><td>{_val(pa.get("n_stars_total"), "d")}</td><td>{_val(pb.get("n_stars_total"), "d")}</td></tr>
   <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td></tr>
   <tr><td>FWHM (px)</td><td class="{ca}">{_val(pa.get("fwhm_px"))}</td><td class="{cb}">{_val(pb.get("fwhm_px"))}</td></tr>
   <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val(pa.get("fwhm_arcsec"))}</td><td class="{cb}">{_val(pb.get("fwhm_arcsec"))}</td></tr>
@@ -1879,6 +1883,27 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
                        f'used the starless image so the strongest gradient search locates '
                        f'a nebula emission boundary rather than a star profile.</div>')
 
+        # Gradient map comparison row (1×2)
+        grad_fig_a = _img_tag((ea.get("figures") or {}).get("gradient_map"),
+                               f"Gradient {ra.label}")
+        grad_fig_b = _img_tag((eb.get("figures") or {}).get("gradient_map"),
+                               f"Gradient {rb.label}")
+        if grad_fig_a or grad_fig_b:
+            gradient_row = (
+                '<h4>Gradient magnitude (ROI auto-detection map)</h4>'
+                '<div style="display:flex;gap:10px;">'
+                + "".join(f'<div style="flex:1;">{img}</div>'
+                          for img in [grad_fig_a, grad_fig_b] if img)
+                + '</div>'
+                '<p class="caption">Gaussian gradient magnitude used to locate the '
+                'strongest edge regions. Dashed lime boxes show the three selected '
+                'analysis ROIs. Sigma is pixel-scale adaptive (≈ 1.5 arcsec equivalent) '
+                'so diffuse gradients in long-focal-length images are captured '
+                'as reliably as sharp edges in short-focal-length data.</p>'
+            )
+        else:
+            gradient_row = ""
+
         return f"""
 <h2>6. Local Contrast / Edge Analysis</h2>
 {err}
@@ -1890,11 +1915,15 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
   the steeper the transition, the better the local contrast and resolution.
   Normalised to [0, 1], the ESF shape is <strong>bandwidth-independent ✓</strong>
   and directly comparable between filters.<br><br>
-  <strong>Line Spread Function (LSF)</strong> — The derivative of the ESF.
-  Ideally a narrow, symmetric peak centred on the edge. A broader LSF peak
-  indicates softer resolution at that spatial frequency. Asymmetry or secondary
-  lobes can indicate optical aberrations, atmospheric dispersion, or poor focus
-  stability during the integration.<br><br>
+  <strong>Line Spread Function (LSF)</strong> — The derivative of the ESF,
+  computed with a Savitzky-Golay filter (cubic polynomial, window ≈ 18% of the
+  ESF length, typically 11 points). SG fitting smooths sample-to-sample noise
+  while preserving the height and width of narrow peaks better than a simple
+  finite-difference derivative or Gaussian smoothing, making it the standard
+  method for ESF differentiation in optical MTF analysis (ISO 12233). Ideally a
+  narrow, symmetric peak centred on the edge. A broader LSF peak indicates softer
+  resolution; asymmetry or secondary lobes can indicate optical aberrations,
+  atmospheric dispersion, or poor focus stability during the integration.<br><br>
   <strong>10–90% edge width</strong> — The pixel (or arcsec) distance between
   the 10% and 90% intensity points on the ESF. Smaller values indicate a
   sharper, better-resolved edge. Use the arcsec figure for cross-image comparison
@@ -1907,8 +1936,12 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 <div class="info-box">
   <strong>How the edge regions were selected:</strong>
   The analysis applies an STF stretch to the background-subtracted image to bring
-  faint emission boundaries into relief, then computes the Sobel gradient magnitude
-  across the whole frame. The <strong>three strongest, well-separated gradient peaks</strong>
+  faint emission boundaries into relief, then computes a <strong>pixel-scale-adaptive
+  Gaussian gradient magnitude</strong> (sigma ≈ 1.5 arcsec, capped 1–8 px) across
+  the whole frame. Using a Gaussian gradient rather than a fixed 3×3 Sobel kernel
+  means that diffuse gradients in long-focal-length images are detected as reliably
+  as sharp edges in short-focal-length data.
+  The <strong>three strongest, well-separated gradient peaks</strong>
   are located automatically (peaks are suppressed within a 90 px radius after each
   detection to ensure the three regions sample distinct features). A 500 × 500 px
   context window is shown for each, centred on the gradient peak; the 60 × 60 px
@@ -1923,6 +1956,7 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
   The table below shows metrics from the strongest of the three edges; individual
   per-edge figures follow.
 </div>
+{gradient_row}
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -1973,8 +2007,10 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
   </ul>
 </div>"""
 
-    def _plot_radial_overlay(self, ra: AnalysisResult, rb: AnalysisResult) -> plt.Figure | None:
-        """Overlay both radial power curves on a single axes."""
+    def _plot_radial_overlay(self, ra: AnalysisResult, rb: AnalysisResult,
+                              star_pa: dict | None = None,
+                              star_pb: dict | None = None) -> plt.Figure | None:
+        """Overlay radial power curves; adds dashed star-image curves when available."""
         pa = ra.power_metrics or {}
         pb = rb.power_metrics or {}
         freq_a = pa.get("freq_axis")
@@ -1983,9 +2019,26 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
         rp_b = pb.get("radial_power")
         if freq_a is None or rp_a is None or freq_b is None or rp_b is None:
             return None
+        have_stars = bool(star_pa or star_pb)
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.semilogy(freq_a, rp_a, color="steelblue", linewidth=2, label=ra.label)
-        ax.semilogy(freq_b, rp_b, color="tomato", linewidth=2, label=rb.label)
+        lbl_a = f"{ra.label} (starless)" if have_stars else ra.label
+        lbl_b = f"{rb.label} (starless)" if have_stars else rb.label
+        ax.semilogy(freq_a, rp_a, color="steelblue", linewidth=2, label=lbl_a)
+        ax.semilogy(freq_b, rp_b, color="tomato",    linewidth=2, label=lbl_b)
+        if star_pa:
+            sf = star_pa.get("freq_axis")
+            sr = star_pa.get("radial_power")
+            if sf is not None and sr is not None:
+                ax.semilogy(sf, sr, color="steelblue", linewidth=1.5,
+                            linestyle="--", alpha=0.6,
+                            label=f"{ra.label} (with stars)")
+        if star_pb:
+            sf = star_pb.get("freq_axis")
+            sr = star_pb.get("radial_power")
+            if sf is not None and sr is not None:
+                ax.semilogy(sf, sr, color="tomato", linewidth=1.5,
+                            linestyle="--", alpha=0.6,
+                            label=f"{rb.label} (with stars)")
         ax.axvline(0.10, color="gray", linestyle="--", linewidth=0.8,
                    label="Low / mid boundary (0.10 cyc/px)")
         ax.set_xlabel("Spatial frequency (cycles/pixel)")
@@ -2006,7 +2059,15 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
         ca, cb = _better_worse_class(pa.get("mid_high_ratio"), pb.get("mid_high_ratio"))
         img_a = _img_tag((pa.get("figures") or {}).get("power_spectrum"), f"PS {ra.label}")
         img_b = _img_tag((pb.get("figures") or {}).get("power_spectrum"), f"PS {rb.label}")
-        img_overlay = _img_tag(self._plot_radial_overlay(ra, rb), "Radial power overlay")
+
+        star_pa = pa.get("star_power") or {}
+        star_pb = pb.get("star_power") or {}
+        img_overlay = _img_tag(
+            self._plot_radial_overlay(ra, rb,
+                                      star_pa=star_pa or None,
+                                      star_pb=star_pb or None),
+            "Radial power overlay",
+        )
 
         sl_note = ""
         used_a = pa.get("used_starless", False)
@@ -2018,15 +2079,39 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
                        f'was computed on the starless image to reduce star contamination '
                        f'of the spatial frequency content.</div>')
 
+        # Star-image comparison row (only when starless was the primary input)
+        star_row_html = ""
+        if star_pa or star_pb:
+            img_star_a = _img_tag(
+                (star_pa.get("figures") or {}).get("power_spectrum"),
+                f"PS (with stars) {ra.label}",
+            )
+            img_star_b = _img_tag(
+                (star_pb.get("figures") or {}).get("power_spectrum"),
+                f"PS (with stars) {rb.label}",
+            )
+            star_row_html = f"""
+<h4>With stars</h4>
+<div style="display:flex;gap:10px;">
+  <div style="flex:1;">{img_star_a}</div>
+  <div style="flex:1;">{img_star_b}</div>
+</div>
+<p class="caption">Power spectrum computed on the original (star-containing) image.
+Comparing with the starless curves above shows how stars elevate mid/high-frequency
+power through their profiles, halos, and diffraction spikes.</p>"""
+
         return f"""
 <h2>7. Micro-contrast / Power Spectrum &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
 {err}
 {sl_note}
 <div class="info-box">The 2D power spectrum of a star-free nebula region reveals the
-spatial frequency content of the image. All data is divided by the mean signal before
-the FFT, making the result dimensionless and comparable across filters with different
-bandwidths. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px) measures
-fine detail content relative to coarse structure.
+spatial frequency content of the image. All data is divided by the mean signal, then
+mean-subtracted and multiplied by a 2D Hanning window before the FFT. Division by the
+mean makes the result dimensionless and comparable across filters with different
+bandwidths; mean subtraction and windowing suppress DC leakage from the image edges.
+Residual power at the lowest frequencies reflects genuine large-scale nebula structure
+rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px)
+measures fine detail content relative to coarse structure.
 <br><strong>Note:</strong> This comparison is only meaningful when both images cover
 the same target region.</div>
 
@@ -2036,14 +2121,15 @@ the same target region.</div>
 </table>
 
 {img_overlay}
-<p class="caption">Radial power spectra overlaid (log scale). Curves that diverge at
+<p class="caption">Radial power spectra overlaid (log scale). Solid curves = starless; dashed curves = with stars (when starless images were provided). Curves that diverge at
 high frequencies indicate one filter preserves more fine-scale spatial detail. The
-dashed line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
+dashed vertical line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
 
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_a}</div>
   <div style="flex:1;">{img_b}</div>
-</div>"""
+</div>
+{star_row_html}"""
 
     # ── Section 8: Spatial detail ──────────────────────────────────────────────
 

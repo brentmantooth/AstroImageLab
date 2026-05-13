@@ -65,6 +65,43 @@ def stf_stretch(data: np.ndarray,
     return mtf(scaled, midtones)
 
 
+def stf_stretch_matched(data: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """Apply STF stretch parameters derived from ref to data.
+
+    Both arrays are normalized into [0,1] using ref's finite min/max, then
+    the same midtone-balance parameters (c, m) computed from ref are applied to
+    data. Use this to display a starless image with the same tonal mapping as
+    the corresponding star image.
+    """
+    ref_f = ref[np.isfinite(ref)].astype(np.float32)
+    if ref_f.size == 0:
+        return np.zeros_like(data, dtype=np.float32)
+    ref_min, ref_max = float(ref_f.min()), float(ref_f.max())
+    if ref_max <= ref_min:
+        return np.zeros_like(data, dtype=np.float32)
+    span = ref_max - ref_min
+
+    norm_ref  = np.clip((ref.astype(np.float32)  - ref_min) / span, 0.0, 1.0)
+    norm_data = np.clip((data.astype(np.float32) - ref_min) / span, 0.0, 1.0)
+
+    finite_ref = norm_ref[np.isfinite(norm_ref)]
+    if finite_ref.size == 0:
+        return norm_data
+    med = float(np.median(finite_ref))
+    mad = float(np.median(np.abs(finite_ref - med)))
+    c = float(np.clip(med - 2.8 * 1.4826 * mad, 0.0, 1.0 - 1e-6))
+    denom = 1.0 - c
+    if denom <= 0.0:
+        return norm_data
+
+    scaled = np.clip((norm_data - c) / denom, 0.0, 1.0)
+    med_c = float(np.clip(med - c, 0.0, 1.0))
+    midtones = float(mtf(med_c, 0.2))
+    if not np.isfinite(midtones) or midtones <= 0.0 or midtones >= 1.0:
+        return scaled
+    return mtf(scaled, midtones)
+
+
 def normalize_for_display(data: np.ndarray,
                            stretch: bool = True) -> np.ndarray:
     finite = data[np.isfinite(data)]

@@ -6,6 +6,13 @@ from PyInstaller.utils.hooks import copy_metadata
 datas = []
 binaries = []
 
+# Explicitly collect the DLLs bundled inside conda's numpy and scipy packages.
+# The standard PyInstaller numpy hook misses these when building from a conda
+# environment (warns "Conda distribution '__win' was not found"), causing
+# "Importing the numpy C-extensions failed" at runtime.
+binaries += collect_dynamic_libs("numpy")
+binaries += collect_dynamic_libs("scipy")
+
 # xisf (XISF image format support)
 hiddenimports = ["xisf", "zstandard", "lz4", "lz4.block"]
 datas += copy_metadata("xisf")
@@ -13,7 +20,8 @@ binaries += collect_dynamic_libs("zstandard")
 binaries += collect_dynamic_libs("lz4")
 
 # astropy — ships coordinate/FITS reference data files needed at runtime
-datas += collect_data_files("astropy")
+datas += collect_data_files("astropy",
+    excludes=["**/tests/**", "**/test_data/**", "**/codata/**"])
 
 # matplotlib — ships mpl-data (fonts, styles, colormaps)
 datas += collect_data_files("matplotlib")
@@ -61,12 +69,18 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    hooksconfig={},
+    hooksconfig={
+        # Restrict Qt plugin DLLs — only what the app needs.
+        "PyQt6": {
+            "qt_plugins": ["platforms", "styles", "imageformats"],
+        },
+    },
     runtime_hooks=[],
     excludes=[
         "PySide6",
         "tkinter",
-        # Dev tools dragged in as transitive deps — not needed at runtime
+
+        # Dev tools
         "IPython",
         "sphinx",
         "docutils",
@@ -82,9 +96,18 @@ a = Analysis(
         "yapf_third_party",
         "blib2to3",
         "psutil",
+
+        # WeasyPrint — import moved to importlib.import_module() in code
+        # so this exclusion is now effective
+        "weasyprint",
+        "cairocffi",
+        "cairosvg",
+        "tinycss2",
+        "pydyf",
+        "zopfli",
     ],
     noarchive=False,
-    optimize=0,
+    optimize=2,
 )
 pyz = PYZ(a.pure)
 

@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.ndimage import sobel, rotate
+from scipy.ndimage import sobel, rotate, gaussian_gradient_magnitude
 from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
@@ -13,6 +13,16 @@ from core.models import EDGE_ROI_HALF_WIDTH
 
 EDGE_DISPLAY_HALF_WIDTH = 250   # half-side of the context window shown in the report figure
 N_TOP_EDGES = 3                  # number of gradient peaks to auto-detect
+
+
+def _gradient_sigma(pixel_scale: float) -> float:
+    """Gaussian sigma in pixels giving ~1.5 arcsec equivalent smoothing, capped 1–8 px.
+
+    Long-focal-length images have small pixel scales (e.g. 0.3 "/px) and their
+    nebula-edge gradients span many pixels; a larger sigma avoids missing them.
+    Short-focal-length images (e.g. 2 "/px) keep sigma near 1 px.
+    """
+    return float(np.clip(1.5 / max(pixel_scale, 0.01), 1.0, 8.0))
 
 
 class EdgeAnalyzer:
@@ -118,6 +128,14 @@ class EdgeAnalyzer:
                 }),
             })
 
+        # Full-image gradient map for report visualisation
+        from core.stretch import stf_stretch
+        sigma = _gradient_sigma(image.pixel_scale)
+        gm_full = gaussian_gradient_magnitude(
+            stf_stretch(bgsub).astype(np.float64), sigma=sigma
+        )
+        gradient_fig = self._plot_gradient_map(gm_full, image.label, rois_used)
+
         # Top-level keys populated from the strongest edge for summary-table compat
         result: dict = {
             "edges":                 edges,
@@ -130,6 +148,7 @@ class EdgeAnalyzer:
             "esf":                   None,
             "lsf":                   None,
             "roi_used":              rois_used[0] if rois_used else None,
+            "figures":               figs_to_b64({"gradient_map": gradient_fig}),
         }
         if edges:
             best = max(edges, key=lambda e: e.get("gradient_magnitude") or 0)
@@ -149,9 +168,8 @@ class EdgeAnalyzer:
         """Find n well-separated patches centred on the strongest gradients."""
         from core.stretch import stf_stretch
         stretched = stf_stretch(bgsub).astype(np.float64)
-        gx = sobel(stretched, axis=1)
-        gy = sobel(stretched, axis=0)
-        gm = np.sqrt(gx ** 2 + gy ** 2)
+        sigma = _gradient_sigma(image.pixel_scale)
+        gm = gaussian_gradient_magnitude(stretched, sigma=sigma)
 
         margin = EDGE_ROI_HALF_WIDTH + 5
         gm[:margin, :] = 0
@@ -230,7 +248,16 @@ class EdgeAnalyzer:
 
     def _compute_lsf(self, positions: np.ndarray,
                       esf: np.ndarray) -> np.ndarray:
-        return np.gradient(esf, positions)
+        from scipy.signal import savgol_filter
+        n = len(esf)
+        # Window: ~18% of ESF length, minimum 5, always odd, must be < n
+        raw_w = max(5, round(0.18 * n))
+        window = raw_w if raw_w % 2 == 1 else raw_w + 1
+        window = min(window, n if n % 2 == 1 else n - 1)
+        if window < 5 or window >= n:
+            return np.gradient(esf, positions)
+        delta = float(positions[1] - positions[0]) if len(positions) > 1 else 1.0
+        return savgol_filter(esf, window_length=window, polyorder=3, deriv=1, delta=delta)
 
     def _measure_edge_width(self, positions: np.ndarray,
                              esf: np.ndarray) -> float | None:
@@ -268,6 +295,35 @@ class EdgeAnalyzer:
 
     # ------------------------------------------------------------------
     # Figure
+    # ------------------------------------------------------------------
+    # Gradient map visualisation
+    # ------------------------------------------------------------------
+
+    def _plot_gradient_map(self, gm: np.ndarray, label: str,
+                            rois_used: list) -> plt.Figure:
+        """Full-image gradient magnitude with detected ROI rectangles overlaid."""
+        from matplotlib.patches import Rectangle
+        h, w = gm.shape
+        aspect = h / max(w, 1)
+        fig_w = min(8.0, max(4.0, w / 400))
+        fig, ax = plt.subplots(figsize=(fig_w, fig_w * aspect))
+        step = max(1, max(h, w) // 800)
+        disp = gm[::step, ::step]
+        vmax = float(np.percentile(disp, 99)) or 1.0
+        ax.imshow(disp, origin="lower", cmap="inferno",
+                  vmin=0, vmax=vmax,
+                  extent=[0, w, 0, h], aspect="equal", interpolation="nearest")
+        for (x0, y0, x1, y1) in rois_used:
+            rect = Rectangle((x0, y0), x1 - x0, y1 - y0,
+                              linewidth=1.2, edgecolor="lime", facecolor="none",
+                              linestyle="--")
+            ax.add_patch(rect)
+        ax.set_title(f"Gradient magnitude — {label}")
+        ax.set_xlabel("X (px)")
+        ax.set_ylabel("Y (px)")
+        fig.tight_layout()
+        return fig
+
     # ------------------------------------------------------------------
 
     def _plot_results(self, roi_data: np.ndarray,
