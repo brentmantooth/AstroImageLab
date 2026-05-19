@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.ndimage import sobel, rotate, gaussian_gradient_magnitude
+from scipy.ndimage import sobel, rotate, gaussian_gradient_magnitude, median_filter
 from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
@@ -136,6 +136,14 @@ class EdgeAnalyzer:
         )
         gradient_fig = self._plot_gradient_map(gm_full, image.label, rois_used)
 
+        # Store downsampled log-transformed display array for shared-scale rendering
+        h_gm, w_gm = gm_full.shape
+        step_gm = max(1, max(h_gm, w_gm) // 800)
+        log_gm_full = np.log1p(gm_full)
+        gm_display = log_gm_full[::step_gm, ::step_gm].astype(np.float32)
+        gm_display = median_filter(gm_display, size=3)
+        gm_log_vmax = float(np.percentile(gm_display, 99)) or 1.0
+
         # Top-level keys populated from the strongest edge for summary-table compat
         result: dict = {
             "edges":                 edges,
@@ -148,6 +156,9 @@ class EdgeAnalyzer:
             "esf":                   None,
             "lsf":                   None,
             "roi_used":              rois_used[0] if rois_used else None,
+            "gm_display":            gm_display,
+            "gm_log_vmax":           gm_log_vmax,
+            "gm_shape":              (h_gm, w_gm),
             "figures":               figs_to_b64({"gradient_map": gradient_fig}),
         }
         if edges:
@@ -307,8 +318,10 @@ class EdgeAnalyzer:
         aspect = h / max(w, 1)
         fig_w = min(8.0, max(4.0, w / 400))
         fig, ax = plt.subplots(figsize=(fig_w, fig_w * aspect))
+        log_gm = np.log1p(gm)
         step = max(1, max(h, w) // 800)
-        disp = gm[::step, ::step]
+        disp = log_gm[::step, ::step]
+        disp = median_filter(disp, size=3)
         vmax = float(np.percentile(disp, 99)) or 1.0
         ax.imshow(disp, origin="lower", cmap="inferno",
                   vmin=0, vmax=vmax,

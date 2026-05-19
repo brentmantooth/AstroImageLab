@@ -13,6 +13,7 @@ class SNRAnalyzer:
     """Compute signal-to-noise ratio metrics from pre-computed background estimates."""
 
     def analyze(self, image: AstroImage) -> dict:
+        image.estimate_background()
         bgsub = image.background_subtracted().astype(np.float64)
         rms = image.background_rms  # 2D array from Background2D
 
@@ -57,7 +58,15 @@ class SNRAnalyzer:
             for thr in (3, 5, 10, 20)
         }
 
-        # --- Figure -------------------------------------------------------
+        # --- Downsampled display array for shared-scale report rendering ---
+        h_s, w_s = snr_map.shape
+        step_s = max(1, max(h_s, w_s) // 800)
+        snr_display = snr_map[::step_s, ::step_s].astype(np.float32)
+        finite_pos = snr_display[np.isfinite(snr_display) & (snr_display > 0)]
+        snr_p2  = float(np.percentile(finite_pos, 2))  if finite_pos.size > 0 else 0.0
+        snr_p98 = float(np.percentile(finite_pos, 98)) if finite_pos.size > 0 else 10.0
+
+        # --- Figure (per-image, for PNG export) ---------------------------
         snr_map_fig = self._plot_snr_map(snr_map, image.label)
 
         return {
@@ -69,6 +78,9 @@ class SNRAnalyzer:
             "pct_above_5":     pcts[5],
             "pct_above_10":    pcts[10],
             "pct_above_20":    pcts[20],
+            "snr_display":     snr_display,
+            "snr_p2":          snr_p2,
+            "snr_p98":         snr_p98,
             "figures":         {"snr_map": snr_map_fig},
         }
 

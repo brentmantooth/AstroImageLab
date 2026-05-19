@@ -888,11 +888,15 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             xs_data: dict = {}
             for level, y_px in _XS_Y_ROWS.items():
                 if 0 <= y_px < test_arr.shape[0] and 830 < test_arr.shape[1]:
+                    half_strip = 50
+                    y0_strip = max(0, y_px - half_strip)
+                    y1_strip = min(test_arr.shape[0], y_px + half_strip)
                     xs_data[level] = {
-                        "y_px":     y_px,
-                        "original": test_arr[y_px, _XS_X].copy(),
-                        "conv_a":   conv_a[y_px, _XS_X].copy(),
-                        "conv_b":   conv_b[y_px, _XS_X].copy(),
+                        "y_px":        y_px,
+                        "original":    test_arr[y_px, _XS_X].copy(),
+                        "conv_a":      conv_a[y_px, _XS_X].copy(),
+                        "conv_b":      conv_b[y_px, _XS_X].copy(),
+                        "image_strip": test_arr[y0_strip:y1_strip, _XS_X].copy(),
                     }
 
             # Downsample for display if image is very large (cap at 1200 px on long edge)
@@ -949,26 +953,48 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             orig  = d["original"][::-1]
             a_arr = d["conv_a"][::-1]
             b_arr = d["conv_b"][::-1]
+            strip = d.get("image_strip")
 
-            fig, (ax_raw, ax_env) = plt.subplots(
-                2, 1, figsize=(10, 6), sharex=True,
-                gridspec_kw={"height_ratios": [2, 1]},
-            )
+            # Build layout: optional image strip on top, then raw + envelope
+            if strip is not None:
+                fig = plt.figure(figsize=(10, 8))
+                gs  = fig.add_gridspec(3, 1, height_ratios=[1, 2, 1], hspace=0.08)
+                ax_img = fig.add_subplot(gs[0])
+                ax_raw = fig.add_subplot(gs[1])
+                ax_env = fig.add_subplot(gs[2], sharex=ax_raw)
+            else:
+                fig = plt.figure(figsize=(10, 6))
+                gs  = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.08)
+                ax_raw = fig.add_subplot(gs[0])
+                ax_env = fig.add_subplot(gs[1], sharex=ax_raw)
 
-            # ── Top: raw intensity traces ──────────────────────────────
+            # ── Image strip (linear x-scale, NOT shared with plots below) ─
+            if strip is not None:
+                strip_flipped = strip[:, ::-1]
+                # vmin/vmax fixed at [0, 1] — matches ideal test chart appearance
+                ax_img.imshow(strip_flipped, cmap="gray", aspect="auto",
+                              interpolation="nearest", vmin=0.0, vmax=1.0)
+                ax_img.set_title(f"{title}  (y = {d['y_px']} px,  original test chart strip)",
+                                 fontsize=9)
+                ax_img.set_ylabel("y (px)", fontsize=7)
+                ax_img.tick_params(axis="x", labelbottom=False)
+                ax_img.tick_params(labelsize=7)
+
+            # ── Raw intensity traces ───────────────────────────────────
             ax_raw.plot(x, orig,  color="black",     linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label="Original")
             ax_raw.plot(x, a_arr, color="steelblue", linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label=sim["label_a"])
             ax_raw.plot(x, b_arr, color="tomato",    linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label=sim["label_b"])
-            ax_raw.set_title(f"{title}  (y = {d['y_px']} px)", fontsize=9)
+            if strip is None:
+                ax_raw.set_title(f"{title}  (y = {d['y_px']} px)", fontsize=9)
             ax_raw.set_ylabel("Intensity [0–1]", fontsize=8)
             ax_raw.tick_params(labelsize=7)
             ax_raw.legend(fontsize=7)
             ax_raw.grid(True, alpha=0.3, which="both")
 
-            # ── Bottom: local contrast envelope ────────────────────────
+            # ── Local contrast envelope ────────────────────────────────
             ax_env.plot(x, _envelope(orig),  color="black",     linewidth=1.4,
                         alpha=XS_LINE_ALPHA, label="Original")
             ax_env.plot(x, _envelope(a_arr), color="steelblue", linewidth=1.4,
@@ -982,7 +1008,7 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             ax_env.legend(fontsize=7)
             ax_env.grid(True, alpha=0.3, which="both")
 
-            # ── Square-root x-axis (shared) ────────────────────────────
+            # ── Square-root x-axis on plot panels (NOT image strip) ───
             for ax in (ax_raw, ax_env):
                 ax.set_xscale("function", functions=(np.sqrt, np.square))
                 ax.set_xlim(1, n_pts)
@@ -1048,49 +1074,45 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             ("Mid\n(121–300 px)",     slice(120, 300)),
             ("Coarse\n(301+ px)",     slice(300, None)),
         ]
-        n_bands = len(bands)
-        orig_means = np.zeros(n_bands)
-        a_means    = np.zeros(n_bands)
-        b_means    = np.zeros(n_bands)
-        n_levels   = 0
+        level_info = [
+            ("high",   "High contrast"),
+            ("medium", "Medium contrast"),
+            ("low",    "Low contrast"),
+        ]
+        available = [(k, t) for k, t in level_info if k in xs_data]
+        if not available:
+            return None
 
-        for level in ("high", "medium", "low"):
-            if level not in xs_data:
-                continue
-            d = xs_data[level]
+        n_bands = len(bands)
+        x       = np.arange(n_bands)
+        width = 0.25
+
+        fig, axes = plt.subplots(len(available), 1,
+                                  figsize=(9, 4 * len(available)), squeeze=False)
+
+        for ax_row, (level, level_title) in zip(axes[:, 0], available):
+            d        = xs_data[level]
             env_orig = _envelope(d["original"][::-1])
             env_a    = _envelope(d["conv_a"][::-1])
             env_b    = _envelope(d["conv_b"][::-1])
-            for i, (_, sl) in enumerate(bands):
-                orig_means[i] += float(np.mean(env_orig[sl]))
-                a_means[i]    += float(np.mean(env_a[sl]))
-                b_means[i]    += float(np.mean(env_b[sl]))
-            n_levels += 1
+            orig_vals = [float(np.mean(env_orig[sl])) for _, sl in bands]
+            a_vals    = [float(np.mean(env_a[sl]))    for _, sl in bands]
+            b_vals    = [float(np.mean(env_b[sl]))    for _, sl in bands]
 
-        if n_levels == 0:
-            return None
-        orig_means /= n_levels
-        a_means    /= n_levels
-        b_means    /= n_levels
+            ax_row.bar(x - width, orig_vals, width, label="Original",
+                       color="black",     alpha=0.75)
+            ax_row.bar(x,         a_vals,   width, label=sim["label_a"],
+                       color="steelblue", alpha=0.85)
+            ax_row.bar(x + width, b_vals,   width, label=sim["label_b"],
+                       color="tomato",    alpha=0.85)
+            ax_row.set_xticks(x)
+            ax_row.set_xticklabels([b[0] for b in bands], fontsize=8)
+            ax_row.set_ylabel("Mean local contrast\n(peak − valley)", fontsize=8)
+            ax_row.set_title(f"Contrast retention — {level_title}", fontsize=9)
+            ax_row.legend(fontsize=8)
+            ax_row.grid(True, alpha=0.3, axis="y")
 
-        x = np.arange(n_bands)
-        width = 0.25
-
-        fig, ax = plt.subplots(figsize=(9, 4))
-        ax.bar(x - width, orig_means, width, label="Original",      color="black",     alpha=0.75)
-        ax.bar(x,         a_means,   width, label=sim["label_a"],   color="steelblue", alpha=0.85)
-        ax.bar(x + width, b_means,   width, label=sim["label_b"],   color="tomato",    alpha=0.85)
-        ax.set_xticks(x)
-        ax.set_xticklabels([b[0] for b in bands], fontsize=8)
-        ax.set_ylabel("Mean local contrast (peak − valley)", fontsize=8)
-        ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=8)
-        ax.set_title(
-            "Spatial-frequency-resolved contrast retention\n"
-            "(mean rolling envelope averaged across high / medium / low contrast rows)",
-            fontsize=9,
-        )
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3, axis="y")
+        axes[-1, 0].set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=8)
         fig.tight_layout()
         return fig
 
@@ -1116,14 +1138,19 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         band_mod_fig = _img_tag(self._plot_psf_band_modulation(sim), "Frequency-band contrast retention")
 
         xs_caption = (
-            "<strong>Top subplot:</strong> raw intensity cross-section through the bar pattern "
+            "<strong>Top panel (image strip):</strong> ~100-row grayscale strip from the original "
+            "test chart centred on the cross-section row, displayed with finest bars at the left "
+            "(same left-right orientation as the plots below). Color scale is fixed at [0, 1] so "
+            "bars appear as in the ideal chart. The image x-axis is linear pixel spacing; the "
+            "plots below use a square-root scale, so bar widths do not align exactly. "
+            "<strong>Middle subplot:</strong> raw intensity cross-section through the bar pattern "
             "at the indicated pixel row. "
             "<strong>Bottom subplot:</strong> rolling local contrast (peak&minus;valley over a "
-            "±5&thinsp;px window) — this is the envelope of the bar oscillations and directly "
-            "shows how much contrast each PSF preserves at each spatial scale. "
+            "±5&thinsp;px window) — the envelope of bar oscillations, showing how much contrast "
+            "each PSF preserves at each spatial scale. "
             "X-axis uses a <strong>square-root scale</strong> (ticks show actual pixel distance "
-            "from the finest bars): fine bars are spread across the left portion of the panel "
-            "where PSF differences matter most, while the coarser end is gently compressed. "
+            "from the finest bars): fine bars are spread across the left where PSF differences "
+            "matter most; the coarser end is gently compressed. "
             f"Black = original; blue = {sim['label_a']}; red = {sim['label_b']}. "
             "A filter with a tighter PSF retains a higher envelope as x approaches 1."
         )
@@ -1135,18 +1162,18 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             "contrast that filter's PSF costs at each spatial frequency represented by the bar width."
         )
         band_mod_caption = (
-            "Mean rolling local contrast (peak&minus;valley, ±5&thinsp;px window) "
-            "averaged across the high, medium, and low contrast rows, "
-            "grouped into four spatial-frequency bands. "
+            "Three charts — one per contrast row (high / medium / low) — each showing mean "
+            "rolling local contrast (peak&minus;valley, ±5&thinsp;px window) grouped into "
+            "four spatial-frequency bands. "
             "The <strong>Fine</strong> band (1&ndash;40&thinsp;px bar period) is the most "
             "sensitive to PSF width: a broader PSF smears the finest bars first, so a larger "
             "drop from <em>Original</em> to the filter columns here indicates a resolution "
             "penalty at high spatial frequencies. "
             "The <strong>Coarse</strong> band (301+&thinsp;px) is largely PSF-insensitive "
             "and should be near-identical for both filters — a useful sanity check. "
-            "Comparing the two filter bars within each band gives a frequency-resolved "
-            "contrast-retention profile that is directly analogous to the MTF curves derived "
-            "from the ePSF above."
+            "Comparing per-level charts reveals whether PSF blur degrades high-contrast "
+            "detail more than low-contrast nebulosity, giving a frequency-resolved "
+            "contrast-retention profile directly analogous to the MTF curves above."
         )
 
         xs_block = ""
@@ -1841,6 +1868,32 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 
     # ── Section 6: Edge ───────────────────────────────────────────────────────
 
+    def _plot_gradient_pair(self, disp_a, shape_a, rois_a, label_a,
+                             disp_b, shape_b, rois_b, label_b,
+                             shared_vmax: float) -> plt.Figure:
+        """Render both gradient-magnitude maps side-by-side with a shared log color scale."""
+        from matplotlib.patches import Rectangle
+        panels = [(d, s, r, lbl) for d, s, r, lbl in
+                  [(disp_a, shape_a, rois_a, label_a),
+                   (disp_b, shape_b, rois_b, label_b)] if d is not None]
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        for ax, (disp, shape, rois, lbl) in zip(axes, panels):
+            h, w = shape if shape else disp.shape
+            ax.imshow(disp, origin="lower", cmap="inferno",
+                      vmin=0, vmax=shared_vmax,
+                      extent=[0, w, 0, h], aspect="equal", interpolation="nearest")
+            for (x0, y0, x1, y1) in (rois or []):
+                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
+                                       linewidth=1.2, edgecolor="lime",
+                                       facecolor="none", linestyle="--"))
+            ax.set_title(f"Gradient magnitude (log) — {lbl}")
+            ax.set_xlabel("X (px)")
+            ax.set_ylabel("Y (px)")
+        fig.tight_layout()
+        return fig
+
     def _section_edge(self, ra: AnalysisResult, rb: AnalysisResult,
                        bw_differ: bool) -> str:
         err = _error_box("edge", ra, rb)
@@ -1884,23 +1937,26 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
                        f'used the starless image so the strongest gradient search locates '
                        f'a nebula emission boundary rather than a star profile.</div>')
 
-        # Gradient map comparison row (1×2)
-        grad_fig_a = _img_tag((ea.get("figures") or {}).get("gradient_map"),
-                               f"Gradient {ra.label}")
-        grad_fig_b = _img_tag((eb.get("figures") or {}).get("gradient_map"),
-                               f"Gradient {rb.label}")
-        if grad_fig_a or grad_fig_b:
+        # Gradient map comparison row — shared log-scale, rendered as a combined figure
+        gm_a = ea.get("gm_display")
+        gm_b = eb.get("gm_display")
+        if gm_a is not None or gm_b is not None:
+            shared_vmax = max(ea.get("gm_log_vmax") or 1.0,
+                              eb.get("gm_log_vmax") or 1.0)
+            pair_fig = self._plot_gradient_pair(
+                gm_a, ea.get("gm_shape"), ea.get("rois_used"), ra.label,
+                gm_b, eb.get("gm_shape"), eb.get("rois_used"), rb.label,
+                shared_vmax,
+            )
             gradient_row = (
                 '<h4>Gradient magnitude (ROI auto-detection map)</h4>'
-                '<div style="display:flex;gap:10px;">'
-                + "".join(f'<div style="flex:1;">{img}</div>'
-                          for img in [grad_fig_a, grad_fig_b] if img)
-                + '</div>'
-                '<p class="caption">Gaussian gradient magnitude used to locate the '
-                'strongest edge regions. Dashed lime boxes show the three selected '
-                'analysis ROIs. Sigma is pixel-scale adaptive (≈ 1.5 arcsec equivalent) '
-                'so diffuse gradients in long-focal-length images are captured '
-                'as reliably as sharp edges in short-focal-length data.</p>'
+                + _img_tag(pair_fig, "Gradient magnitude")
+                + '<p class="caption">Log-scaled Gaussian gradient magnitude used to locate '
+                'the strongest edge regions. Dashed lime boxes show the three selected '
+                'analysis ROIs. Both images share the same color scale (P99 of the brighter '
+                'image) for direct comparison. Sigma is pixel-scale adaptive '
+                '(≈ 1.5 arcsec equivalent) so diffuse gradients in long-focal-length images '
+                'are captured as reliably as sharp edges in short-focal-length data.</p>'
             )
         else:
             gradient_row = ""
@@ -2310,6 +2366,24 @@ between the two filters.</p>
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
+    def _plot_snr_pair(self, disp_a, label_a, disp_b, label_b,
+                        vmin: float, vmax: float) -> plt.Figure:
+        """Render both SNR maps side-by-side with a shared plasma color scale."""
+        panels = [(d, lbl) for d, lbl in [(disp_a, label_a), (disp_b, label_b)]
+                  if d is not None]
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        for ax, (disp, lbl) in zip(axes, panels):
+            im = ax.imshow(disp, origin="lower", cmap="plasma",
+                           vmin=vmin, vmax=vmax, interpolation="nearest")
+            fig.colorbar(im, ax=ax, label="SNR (σ)", fraction=0.046, pad=0.04)
+            ax.set_title(f"SNR map — {lbl}", fontsize=10)
+            ax.set_xlabel("x (px)")
+            ax.set_ylabel("y (px)")
+        fig.tight_layout()
+        return fig
+
     def _section_snr(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
         err = _error_box("snr", ra, rb)
         pa = ra.snr_metrics or {}
@@ -2321,8 +2395,15 @@ between the two filters.</p>
                                           pb.get("star_snr_median"),
                                           higher_is_better=True)
 
-        img_a = _img_tag((pa.get("figures") or {}).get("snr_map"), f"SNR map {ra.label}")
-        img_b = _img_tag((pb.get("figures") or {}).get("snr_map"), f"SNR map {rb.label}")
+        # Shared-scale SNR map pair
+        pa_disp = pa.get("snr_display")
+        pb_disp = pb.get("snr_display")
+        shared_vmin = min(pa.get("snr_p2") or 0.0, pb.get("snr_p2") or 0.0)
+        shared_vmax = max(pa.get("snr_p98") or 10.0, pb.get("snr_p98") or 10.0)
+        snr_pair_fig = self._plot_snr_pair(
+            pa_disp, ra.label, pb_disp, rb.label, shared_vmin, shared_vmax
+        )
+        snr_pair_html = _img_tag(snr_pair_fig, "SNR map comparison")
 
         # Percentile table rows
         def pct_row(label, key):
@@ -2330,8 +2411,8 @@ between the two filters.</p>
             vb = pb.get(key)
             cpa, cpb = _better_worse_class(va, vb, higher_is_better=True)
             return (f"<tr><td>{label}</td>"
-                    f"<td class='{cpa}'>{_val(va, '.1f')} %</td>"
-                    f"<td class='{cpb}'>{_val(vb, '.1f')} %</td></tr>")
+                    f"<td class='{cpa}'>{_val(va, '.4f')} %</td>"
+                    f"<td class='{cpb}'>{_val(vb, '.4f')} %</td></tr>")
 
         pct_rows = "".join([
             pct_row("Pixels &gt; 3 σ",  "pct_above_3"),
@@ -2340,10 +2421,10 @@ between the two filters.</p>
             pct_row("Pixels &gt; 20 σ", "pct_above_20"),
         ])
 
-        star_snr_a = _val(pa.get("star_snr_median"), ".1f")
-        star_iqr_a = _val(pa.get("star_snr_iqr"), ".1f")
-        star_snr_b = _val(pb.get("star_snr_median"), ".1f")
-        star_iqr_b = _val(pb.get("star_snr_iqr"), ".1f")
+        star_snr_a = _val(pa.get("star_snr_median"), ".4f")
+        star_iqr_a = _val(pa.get("star_snr_iqr"), ".4f")
+        star_snr_b = _val(pb.get("star_snr_median"), ".4f")
+        star_iqr_b = _val(pb.get("star_snr_iqr"), ".4f")
         star_a_cell = f"{star_snr_a} ± {star_iqr_a}" if pa.get("star_snr_median") else "—"
         star_b_cell = f"{star_snr_b} ± {star_iqr_b}" if pb.get("star_snr_median") else "—"
 
@@ -2402,8 +2483,8 @@ between the two filters.</p>
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Global SNR (&sigma;)</td>
-      <td class="{ca}">{_val(pa.get("snr_global"), ".1f")}</td>
-      <td class="{cb}">{_val(pb.get("snr_global"), ".1f")}</td></tr>
+      <td class="{ca}">{_val(pa.get("snr_global"), ".4f")}</td>
+      <td class="{cb}">{_val(pb.get("snr_global"), ".4f")}</td></tr>
   <tr><td>Median star SNR &plusmn; IQR</td>
       <td class="{cs_a}">{star_a_cell}</td>
       <td class="{cs_b}">{star_b_cell}</td></tr>
@@ -2414,13 +2495,11 @@ between the two filters.</p>
   {pct_rows}
 </table>
 
-<div style="display:flex;gap:10px;">
-  <div style="flex:1;">{img_a}</div>
-  <div style="flex:1;">{img_b}</div>
-</div>
-<p class="caption">Per-pixel SNR map: signal / sky RMS at each location (plasma colourmap,
-shared 2nd&ndash;98th percentile scale). Bright regions have high SNR; blank sky clusters
-near zero. A uniformly brighter map indicates deeper, more signal-rich data.</p>"""
+{snr_pair_html}
+<p class="caption">Per-pixel SNR map: signal / sky RMS at each location (plasma colourmap).
+Both images share the same color scale (P2&ndash;P98 of the higher-SNR image) for direct
+comparison. Bright regions have high SNR; blank sky clusters near zero.
+A uniformly brighter map indicates deeper, more signal-rich data.</p>"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
 
@@ -2447,8 +2526,10 @@ near zero. A uniformly brighter map indicates deeper, more signal-rich data.</p>
         pw_b = rb.power_metrics or {}
         cr_a = sm_a.get("contrast_ratios_a", {})
         cr_b = sm_b.get("contrast_ratios_b", {}) if sm_b else {}
-        snr_a = sm_a.get("wavelet_snr_a", {})
-        snr_b = sm_b.get("wavelet_snr_b", {}) if sm_b else {}
+        snr_wav_a = sm_a.get("wavelet_snr_a", {})
+        snr_wav_b = sm_b.get("wavelet_snr_b", {}) if sm_b else {}
+        snr_ma = ra.snr_metrics or {}
+        snr_mb = rb.snr_metrics or {}
 
         ecr_flag = "⚠" if bw_differ else "✓"
 
@@ -2466,8 +2547,10 @@ near zero. A uniformly brighter map indicates deeper, more signal-rich data.</p>
             row("Power mid/high ratio", pw_a.get("mid_high_ratio"),
                 pw_b.get("mid_high_ratio"), fmt=".4f"),
             row("Std contrast ratio (15px)", cr_a.get(15), cr_b.get(15)),
-            row("Wavelet SNR level 2", snr_a.get(2), snr_b.get(2)),
-            row("Wavelet SNR level 3", snr_a.get(3), snr_b.get(3)),
+            row("Wavelet SNR level 2", snr_wav_a.get(2), snr_wav_b.get(2)),
+            row("Wavelet SNR level 3", snr_wav_a.get(3), snr_wav_b.get(3)),
+            row("Global image SNR (σ)", snr_ma.get("snr_global"),
+                snr_mb.get("snr_global"), fmt=".4f"),
         ])
 
         legend = ('<p><span class="metric-label-ok">✓</span> = bandwidth-independent '
@@ -2476,7 +2559,7 @@ near zero. A uniformly brighter map indicates deeper, more signal-rich data.</p>
                   'context (filters had different bandwidths)</p>')
 
         return f"""
-<h2>9. Summary &amp; Recommendations</h2>
+<h2>10. Summary &amp; Recommendations</h2>
 {legend}
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>

@@ -192,13 +192,13 @@ class SpatialDetailAnalyzer:
             result["contrast_ratios_b"][ks] = cr_b
 
             fig = self._plot_side_by_side(
-                std_a, std_b,
+                self._crop_border(std_a, 32), self._crop_border(std_b, 32),
                 f"Local σ — kernel {ks}px — {label_a}",
                 f"Local σ — kernel {ks}px — {label_b}",
                 diff_title=f"Diff (A−B), kernel {ks}px",
                 cmap="viridis",
                 nonlinear_norm=True,
-                display_roi=display_roi,
+                display_roi=None,
             )
             figures[f"std_{ks}px"] = fig
 
@@ -315,13 +315,13 @@ class SpatialDetailAnalyzer:
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
             rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels)
             fig = self._plot_side_by_side(
-                rec_a, rec_b,
+                self._crop_border(rec_a, 16), self._crop_border(rec_b, 16),
                 f"Wavelet level {display_level} — {label_a}",
                 f"Wavelet level {display_level} — {label_b}",
                 diff_title=f"Level {display_level} diff (A−B)",
                 cmap="RdBu_r",
                 symmetric_diff=True,
-                display_roi=display_roi,
+                display_roi=None,
             )
             figures[f"wavelet_level{display_level}"] = fig
             if crosshair is not None:
@@ -497,6 +497,12 @@ class SpatialDetailAnalyzer:
         ax2.legend(loc="upper right", fontsize=8)
         ax1.set_title(title, fontsize=10)
         return fig
+
+    @staticmethod
+    def _crop_border(arr: np.ndarray, n: int) -> np.ndarray:
+        if arr.shape[0] > 2 * n and arr.shape[1] > 2 * n:
+            return arr[n:-n, n:-n]
+        return arr
 
     @staticmethod
     def _stretch_for_display(arr: np.ndarray) -> np.ndarray:
