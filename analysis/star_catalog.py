@@ -29,7 +29,7 @@ class StarCatalogBuilder:
             catalog = finder(bgsub)
 
         if catalog is None:
-            catalog = Table(names=["xcentroid", "ycentroid", "peak", "flux",
+            catalog = Table(names=["x_centroid", "y_centroid", "peak", "flux",
                                     "sharpness", "roundness1", "roundness2"],
                              dtype=[float] * 7)
         image.catalog = catalog
@@ -66,7 +66,7 @@ class StarCatalogBuilder:
                 continue
 
             # Border check
-            x, y = row["xcentroid"], row["ycentroid"]
+            x, y = row["x_centroid"], row["y_centroid"]
             if x < border_px or x > width - border_px:
                 keep[i] = False
                 continue
@@ -80,8 +80,8 @@ class StarCatalogBuilder:
         isolation_radius = ISOLATION_RADIUS_FWHM * fwhm_estimate
 
         isolation_ok = np.ones(len(candidates), dtype=bool)
-        xs = np.array(candidates["xcentroid"])
-        ys = np.array(candidates["ycentroid"])
+        xs = np.array(candidates["x_centroid"])
+        ys = np.array(candidates["y_centroid"])
         for i in range(len(candidates)):
             dists = np.sqrt((xs - xs[i])**2 + (ys - ys[i])**2)
             dists[i] = np.inf  # ignore self

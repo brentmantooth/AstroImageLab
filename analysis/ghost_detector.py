@@ -78,14 +78,14 @@ class GhostDetector:
                              inner_r: float,
                              shape: tuple) -> list[dict]:
         h, w = shape
-        px = float(parent["xcentroid"])
-        py = float(parent["ycentroid"])
+        px = float(parent["x_centroid"])
+        py = float(parent["y_centroid"])
 
         # Build residual: subtract all known catalog sources as point estimates
         residual = bgsub.copy()
         for row in full_catalog:
-            xi = int(round(row["xcentroid"]))
-            yi = int(round(row["ycentroid"]))
+            xi = int(round(row["x_centroid"]))
+            yi = int(round(row["y_centroid"]))
             r_local = max(5, int(inner_r))
             x0 = max(0, xi - r_local)
             y0 = max(0, yi - r_local)
@@ -118,10 +118,10 @@ class GhostDetector:
         # Cross-match against original catalog; flag sources not already known
         results = []
         for g in ghost_table:
-            gx, gy = g["xcentroid"], g["ycentroid"]
+            gx, gy = g["x_centroid"], g["y_centroid"]
             dists_to_known = np.sqrt(
-                (full_catalog["xcentroid"] - gx)**2 +
-                (full_catalog["ycentroid"] - gy)**2
+                (full_catalog["x_centroid"] - gx)**2 +
+                (full_catalog["y_centroid"] - gy)**2
             )
             if np.min(dists_to_known) < 5.0:
                 continue  # already in catalog
@@ -157,7 +157,7 @@ class GhostDetector:
         ax.imshow(bgsub, origin="lower", cmap="gray", norm=norm)
 
         for row in bright_stars:
-            circ = plt.Circle((row["xcentroid"], row["ycentroid"]),
+            circ = plt.Circle((row["x_centroid"], row["y_centroid"]),
                                radius=15, color="cyan", fill=False, linewidth=1.2)
             ax.add_patch(circ)
 

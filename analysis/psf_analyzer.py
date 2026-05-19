@@ -122,8 +122,8 @@ class PSFAnalyzer:
         half = CUTOUT_SIZE // 2
 
         for row in stars:
-            xc = int(round(row["xcentroid"]))
-            yc = int(round(row["ycentroid"]))
+            xc = int(round(row["x_centroid"]))
+            yc = int(round(row["y_centroid"]))
             x0 = max(0, xc - half)
             y0 = max(0, yc - half)
             x1 = min(w, xc + half + 1)
@@ -170,8 +170,8 @@ class PSFAnalyzer:
         half = CUTOUT_SIZE // 2
 
         for row in stars:
-            xc = int(round(row["xcentroid"]))
-            yc = int(round(row["ycentroid"]))
+            xc = int(round(row["x_centroid"]))
+            yc = int(round(row["y_centroid"]))
             x0 = max(0, xc - half)
             y0 = max(0, yc - half)
             x1 = min(w, xc + half + 1)
@@ -206,8 +206,8 @@ class PSFAnalyzer:
                               ) -> tuple[np.ndarray | None, np.ndarray, np.ndarray]:
         nddata = image.nddata()
         stars_tbl = Table()
-        stars_tbl["x"] = stars["xcentroid"]
-        stars_tbl["y"] = stars["ycentroid"]
+        stars_tbl["x"] = stars["x_centroid"]
+        stars_tbl["y"] = stars["y_centroid"]
 
         box_size = max(CUTOUT_SIZE, int(fwhm_estimate * 6) | 1)
         if box_size % 2 == 0:

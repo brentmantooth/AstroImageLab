@@ -61,7 +61,7 @@ class HaloAnalyzer:
         per_star = []
 
         for row in halo_stars:
-            xc, yc = float(row["xcentroid"]), float(row["ycentroid"])
+            xc, yc = float(row["x_centroid"]), float(row["y_centroid"])
             r, I = self._extract_radial_profile(bgsub, xc, yc, HALO_FIT_RADIUS_PX)
             if len(r) < 10:
                 continue
@@ -160,7 +160,7 @@ class HaloAnalyzer:
             snr = row["peak"] / rms_val if rms_val > 0 else 0.0
             if snr < HALO_MIN_STAR_SNR:
                 continue
-            x, y = row["xcentroid"], row["ycentroid"]
+            x, y = row["x_centroid"], row["y_centroid"]
             margin = HALO_FIT_RADIUS_PX + 5
             if x < margin or x > w - margin or y < margin or y > h - margin:
                 continue
@@ -171,8 +171,8 @@ class HaloAnalyzer:
 
         # Isolation: no other halo-candidate within HALO_FIT_RADIUS_PX
         isolated = []
-        xs = np.array([r["xcentroid"] for r in keep])
-        ys = np.array([r["ycentroid"] for r in keep])
+        xs = np.array([r["x_centroid"] for r in keep])
+        ys = np.array([r["y_centroid"] for r in keep])
         for i in range(len(keep)):
             dists = np.sqrt((xs - xs[i])**2 + (ys - ys[i])**2)
             dists[i] = np.inf
@@ -222,7 +222,7 @@ class HaloAnalyzer:
         for row in catalog:
             if row["peak"] < sat:
                 continue
-            x, y = float(row["xcentroid"]), float(row["ycentroid"])
+            x, y = float(row["x_centroid"]), float(row["y_centroid"])
             if x < margin or x > w - margin or y < margin or y > h - margin:
                 continue
             if any(np.sqrt((x - s["xc"])**2 + (y - s["yc"])**2) < 30.0

@@ -81,8 +81,8 @@ class PowerSpectrumAnalyzer:
         # Auto-select: find a star-free NxN region
         catalog = getattr(image, "catalog", None)
         if catalog is not None and len(catalog) > 0:
-            star_xs = np.array(catalog["xcentroid"])
-            star_ys = np.array(catalog["ycentroid"])
+            star_xs = np.array(catalog["x_centroid"])
+            star_ys = np.array(catalog["y_centroid"])
         else:
             star_xs, star_ys = np.array([]), np.array([])
 
