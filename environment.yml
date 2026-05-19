@@ -1,0 +1,22 @@
+name: astrolab
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+    # Scientific stack — all via pip to avoid conda-forge pulling in qt6-main
+    - numpy
+    - scipy
+    - matplotlib
+    - astropy
+    - photutils
+    - PyWavelets
+    - astroalign
+    - Pillow
+    - lz4
+    - zstandard
+    # Application dependencies
+    - pyqt6           # pip layout required for PyInstaller and correct Qt DLL layout
+    - xisf
+    - pyinstaller     # build tool only

@@ -64,6 +64,7 @@ class AnalysisControlPanel(QWidget):
             ("edge",    "Edge analysis (LSF)"),
             ("power",   "Power spectrum"),
             ("spatial", "Spatial detail (std / LoG / wavelet)"),
+            ("snr",     "Signal / Noise (SNR)"),
         ], start=1):
             cb = QCheckBox(label)
             cb.setChecked(True)

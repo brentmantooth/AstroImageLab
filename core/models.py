@@ -41,6 +41,7 @@ class AnalysisResult:
     edge_metrics: dict | None = None
     power_metrics: dict | None = None
     spatial_metrics: dict | None = None
+    snr_metrics: dict | None = None
     warnings: list[str] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)   # metric_key → error message
     figures: dict[str, "matplotlib.figure.Figure"] = field(default_factory=dict)

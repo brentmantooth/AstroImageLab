@@ -258,6 +258,7 @@ class ReportBuilder:
             self._section_edge(result_a, result_b, bw_differ),
             self._section_power(result_a, result_b),
             self._section_spatial(result_a, result_b),
+            self._section_snr(result_a, result_b),
             self._section_summary(result_a, result_b, bw_differ),
         ]
 
@@ -2307,7 +2308,121 @@ diverging colourmap). The difference panel (right) shows where fine structure di
 between the two filters.</p>
 {xs_figs_for("xs_wavelet_level")}"""
 
-    # ── Section 9: Summary ────────────────────────────────────────────────────
+    # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
+
+    def _section_snr(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
+        err = _error_box("snr", ra, rb)
+        pa = ra.snr_metrics or {}
+        pb = rb.snr_metrics or {}
+
+        ca, cb = _better_worse_class(pa.get("snr_global"), pb.get("snr_global"),
+                                     higher_is_better=True)
+        cs_a, cs_b = _better_worse_class(pa.get("star_snr_median"),
+                                          pb.get("star_snr_median"),
+                                          higher_is_better=True)
+
+        img_a = _img_tag((pa.get("figures") or {}).get("snr_map"), f"SNR map {ra.label}")
+        img_b = _img_tag((pb.get("figures") or {}).get("snr_map"), f"SNR map {rb.label}")
+
+        # Percentile table rows
+        def pct_row(label, key):
+            va = pa.get(key)
+            vb = pb.get(key)
+            cpa, cpb = _better_worse_class(va, vb, higher_is_better=True)
+            return (f"<tr><td>{label}</td>"
+                    f"<td class='{cpa}'>{_val(va, '.1f')} %</td>"
+                    f"<td class='{cpb}'>{_val(vb, '.1f')} %</td></tr>")
+
+        pct_rows = "".join([
+            pct_row("Pixels &gt; 3 σ",  "pct_above_3"),
+            pct_row("Pixels &gt; 5 σ",  "pct_above_5"),
+            pct_row("Pixels &gt; 10 σ", "pct_above_10"),
+            pct_row("Pixels &gt; 20 σ", "pct_above_20"),
+        ])
+
+        star_snr_a = _val(pa.get("star_snr_median"), ".1f")
+        star_iqr_a = _val(pa.get("star_snr_iqr"), ".1f")
+        star_snr_b = _val(pb.get("star_snr_median"), ".1f")
+        star_iqr_b = _val(pb.get("star_snr_iqr"), ".1f")
+        star_a_cell = f"{star_snr_a} ± {star_iqr_a}" if pa.get("star_snr_median") else "—"
+        star_b_cell = f"{star_snr_b} ± {star_iqr_b}" if pb.get("star_snr_median") else "—"
+
+        return f"""
+<h2>9. Signal-to-Noise Ratio (SNR)</h2>
+{err}
+<div class="info-box">
+  <strong>Understanding the SNR metrics:</strong><br><br>
+
+  <strong>Global SNR (sky-&sigma; units)</strong> &mdash; A single number summarising the
+  signal strength of the entire image relative to the sky noise floor. Computed as the median
+  pixel value of all background-subtracted pixels that lie above 3&times; the median sky RMS
+  (i.e. pixels that contain genuine emission rather than blank sky), divided by the median sky
+  noise (&sigma;<sub>sky</sub>). The sky noise estimate uses the 2D background RMS map produced
+  by photutils <code>Background2D + MADStdBackgroundRMS</code>, which fits a sigma-clipped
+  background model on a spatial grid and measures the residual scatter in each cell &mdash; the
+  same estimate used throughout the analysis pipeline. <strong>Ideal: &gt; 10 &sigma; for nebula
+  targets; &gt; 30 &sigma; for rich star fields.</strong> Values are dimensionless
+  (sky-&sigma;) and directly comparable between the two images regardless of stretch or
+  scaling. Note that this method is sky-noise-dominated: it faithfully reflects how much of the
+  image is buried in background fluctuations but will underestimate total noise in saturated or
+  very bright regions where photon shot noise exceeds the sky floor.<br><br>
+
+  <strong>Median star SNR &plusmn; IQR</strong> &mdash; The median peak-to-noise ratio across
+  all catalogue stars that passed quality filtering (non-saturated, isolated, minimum 5-&sigma;
+  detection), plus the interquartile range as a measure of spread. For each star,
+  SNR&thinsp;=&thinsp;(peak&thinsp;&minus;&thinsp;local sky)&thinsp;/&thinsp;local sky RMS,
+  using the per-image background grid. <strong>Ideal: median &gt; 20 for a well-exposed
+  session; IQR &lt; 15 indicates a uniform noise floor.</strong> A large IQR implies either
+  a wide dynamic range of star brightness or strong local sky variations across the field. A
+  lower median star SNR than the global image SNR can occur in narrowband imaging where the
+  continuum is suppressed relative to emission-line nebulosity.<br><br>
+
+  <strong>Local SNR Map</strong> &mdash; A per-pixel map of background-subtracted signal
+  divided by the local sky RMS: SNR(x,&thinsp;y)&thinsp;=&thinsp;(data&thinsp;&minus;&thinsp;background)(x,&thinsp;y)&thinsp;/&thinsp;background_rms(x,&thinsp;y).
+  Blank sky regions cluster near zero (&plusmn; 1&sigma; by definition); real emission appears
+  as islands of elevated SNR. The plasma colourmap is clipped to the 2nd&ndash;98th percentile
+  of positive pixels so that bright cores do not compress the dynamic range.
+  <strong>What to look for:</strong> In a deeper or better-stacked image the map should be
+  uniformly brighter across extended nebula regions. Patchwork patterns indicate residual
+  background gradients or flat-field errors. Field edges often show elevated noise from
+  vignetting and reduced flat-field accuracy. The spatial resolution of the noise estimate
+  equals the background grid cell size (typically 64 &times; 64 pixels).<br><br>
+
+  <strong>SNR Percentile Table</strong> &mdash; Reports the fraction of all image pixels that
+  exceed four SNR thresholds (3&sigma;, 5&sigma;, 10&sigma;, 20&sigma;). The 3-&sigma;
+  fraction is essentially the <em>detected area fraction</em> &mdash; the share of the field
+  that contains statistically significant emission above the noise floor. The 10-&sigma; and
+  20-&sigma; fractions indicate how much of the target is in the high-confidence regime where
+  structure can be reliably measured. <strong>Ideal: 3-&sigma; fraction &gt; 20% for a rich
+  nebula field; 10-&sigma; fraction &gt; 5% indicates strong central emission.</strong> A
+  higher percentage across all thresholds in one image directly translates to more usable
+  signal for further processing (deconvolution, colour mixing, detail extraction).
+</div>
+
+<table>
+  <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
+  <tr><td>Global SNR (&sigma;)</td>
+      <td class="{ca}">{_val(pa.get("snr_global"), ".1f")}</td>
+      <td class="{cb}">{_val(pb.get("snr_global"), ".1f")}</td></tr>
+  <tr><td>Median star SNR &plusmn; IQR</td>
+      <td class="{cs_a}">{star_a_cell}</td>
+      <td class="{cs_b}">{star_b_cell}</td></tr>
+</table>
+
+<table>
+  <tr><th>Threshold</th><th>{ra.label}</th><th>{rb.label}</th></tr>
+  {pct_rows}
+</table>
+
+<div style="display:flex;gap:10px;">
+  <div style="flex:1;">{img_a}</div>
+  <div style="flex:1;">{img_b}</div>
+</div>
+<p class="caption">Per-pixel SNR map: signal / sky RMS at each location (plasma colourmap,
+shared 2nd&ndash;98th percentile scale). Bright regions have high SNR; blank sky clusters
+near zero. A uniformly brighter map indicates deeper, more signal-rich data.</p>"""
+
+    # ── Section 10: Summary ───────────────────────────────────────────────────
 
     def _section_summary(self, ra: AnalysisResult, rb: AnalysisResult,
                           bw_differ: bool) -> str:

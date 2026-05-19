@@ -186,6 +186,14 @@ class AnalysisThread(QThread):
                 result_b.spatial_metrics = spatial  # shared reference
             tasks.append(("spatial", "Running spatial detail analysis", _spatial))
 
+        if metrics.get("snr"):
+            def _snr():
+                from analysis.snr_analyzer import SNRAnalyzer
+                sa = SNRAnalyzer()
+                result_a.snr_metrics = sa.analyze(img_a)
+                result_b.snr_metrics = sa.analyze(img_b)
+            tasks.append(("snr", "Computing SNR maps", _snr))
+
         if parallel and len(tasks) > 1:
             self._run_parallel(tasks, result_a, result_b)
         else:
@@ -285,6 +293,7 @@ class AnalysisThread(QThread):
             ("edge",    result_a.edge_metrics,     result_b.edge_metrics),
             ("power",   result_a.power_metrics,    result_b.power_metrics),
             ("spatial", result_a.spatial_metrics,  result_b.spatial_metrics),
+            ("snr",     result_a.snr_metrics,       result_b.snr_metrics),
         ]
         exported = 0
         for key, m_a, m_b in metric_pairs:

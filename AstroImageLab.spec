@@ -1,23 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
-from PyInstaller.utils.hooks import collect_dynamic_libs
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 datas = []
-binaries = []
-
-# Explicitly collect the DLLs bundled inside conda's numpy and scipy packages.
-# The standard PyInstaller numpy hook misses these when building from a conda
-# environment (warns "Conda distribution '__win' was not found"), causing
-# "Importing the numpy C-extensions failed" at runtime.
-binaries += collect_dynamic_libs("numpy")
-binaries += collect_dynamic_libs("scipy")
-
-# xisf (XISF image format support)
-hiddenimports = ["xisf", "zstandard", "lz4", "lz4.block"]
-datas += copy_metadata("xisf")
-binaries += collect_dynamic_libs("zstandard")
-binaries += collect_dynamic_libs("lz4")
+hiddenimports = []
 
 # astropy — ships coordinate/FITS reference data files needed at runtime
 datas += collect_data_files("astropy",
@@ -29,9 +14,13 @@ datas += collect_data_files("matplotlib")
 # Bundle the resources/ directory (PNG assets used at runtime)
 datas += [("resources", "resources")]
 
-# Targeted hidden imports — only the subpackages actually used by the app
+# xisf metadata
+datas += copy_metadata("xisf")
+
+# Hidden imports that PyInstaller's static analysis misses
 hiddenimports += [
-    # astropy
+    "xisf", "zstandard", "lz4", "lz4.block",
+    # astropy subpackages accessed by string at runtime
     "astropy.io.fits",
     "astropy.nddata",
     "astropy.stats",
@@ -40,65 +29,31 @@ hiddenimports += [
     "astropy.modeling.fitting",
     "astropy.table",
     "astropy.visualization",
-    # scipy
+    # scipy subpackages
     "scipy.ndimage",
     "scipy.interpolate",
     "scipy.optimize",
     "scipy.signal",
-    # matplotlib
-    "matplotlib.pyplot",
-    "matplotlib.colors",
-    "matplotlib.figure",
-    "matplotlib.backends.backend_agg",
-    # photutils
-    "photutils.background",
-    "photutils.detection",
-    "photutils.psf",
-    "photutils.morphology",
-    # other libraries
+    # other
     "pywt",
     "astroalign",
     "PIL.Image",
+    "matplotlib.backends.backend_agg",
 ]
 
 
 a = Analysis(
     ['AstroImageLab.py'],
     pathex=[],
-    binaries=binaries,
+    binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    hooksconfig={
-        # Restrict Qt plugin DLLs — only what the app needs.
-        "PyQt6": {
-            "qt_plugins": ["platforms", "styles", "imageformats"],
-        },
-    },
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[
         "PySide6",
         "tkinter",
-
-        # Dev tools
-        "IPython",
-        "sphinx",
-        "docutils",
-        "pytest",
-        "_pytest",
-        "black",
-        "jedi",
-        "parso",
-        "nbformat",
-        "zmq",
-        "astroid",
-        "yapf",
-        "yapf_third_party",
-        "blib2to3",
-        "psutil",
-
-        # WeasyPrint — import moved to importlib.import_module() in code
-        # so this exclusion is now effective
         "weasyprint",
         "cairocffi",
         "cairosvg",
@@ -107,7 +62,7 @@ a = Analysis(
         "zopfli",
     ],
     noarchive=False,
-    optimize=2,
+    optimize=0,
 )
 pyz = PYZ(a.pure)
 
@@ -121,7 +76,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -132,7 +87,7 @@ exe = EXE(
     entitlements_file=None,
 )
 
-# Post-build: create a zip containing the built executable for easy distribution.
+# Post-build: create a zip for distribution.
 import os
 import shutil
 import sys
