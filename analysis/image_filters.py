@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import numpy as np
 import matplotlib
@@ -10,7 +10,7 @@ import pywt
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64, figs_to_b64
-from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS, XS_LINE_ALPHA
+from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS, XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -192,7 +192,7 @@ class SpatialDetailAnalyzer:
             result["contrast_ratios_b"][ks] = cr_b
 
             fig = self._plot_side_by_side(
-                self._crop_border(std_a, 32), self._crop_border(std_b, 32),
+                self._crop_border(std_a, SECTION8_BORDER_CROP_FRACTION), self._crop_border(std_b, SECTION8_BORDER_CROP_FRACTION),
                 f"Local σ — kernel {ks}px — {label_a}",
                 f"Local σ — kernel {ks}px — {label_b}",
                 diff_title=f"Diff (A−B), kernel {ks}px",
@@ -256,13 +256,14 @@ class SpatialDetailAnalyzer:
             log_a = np.abs(gaussian_laplace(norm_a, sigma=sigma))
             log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma))
             fig = self._plot_side_by_side(
-                log_a, log_b,
+                self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
+                self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
                 f"|LoG| σ={sigma}px — {label_a}",
                 f"|LoG| σ={sigma}px — {label_b}",
                 diff_title=f"LoG diff (A−B), σ={sigma}px",
                 cmap="hot",
                 nonlinear_norm=True,
-                display_roi=display_roi,
+                display_roi=None,
             )
             figures[f"log_sigma{sigma}"] = fig
             if crosshair is not None:
@@ -315,11 +316,11 @@ class SpatialDetailAnalyzer:
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
             rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels)
             fig = self._plot_side_by_side(
-                self._crop_border(rec_a, 16), self._crop_border(rec_b, 16),
+                self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION), self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
                 f"Wavelet level {display_level} — {label_a}",
                 f"Wavelet level {display_level} — {label_b}",
                 diff_title=f"Level {display_level} diff (A−B)",
-                cmap="RdBu_r",
+                cmap="bwr",
                 symmetric_diff=True,
                 display_roi=None,
             )
@@ -427,7 +428,7 @@ class SpatialDetailAnalyzer:
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-        im_diff = ax_diff.imshow(diff, origin="lower", cmap="RdBu_r",
+        im_diff = ax_diff.imshow(diff, origin="lower", cmap="bwr",
                                   vmin=dvmin, vmax=dvmax,
                                   interpolation="nearest", aspect="equal")
         ax_diff.set_title(diff_title, fontsize=10)
@@ -499,7 +500,8 @@ class SpatialDetailAnalyzer:
         return fig
 
     @staticmethod
-    def _crop_border(arr: np.ndarray, n: int) -> np.ndarray:
+    def _crop_border(arr: np.ndarray, fraction: float) -> np.ndarray:
+        n = max(1, int(min(arr.shape[0], arr.shape[1]) * fraction))
         if arr.shape[0] > 2 * n and arr.shape[1] > 2 * n:
             return arr[n:-n, n:-n]
         return arr

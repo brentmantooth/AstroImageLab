@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -17,6 +17,7 @@ SATURATION_FRACTION = 0.90
 DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback
 SEEING_WARN_FWHM_ARCS = 3.0
 EDGE_ROI_HALF_WIDTH = 30
+EDGE_ROI_MAP_INDICATOR_PX = 500   # px; full width of the ROI indicator box drawn on the gradient magnitude map
 FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); default for UI
 GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
 RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation
@@ -28,6 +29,10 @@ WAVELET_NAME = "db4"
 WAVELET_LEVELS = 4
 
 XS_LINE_ALPHA = 0.8   # alpha for all cross-section profile lines in reports
+SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension cropped from perimeter in Section 8 display maps
+
+PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
+PSF_SPATIAL_MAP_SMOOTH_SIGMA = 2.0   # Gaussian smoothing sigma (px) applied to spatial maps before display
 
 
 # === DATA CLASSES ===
@@ -43,5 +48,5 @@ class AnalysisResult:
     spatial_metrics: dict | None = None
     snr_metrics: dict | None = None
     warnings: list[str] = field(default_factory=list)
-    errors: dict[str, str] = field(default_factory=dict)   # metric_key → error message
+    errors: dict[str, str] = field(default_factory=dict)   # metric_key -> error message
     figures: dict[str, "matplotlib.figure.Figure"] = field(default_factory=dict)

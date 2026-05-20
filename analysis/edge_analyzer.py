@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import numpy as np
 import matplotlib
@@ -9,7 +9,7 @@ from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
-from core.models import EDGE_ROI_HALF_WIDTH
+from core.models import EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX
 
 EDGE_DISPLAY_HALF_WIDTH = 250   # half-side of the context window shown in the report figure
 N_TOP_EDGES = 3                  # number of gradient peaks to auto-detect
@@ -136,13 +136,12 @@ class EdgeAnalyzer:
         )
         gradient_fig = self._plot_gradient_map(gm_full, image.label, rois_used)
 
-        # Store downsampled log-transformed display array for shared-scale rendering
+        # Store downsampled display array for shared-scale rendering in the report
         h_gm, w_gm = gm_full.shape
         step_gm = max(1, max(h_gm, w_gm) // 800)
-        log_gm_full = np.log1p(gm_full)
-        gm_display = log_gm_full[::step_gm, ::step_gm].astype(np.float32)
+        gm_display = gm_full[::step_gm, ::step_gm].astype(np.float32)
         gm_display = median_filter(gm_display, size=3)
-        gm_log_vmax = float(np.percentile(gm_display, 99)) or 1.0
+        gm_vmax = float(np.percentile(gm_display, 99)) or 1.0
 
         # Top-level keys populated from the strongest edge for summary-table compat
         result: dict = {
@@ -157,7 +156,7 @@ class EdgeAnalyzer:
             "lsf":                   None,
             "roi_used":              rois_used[0] if rois_used else None,
             "gm_display":            gm_display,
-            "gm_log_vmax":           gm_log_vmax,
+            "gm_vmax":               gm_vmax,
             "gm_shape":              (h_gm, w_gm),
             "figures":               figs_to_b64({"gradient_map": gradient_fig}),
         }
@@ -318,18 +317,23 @@ class EdgeAnalyzer:
         aspect = h / max(w, 1)
         fig_w = min(8.0, max(4.0, w / 400))
         fig, ax = plt.subplots(figsize=(fig_w, fig_w * aspect))
-        log_gm = np.log1p(gm)
         step = max(1, max(h, w) // 800)
-        disp = log_gm[::step, ::step]
+        disp = gm[::step, ::step]
         disp = median_filter(disp, size=3)
         vmax = float(np.percentile(disp, 99)) or 1.0
         ax.imshow(disp, origin="lower", cmap="inferno",
                   vmin=0, vmax=vmax,
                   extent=[0, w, 0, h], aspect="equal", interpolation="nearest")
+        half = EDGE_ROI_MAP_INDICATOR_PX // 2
         for (x0, y0, x1, y1) in rois_used:
-            rect = Rectangle((x0, y0), x1 - x0, y1 - y0,
-                              linewidth=1.2, edgecolor="lime", facecolor="none",
-                              linestyle="--")
+            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            ix0 = max(0, cx - half)
+            iy0 = max(0, cy - half)
+            ix1 = min(w, cx + half)
+            iy1 = min(h, cy + half)
+            rect = Rectangle((ix0, iy0), ix1 - ix0, iy1 - iy0,
+                              linewidth=2.0, edgecolor="cyan", facecolor="none",
+                              linestyle="-")
             ax.add_patch(rect)
         ax.set_title(f"Gradient magnitude — {label}")
         ax.set_xlabel("X (px)")

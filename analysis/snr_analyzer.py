@@ -66,12 +66,24 @@ class SNRAnalyzer:
         snr_p2  = float(np.percentile(finite_pos, 2))  if finite_pos.size > 0 else 0.0
         snr_p98 = float(np.percentile(finite_pos, 98)) if finite_pos.size > 0 else 10.0
 
+        # --- dB equivalent -----------------------------------------------
+        # Amplitude-ratio conversion: SNR_dB = 20 log10(SNR_σ)
+        snr_global_db = (20.0 * float(np.log10(snr_global))
+                         if snr_global > 0 else None)
+
+        # --- Sky background level ----------------------------------------
+        # Median of the 2D background model in ADU; lower = darker sky.
+        background_median = (float(np.median(image.background.background))
+                             if image.background is not None else None)
+
         # --- Figure (per-image, for PNG export) ---------------------------
         snr_map_fig = self._plot_snr_map(snr_map, image.label)
 
         return {
-            "snr_global":      snr_global,
-            "noise_median":    noise,
+            "snr_global":        snr_global,
+            "snr_global_db":     snr_global_db,
+            "noise_median":      noise,     # median sky RMS (σ_sky) in ADU
+            "background_median": background_median,  # median sky background (μ_sky) in ADU
             "star_snr_median": star_snr_median,
             "star_snr_iqr":    star_snr_iqr,
             "pct_above_3":     pcts[3],

@@ -187,11 +187,17 @@ class AnalysisThread(QThread):
             tasks.append(("spatial", "Running spatial detail analysis", _spatial))
 
         if metrics.get("snr"):
-            def _snr():
+            sl_a = self._starless_a
+            sl_b = self._starless_b
+            def _snr(sl_a=sl_a, sl_b=sl_b):
                 from analysis.snr_analyzer import SNRAnalyzer
                 sa = SNRAnalyzer()
                 result_a.snr_metrics = sa.analyze(img_a)
                 result_b.snr_metrics = sa.analyze(img_b)
+                if sl_a is not None:
+                    result_a.snr_metrics["starless"] = sa.analyze(sl_a)
+                if sl_b is not None:
+                    result_b.snr_metrics["starless"] = sa.analyze(sl_b)
             tasks.append(("snr", "Computing SNR maps", _snr))
 
         if parallel and len(tasks) > 1:

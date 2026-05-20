@@ -15,7 +15,7 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX
+from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX, PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -730,11 +730,11 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         def _make_map(pts, img_h, img_w):
             if not pts:
                 return None
-            # Grid with same aspect ratio as image; long axis = 300 px
+            # Grid with same aspect ratio as image; long axis = PSF_SPATIAL_MAP_SIZE px
             if img_w >= img_h:
-                gw, gh = 300, max(1, int(300 * img_h / img_w))
+                gw, gh = PSF_SPATIAL_MAP_SIZE, max(1, int(PSF_SPATIAL_MAP_SIZE * img_h / img_w))
             else:
-                gh, gw = 300, max(1, int(300 * img_w / img_h))
+                gh, gw = PSF_SPATIAL_MAP_SIZE, max(1, int(PSF_SPATIAL_MAP_SIZE * img_w / img_h))
             gx, gy = np.meshgrid(np.linspace(0, img_w, gw),
                                   np.linspace(0, img_h, gh))
             coords = np.array([(p[0], p[1]) for p in pts])
@@ -742,7 +742,7 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             m = _griddata(coords, vals, (gx, gy), method="linear")
             nn = _griddata(coords, vals, (gx, gy), method="nearest")
             m = np.where(np.isnan(m), nn, m)
-            return _gaussian_filter(m, sigma=4.0)
+            return _gaussian_filter(m, sigma=PSF_SPATIAL_MAP_SMOOTH_SIGMA)
 
         map_a = _make_map(pts_a, img_h_a, img_w_a)
         map_b = _make_map(pts_b, img_h_b, img_w_b)
@@ -1871,7 +1871,7 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
     def _plot_gradient_pair(self, disp_a, shape_a, rois_a, label_a,
                              disp_b, shape_b, rois_b, label_b,
                              shared_vmax: float) -> plt.Figure:
-        """Render both gradient-magnitude maps side-by-side with a shared log color scale."""
+        """Render both gradient-magnitude maps side-by-side with a shared color scale."""
         from matplotlib.patches import Rectangle
         panels = [(d, s, r, lbl) for d, s, r, lbl in
                   [(disp_a, shape_a, rois_a, label_a),
@@ -1884,11 +1884,15 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
             ax.imshow(disp, origin="lower", cmap="inferno",
                       vmin=0, vmax=shared_vmax,
                       extent=[0, w, 0, h], aspect="equal", interpolation="nearest")
+            half = EDGE_ROI_MAP_INDICATOR_PX // 2
             for (x0, y0, x1, y1) in (rois or []):
-                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
-                                       linewidth=1.2, edgecolor="lime",
-                                       facecolor="none", linestyle="--"))
-            ax.set_title(f"Gradient magnitude (log) — {lbl}")
+                cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                ix0, iy0 = max(0, cx - half), max(0, cy - half)
+                ix1, iy1 = min(w, cx + half), min(h, cy + half)
+                ax.add_patch(Rectangle((ix0, iy0), ix1 - ix0, iy1 - iy0,
+                                       linewidth=2.0, edgecolor="cyan",
+                                       facecolor="none", linestyle="-"))
+            ax.set_title(f"Gradient magnitude — {lbl}")
             ax.set_xlabel("X (px)")
             ax.set_ylabel("Y (px)")
         fig.tight_layout()
@@ -1937,12 +1941,12 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
                        f'used the starless image so the strongest gradient search locates '
                        f'a nebula emission boundary rather than a star profile.</div>')
 
-        # Gradient map comparison row — shared log-scale, rendered as a combined figure
+        # Gradient map comparison row — shared scale, rendered as a combined figure
         gm_a = ea.get("gm_display")
         gm_b = eb.get("gm_display")
         if gm_a is not None or gm_b is not None:
-            shared_vmax = max(ea.get("gm_log_vmax") or 1.0,
-                              eb.get("gm_log_vmax") or 1.0)
+            shared_vmax = max(ea.get("gm_vmax") or 1.0,
+                              eb.get("gm_vmax") or 1.0)
             pair_fig = self._plot_gradient_pair(
                 gm_a, ea.get("gm_shape"), ea.get("rois_used"), ra.label,
                 gm_b, eb.get("gm_shape"), eb.get("rois_used"), rb.label,
@@ -1951,9 +1955,9 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
             gradient_row = (
                 '<h4>Gradient magnitude (ROI auto-detection map)</h4>'
                 + _img_tag(pair_fig, "Gradient magnitude")
-                + '<p class="caption">Log-scaled Gaussian gradient magnitude used to locate '
-                'the strongest edge regions. Dashed lime boxes show the three selected '
-                'analysis ROIs. Both images share the same color scale (P99 of the brighter '
+                + '<p class="caption">Gaussian gradient magnitude used to locate '
+                'the strongest edge regions. Cyan boxes show the three selected '
+                'analysis ROI regions. Both images share the same color scale (P99 of the brighter '
                 'image) for direct comparison. Sigma is pixel-scale adaptive '
                 '(≈ 1.5 arcsec equivalent) so diffuse gradients in long-focal-length images '
                 'are captured as reliably as sharp edges in short-focal-length data.</p>'
@@ -2002,7 +2006,7 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
   are located automatically (peaks are suppressed within a 90 px radius after each
   detection to ensure the three regions sample distinct features). A 500 × 500 px
   context window is shown for each, centred on the gradient peak; the 60 × 60 px
-  analysis region (dashed lime box) is highlighted within it.
+  analysis region (cyan box) is highlighted within it.
   If a starless image was provided it is used in place of the stacked image, so the
   search locates nebula emission boundaries rather than star profiles.
   Both images are measured over the <em>identical</em> pixel regions: Image A's
@@ -2394,6 +2398,10 @@ between the two filters.</p>
         cs_a, cs_b = _better_worse_class(pa.get("star_snr_median"),
                                           pb.get("star_snr_median"),
                                           higher_is_better=True)
+        ca_db, cb_db = _better_worse_class(pa.get("snr_global_db"), pb.get("snr_global_db"),
+                                           higher_is_better=True)
+        cn_a, cn_b = _better_worse_class(pa.get("noise_median"), pb.get("noise_median"),
+                                         higher_is_better=False)
 
         # Shared-scale SNR map pair
         pa_disp = pa.get("snr_display")
@@ -2428,6 +2436,52 @@ between the two filters.</p>
         star_a_cell = f"{star_snr_a} ± {star_iqr_a}" if pa.get("star_snr_median") else "—"
         star_b_cell = f"{star_snr_b} ± {star_iqr_b}" if pb.get("star_snr_median") else "—"
 
+        # --- Starless SNR sub-section ---
+        sl_a = pa.get("starless") or {}
+        sl_b = pb.get("starless") or {}
+        starless_html = ""
+        if sl_a or sl_b:
+            sl_vmin = min(sl_a.get("snr_p2") or 0.0, sl_b.get("snr_p2") or 0.0)
+            sl_vmax = max(sl_a.get("snr_p98") or 10.0, sl_b.get("snr_p98") or 10.0)
+            sl_pair_fig = self._plot_snr_pair(
+                sl_a.get("snr_display"), ra.label + " (starless)",
+                sl_b.get("snr_display"), rb.label + " (starless)",
+                sl_vmin, sl_vmax,
+            )
+            sl_ca, sl_cb = _better_worse_class(
+                sl_a.get("snr_global"), sl_b.get("snr_global"), higher_is_better=True)
+            def sl_pct_row(label, key, _sla=sl_a, _slb=sl_b):
+                va, vb = _sla.get(key), _slb.get(key)
+                cpa, cpb = _better_worse_class(va, vb, higher_is_better=True)
+                return (f"<tr><td>{label}</td>"
+                        f"<td class='{cpa}'>{_val(va, '.4f')} %</td>"
+                        f"<td class='{cpb}'>{_val(vb, '.4f')} %</td></tr>")
+            sl_pct_rows = "".join([
+                sl_pct_row("Pixels &gt; 3 σ",  "pct_above_3"),
+                sl_pct_row("Pixels &gt; 5 σ",  "pct_above_5"),
+                sl_pct_row("Pixels &gt; 10 σ", "pct_above_10"),
+                sl_pct_row("Pixels &gt; 20 σ", "pct_above_20"),
+            ])
+            sl_pair_html = _img_tag(sl_pair_fig, "Starless SNR map comparison")
+            starless_html = f"""
+<h3>9b. SNR — Starless Images</h3>
+<div class="info-box">★ SNR analysis repeated on the starless image(s). Stars inflate the
+global SNR and above-threshold percentages because bright star cores contribute many
+high-SNR pixels unrelated to the nebula emission. The starless values below reflect
+pure nebula depth and are recommended for comparing image quality.</div>
+<table>
+  <tr><th>Metric</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th></tr>
+  <tr><td>Global SNR (σ)</td>
+      <td class="{sl_ca}">{_val(sl_a.get("snr_global"), ".4f")}</td>
+      <td class="{sl_cb}">{_val(sl_b.get("snr_global"), ".4f")}</td></tr>
+</table>
+<table>
+  <tr><th>Threshold</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th></tr>
+  {sl_pct_rows}
+</table>
+{sl_pair_html}
+<p class="caption">Per-pixel SNR map on the starless image. Star flux removed so nebula
+depth drives the color scale. Both images share the same scale for direct comparison.</p>"""
         return f"""
 <h2>9. Signal-to-Noise Ratio (SNR)</h2>
 {err}
@@ -2439,9 +2493,10 @@ between the two filters.</p>
   pixel value of all background-subtracted pixels that lie above 3&times; the median sky RMS
   (i.e. pixels that contain genuine emission rather than blank sky), divided by the median sky
   noise (&sigma;<sub>sky</sub>). The sky noise estimate uses the 2D background RMS map produced
-  by photutils <code>Background2D + MADStdBackgroundRMS</code>, which fits a sigma-clipped
-  background model on a spatial grid and measures the residual scatter in each cell &mdash; the
-  same estimate used throughout the analysis pipeline. <strong>Ideal: &gt; 10 &sigma; for nebula
+  by photutils <code>Background2D</code> with <code>SExtractorBackground</code> (background
+  estimator) and <code>MADStdBackgroundRMS</code> (noise estimator), which partitions the image
+  into 64 &times; 64 px grid cells, sigma-clips stars within each cell, and interpolates a smooth
+  2D surface &mdash; the same estimate used throughout the analysis pipeline. <strong>Ideal: &gt; 10 &sigma; for nebula
   targets; &gt; 30 &sigma; for rich star fields.</strong> Values are dimensionless
   (sky-&sigma;) and directly comparable between the two images regardless of stretch or
   scaling. Note that this method is sky-noise-dominated: it faithfully reflects how much of the
@@ -2449,8 +2504,9 @@ between the two filters.</p>
   very bright regions where photon shot noise exceeds the sky floor.<br><br>
 
   <strong>Median star SNR &plusmn; IQR</strong> &mdash; The median peak-to-noise ratio across
-  all catalogue stars that passed quality filtering (non-saturated, isolated, minimum 5-&sigma;
-  detection), plus the interquartile range as a measure of spread. For each star,
+  all catalogue stars detected with photutils <code>DAOStarFinder</code> that passed quality
+  filtering (non-saturated, isolated, minimum SNR threshold), plus the interquartile range as a
+  measure of spread. For each star,
   SNR&thinsp;=&thinsp;(peak&thinsp;&minus;&thinsp;local sky)&thinsp;/&thinsp;local sky RMS,
   using the per-image background grid. <strong>Ideal: median &gt; 20 for a well-exposed
   session; IQR &lt; 15 indicates a uniform noise floor.</strong> A large IQR implies either
@@ -2477,14 +2533,54 @@ between the two filters.</p>
   structure can be reliably measured. <strong>Ideal: 3-&sigma; fraction &gt; 20% for a rich
   nebula field; 10-&sigma; fraction &gt; 5% indicates strong central emission.</strong> A
   higher percentage across all thresholds in one image directly translates to more usable
-  signal for further processing (deconvolution, colour mixing, detail extraction).
+  signal for further processing (deconvolution, colour mixing, detail extraction).<br><br>
+
+  <strong>Sky noise &sigma;<sub>sky</sub> and sky background &mu;<sub>sky</sub></strong> &mdash;
+  Two complementary sky characterisation metrics derived from the same photutils
+  <code>Background2D</code> model used throughout the SNR computation. The image is divided into
+  <strong>64 &times; 64 px grid cells</strong>; within each cell <code>SExtractorBackground</code>
+  iteratively sigma-clips pixels above 3&sigma; (approximating the SourceExtractor background
+  algorithm) and <code>MADStdBackgroundRMS</code> computes the cell noise from the median
+  absolute deviation &mdash; more robust than standard deviation for fields containing stars or
+  nebulosity. The resulting background mesh is interpolated into a smooth 2D surface covering
+  the entire frame. <strong>No specific sky region is drawn or required</strong> &mdash; stars
+  and bright nebula pixels are rejected automatically by sigma clipping, so &sigma;<sub>sky</sub>
+  and &mu;<sub>sky</sub> represent the whole-image sky floor.<br><br>
+  <em>&sigma;<sub>sky</sub></em> (Sky RMS noise, ADU) is the median of the 2D background RMS
+  map &mdash; the pixel-to-pixel scatter of the sky and the primary noise floor used throughout
+  this report. A lower &sigma;<sub>sky</sub> means a quieter sky; the image with the smaller
+  value will generally record fainter signals above 3&sigma;. Differences arise from read noise,
+  dark current, sky glow, and total integration time.<br><br>
+  <em>&mu;<sub>sky</sub></em> (Sky background level, ADU) is the median of the smooth background
+  model itself &mdash; how bright the blank sky is before any stretch. A higher
+  &mu;<sub>sky</sub> does not directly harm SNR (which depends on &sigma;, not &mu;), but it
+  reduces the dynamic range available before saturation and can indicate light pollution or short
+  sub-exposures. <strong>What to compare:</strong> Focus on &sigma;<sub>sky</sub> as the decisive
+  quality indicator. If &sigma;<sub>sky</sub> differs by more than &approx; 30% between the two
+  images, the integration depth or sky conditions were meaningfully different. &mu;<sub>sky</sub>
+  is useful context &mdash; a high background paired with low &sigma; means the sky was bright
+  but well-sampled; a high background paired with high &sigma; suggests insufficient exposure
+  time.
 </div>
+
+<table>
+  <tr><th>Sky metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
+  <tr><td>Sky RMS noise &sigma;<sub>sky</sub> (ADU) &mdash; lower is better</td>
+      <td class="{cn_a}">{_val(pa.get("noise_median"), ".4f")}</td>
+      <td class="{cn_b}">{_val(pb.get("noise_median"), ".4f")}</td></tr>
+  <tr><td>Sky background &mu;<sub>sky</sub> (ADU)</td>
+      <td>{_val(pa.get("background_median"), ".3f")}</td>
+      <td>{_val(pb.get("background_median"), ".3f")}</td></tr>
+</table>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Global SNR (&sigma;)</td>
-      <td class="{ca}">{_val(pa.get("snr_global"), ".4f")}</td>
-      <td class="{cb}">{_val(pb.get("snr_global"), ".4f")}</td></tr>
+      <td class="{ca}">{_val(pa.get("snr_global"), ".4f")} &sigma;</td>
+      <td class="{cb}">{_val(pb.get("snr_global"), ".4f")} &sigma;</td></tr>
+  <tr><td>Global SNR (dB)</td>
+      <td class="{ca_db}">{_val(pa.get("snr_global_db"), ".2f")} dB</td>
+      <td class="{cb_db}">{_val(pb.get("snr_global_db"), ".2f")} dB</td></tr>
   <tr><td>Median star SNR &plusmn; IQR</td>
       <td class="{cs_a}">{star_a_cell}</td>
       <td class="{cs_b}">{star_b_cell}</td></tr>
@@ -2499,7 +2595,8 @@ between the two filters.</p>
 <p class="caption">Per-pixel SNR map: signal / sky RMS at each location (plasma colourmap).
 Both images share the same color scale (P2&ndash;P98 of the higher-SNR image) for direct
 comparison. Bright regions have high SNR; blank sky clusters near zero.
-A uniformly brighter map indicates deeper, more signal-rich data.</p>"""
+A uniformly brighter map indicates deeper, more signal-rich data.</p>
+{starless_html}"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
 
@@ -2549,8 +2646,17 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>"""
             row("Std contrast ratio (15px)", cr_a.get(15), cr_b.get(15)),
             row("Wavelet SNR level 2", snr_wav_a.get(2), snr_wav_b.get(2)),
             row("Wavelet SNR level 3", snr_wav_a.get(3), snr_wav_b.get(3)),
-            row("Global image SNR (σ)", snr_ma.get("snr_global"),
-                snr_mb.get("snr_global"), fmt=".4f"),
+            *([row(
+                "Global SNR — starless (σ) ★",
+                (snr_ma.get("starless") or {}).get("snr_global"),
+                (snr_mb.get("starless") or {}).get("snr_global"),
+                fmt=".4f",
+            )] if (snr_ma.get("starless") or snr_mb.get("starless")) else [row(
+                "Global image SNR (σ)",
+                snr_ma.get("snr_global"),
+                snr_mb.get("snr_global"),
+                fmt=".4f",
+            )]),
         ])
 
         legend = ('<p><span class="metric-label-ok">✓</span> = bandwidth-independent '
