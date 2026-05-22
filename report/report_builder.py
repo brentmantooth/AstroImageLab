@@ -15,7 +15,7 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX, PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX
+from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX, PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX, LABEL_MAX_LEN
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -249,18 +249,30 @@ class ReportBuilder:
         bw_differ = (bw_a is not None and bw_b is not None and
                      abs(bw_a - bw_b) > 0.1)
 
+        # Label substitution was applied in the analysis thread before any figures were
+        # rendered.  Read the stored original labels from the result objects here so the
+        # Section 1 info box can map "Image A/B" back to the full filenames.
+        _substituted = (result_a.original_label is not None
+                        or result_b.original_label is not None)
+        _orig_label_a = result_a.original_label or result_a.label
+        _orig_label_b = result_b.original_label or result_b.label
+
         sections = [
-            self._section_header(image_a, image_b, result_a, result_b, bw_differ),
+            self._section_header(image_a, image_b, result_a, result_b, bw_differ,
+                                 substituted=_substituted,
+                                 orig_label_a=_orig_label_a,
+                                 orig_label_b=_orig_label_b),
             self._section_observation(result_a, result_b),
+            self._section_snr(result_a, result_b),
             self._section_psf(result_a, result_b, image_a, image_b),
             self._section_halo(result_a, result_b, image_a, image_b),
-            self._section_ghost(result_a, result_b),
             self._section_edge(result_a, result_b, bw_differ),
             self._section_power(result_a, result_b),
             self._section_spatial(result_a, result_b),
-            self._section_snr(result_a, result_b),
             self._section_summary(result_a, result_b, bw_differ),
         ]
+
+
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -292,7 +304,10 @@ class ReportBuilder:
 
     def _section_header(self, img_a: AstroImage, img_b: AstroImage,
                          result_a: AnalysisResult, result_b: AnalysisResult,
-                         bw_differ: bool) -> str:
+                         bw_differ: bool,
+                         substituted: bool = False,
+                         orig_label_a: str = "",
+                         orig_label_b: str = "") -> str:
         bw_warn = ""
         if bw_differ:
             bw_warn = (f'<div class="bw-warn">⚠ <strong>Bandwidth warning:</strong> '
@@ -302,6 +317,15 @@ class ReportBuilder:
                        f'sensitive to this difference and should be interpreted with caution. '
                        f'Metrics marked <span class="metric-label-ok">✓</span> are '
                        f'bandwidth-independent.</div>')
+        label_sub_box = ""
+        if substituted:
+            label_sub_box = (
+                f'<div class="info-box"><strong>Label substitution:</strong> '
+                f'One or more input filenames exceed {LABEL_MAX_LEN} characters and have been '
+                f'abbreviated in all plots and legends throughout this report.<br>'
+                f'&nbsp;&nbsp;<strong>Image A</strong> = {orig_label_a}<br>'
+                f'&nbsp;&nbsp;<strong>Image B</strong> = {orig_label_b}</div>'
+            )
 
         def meta_rows(img: AstroImage, result: AnalysisResult) -> str:
             rows = ""
@@ -346,6 +370,7 @@ class ReportBuilder:
         return f"""
 <h1>Filter Image Comparison Report</h1>
 <p><strong>{img_a.label}</strong> vs <strong>{img_b.label}</strong></p>
+{label_sub_box}
 {bw_warn}
 <h2>1. Image Metadata</h2>
 <div style="display:flex;gap:20px;">
@@ -515,7 +540,7 @@ shown in the metadata table above.</div>"""
             "Eccentricity", "Eccentricity distribution"), "Eccentricity histogram")
 
         return f"""
-<h2>3. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
+<h2>4. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
 {err}
 <div class="info-box">The Point Spread Function (PSF) describes how a point source
 (star) is rendered. FWHM measures the core width; smaller FWHM = sharper stars.
@@ -1291,7 +1316,7 @@ probe of PSF resolution at multiple spatial frequencies in a single exposure.</p
             optics_note = ""
 
         return f"""
-<h2>4. Halo Analysis &nbsp;<span class="metric-label-ok">&#10003; bandwidth-independent</span></h2>
+<h2>5. Halo Analysis &nbsp;<span class="metric-label-ok">&#10003; bandwidth-independent</span></h2>
 {err}
 <div class="info-box">
   <strong>What causes halos?</strong>
@@ -1488,7 +1513,7 @@ bright stars.</div>"""
         fig_w = 10.0 * (dw / max(dh, dw))
         fig_h = 10.0 * (dh / max(dh, dw))
         fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-        ax.imshow(display, origin="lower", cmap="gray", aspect="equal",
+        ax.imshow(display, origin="upper", cmap="gray", aspect="equal",
                   interpolation="nearest", vmin=0, vmax=1)
 
         circle_r = max(dw, dh) * 0.012
@@ -1593,7 +1618,7 @@ bright stars.</div>"""
             ax_xs  = axes[row, col_base + 2]
             ax_rdf = axes[row, col_base + 3]
 
-            ax_a.imshow(disp_a, origin="lower", cmap="turbo",
+            ax_a.imshow(disp_a, origin="upper", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             h2c_a = sa.get("halo_to_core_ratio")
             ax_a.set_title(f"#{idx+1} {img_a.label}"
@@ -1603,7 +1628,7 @@ bright stars.</div>"""
             ax_a.plot(half, half, '+', color='magenta', markersize=12,
                       markeredgewidth=1.5, zorder=5)
 
-            ax_b.imshow(disp_b, origin="lower", cmap="turbo",
+            ax_b.imshow(disp_b, origin="upper", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             if sb is not None:
                 h2c_b = sb.get("halo_to_core_ratio")
@@ -1719,14 +1744,14 @@ bright stars.</div>"""
             ax_xs  = axes[idx, 2]
             ax_rdf = axes[idx, 3]
 
-            ax_a.imshow(disp_a, origin="lower", cmap="turbo",
+            ax_a.imshow(disp_a, origin="upper", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             ax_a.set_title(f"S{idx+1} {img_a.label}\n⚠ saturated core", fontsize=9)
             ax_a.axis("off")
             ax_a.plot(half, half, '+', color='magenta', markersize=12,
                       markeredgewidth=1.5, zorder=5)
 
-            ax_b.imshow(disp_b, origin="lower", cmap="turbo",
+            ax_b.imshow(disp_b, origin="upper", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             title_b = (f"S{idx+1} {img_b.label}\n"
                        + ("⚠ saturated core" if sb is not None else "(no match)"))
@@ -1821,52 +1846,63 @@ bright stars.</div>"""
         fig.tight_layout()
         return fig
 
-    # ── Section 5: Ghost ──────────────────────────────────────────────────────
-
-    def _section_ghost(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
-        err = _error_box("ghost", ra, rb)
-        ga = ra.ghost_metrics or {}
-        gb = rb.ghost_metrics or {}
-        cands_a = ga.get("ghost_candidates", [])
-        cands_b = gb.get("ghost_candidates", [])
-        img_a = _img_tag((ga.get("figures") or {}).get("ghost_map"), f"Ghost map {ra.label}")
-        img_b = _img_tag((gb.get("figures") or {}).get("ghost_map"), f"Ghost map {rb.label}")
-
-        def cand_rows(cands, label):
-            if not cands:
-                return f"<tr><td colspan='4'>No ghost candidates detected in {label}</td></tr>"
-            top = sorted(cands, key=lambda c: c.get("intensity_ratio", 0), reverse=True)[:25]
-            rows = ""
-            for c in top:
-                rows += (f"<tr><td>{c['separation_px']:.1f}</td>"
-                         f"<td>{c['dx']:.1f}, {c['dy']:.1f}</td>"
-                         f"<td>{c['intensity_ratio']:.4f}</td>"
-                         f"<td>{c['classification']}</td></tr>")
-            return rows
-
-        return f"""
-<h2>5. Ghost Image Detection &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
-{err}
-<div class="info-box">Ghosts are discrete secondary images caused by reflections
-between the filter surfaces and the sensor. Unlike halos (which are diffuse),
-ghosts are localised and appear at specific offsets from bright stars.
-The ghost/parent intensity ratio is valid across different bandwidths.</div>
-
-<h3>{ra.label} — {len(cands_a)} candidate(s){" &nbsp;<em>(showing top 25 by intensity ratio)</em>" if len(cands_a) > 25 else ""}</h3>
-<table>
-  <tr><th>Separation (px)</th><th>Offset (dx, dy)</th><th>Intensity ratio</th><th>Classification</th></tr>
-  {cand_rows(cands_a, ra.label)}
-</table>
-{img_a}
-
-<h3>{rb.label} — {len(cands_b)} candidate(s){" &nbsp;<em>(showing top 25 by intensity ratio)</em>" if len(cands_b) > 25 else ""}</h3>
-<table>
-  <tr><th>Separation (px)</th><th>Offset (dx, dy)</th><th>Intensity ratio</th><th>Classification</th></tr>
-  {cand_rows(cands_b, rb.label)}
-</table>
-{img_b}"""
 
     # ── Section 6: Edge ───────────────────────────────────────────────────────
+
+    def _plot_esf_lsf_pair(self,
+                            edge_a: dict, edge_b: dict,
+                            label_a: str, label_b: str,
+                            edge_num: int) -> plt.Figure:
+        """Combined ESF (left) + LSF (right) for both images on shared axes."""
+        _v = lambda d, k: np.asarray(d[k]) if d.get(k) is not None else np.array([])
+        pos_a = _v(edge_a, "positions")
+        esf_a = _v(edge_a, "esf")
+        lsf_a = _v(edge_a, "lsf")
+        pos_b = _v(edge_b, "positions")
+        esf_b = _v(edge_b, "esf")
+        lsf_b = _v(edge_b, "lsf")
+        w_a   = edge_a.get("edge_width_10_90_px")
+        w_b   = edge_b.get("edge_width_10_90_px")
+
+        fig, (ax_esf, ax_lsf) = plt.subplots(1, 2, figsize=(10, 4))
+
+        # ESF panel
+        if esf_a.size:
+            ax_esf.plot(pos_a, esf_a, color="steelblue", linewidth=1.5,
+                        alpha=XS_LINE_ALPHA, label=label_a)
+        if esf_b.size:
+            ax_esf.plot(pos_b, esf_b, color="tomato", linewidth=1.5,
+                        alpha=XS_LINE_ALPHA, label=label_b)
+        ax_esf.axhline(0.10, color="gray", linestyle="--", linewidth=0.8)
+        ax_esf.axhline(0.90, color="gray", linestyle="--", linewidth=0.8)
+        w_label = ""
+        if w_a is not None and w_b is not None:
+            w_label = f"  (A: {w_a:.2f} px, B: {w_b:.2f} px)"
+        elif w_a is not None:
+            w_label = f"  (A: {w_a:.2f} px)"
+        elif w_b is not None:
+            w_label = f"  (B: {w_b:.2f} px)"
+        ax_esf.set_title(f"Edge #{edge_num} ESF — 10–90% width{w_label}", fontsize=9)
+        ax_esf.set_xlabel("Position (px)")
+        ax_esf.set_ylabel("Normalised intensity")
+        ax_esf.legend(fontsize=8)
+        ax_esf.grid(alpha=0.3)
+
+        # LSF panel
+        if lsf_a.size:
+            ax_lsf.plot(pos_a, lsf_a, color="steelblue", linewidth=1.5,
+                        alpha=XS_LINE_ALPHA, label=label_a)
+        if lsf_b.size:
+            ax_lsf.plot(pos_b, lsf_b, color="tomato", linewidth=1.5,
+                        alpha=XS_LINE_ALPHA, label=label_b)
+        ax_lsf.set_title(f"Edge #{edge_num} LSF (derivative of ESF)", fontsize=9)
+        ax_lsf.set_xlabel("Position (px)")
+        ax_lsf.set_ylabel("d(ESF)/dx")
+        ax_lsf.legend(fontsize=8)
+        ax_lsf.grid(alpha=0.3)
+
+        fig.tight_layout()
+        return fig
 
     def _plot_gradient_pair(self, disp_a, shape_a, rois_a, label_a,
                              disp_b, shape_b, rois_b, label_b,
@@ -1881,9 +1917,9 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
             axes = [axes]
         for ax, (disp, shape, rois, lbl) in zip(axes, panels):
             h, w = shape if shape else disp.shape
-            ax.imshow(disp, origin="lower", cmap="inferno",
+            ax.imshow(disp, origin="upper", cmap="inferno",
                       vmin=0, vmax=shared_vmax,
-                      extent=[0, w, 0, h], aspect="equal", interpolation="nearest")
+                      extent=[0, w, h, 0], aspect="equal", interpolation="nearest")
             half = EDGE_ROI_MAP_INDICATOR_PX // 2
             for (x0, y0, x1, y1) in (rois or []):
                 cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -1917,18 +1953,25 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
         for i in range(n_edges):
             ea_e = edges_a[i] if i < len(edges_a) else {}
             eb_e = edges_b[i] if i < len(edges_b) else {}
+            # ROI context images (one per image — just the context window with overlays)
             img_a_i = _img_tag((ea_e.get("figures") or {}).get("edge"),
                                f"Edge #{i+1} {ra.label}")
             img_b_i = _img_tag((eb_e.get("figures") or {}).get("edge"),
                                f"Edge #{i+1} {rb.label}")
             if not img_a_i and not img_b_i:
                 continue
+            # Combined ESF + LSF figure — both images on shared axes
+            esf_lsf_html = ""
+            if ea_e or eb_e:
+                esf_lsf_fig = self._plot_esf_lsf_pair(ea_e, eb_e, ra.label, rb.label, i + 1)
+                esf_lsf_html = _img_tag(esf_lsf_fig, f"Edge #{i+1} ESF + LSF")
             edge_figures_html += (
                 f'<h4 style="margin-top:1.2em;">Edge #{i+1}</h4>'
                 f'<div style="display:flex;gap:10px;">'
                 + "".join(f'<div style="flex:1;">{img}</div>'
                           for img in [img_a_i, img_b_i] if img)
                 + "</div>"
+                + esf_lsf_html
             )
 
         used_sl_a = ea.get("used_starless", False)
@@ -2029,18 +2072,21 @@ The ghost/parent intensity ratio is valid across different bandwidths.</div>
 
 {edge_figures_html}
 <div class="info-box" style="font-size:0.9em;">
-  <strong>Figure panels (left → right):</strong>
-  <em>Edge ROI</em> — 500 × 500 px context window centred on the detected gradient peak.
+  <strong>Figures per edge:</strong>
+  <em>ROI context panels</em> (one per image) — 500 × 500 px context window centred on
+  the detected gradient peak.
   The <span style="color:#90ee90;font-weight:bold;">dashed lime rectangle</span> marks
   the 60 × 60 px analysis region used for ESF/LSF extraction.
   The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF
   scan direction (perpendicular to the edge), clipped to the analysis region;
   the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows
   the detected edge orientation, also clipped to the analysis region. &nbsp;
-  <em>ESF</em> — normalised intensity transition; dashed lines mark the 10% and 90%
-  levels used for the edge width measurement. &nbsp;
-  <em>LSF</em> — derivative of the ESF; peak width and symmetry indicate local
-  resolution quality.
+  <em>ESF / LSF comparison</em> — both images overlaid on shared axes;
+  <span style="color:steelblue;font-weight:bold;">Image A (steelblue)</span> vs
+  <span style="color:tomato;font-weight:bold;">Image B (tomato)</span>.
+  ESF: normalised intensity transition; dashed lines mark the 10% and 90% levels used
+  for the edge width measurement.
+  LSF: derivative of the ESF; peak width and symmetry indicate local resolution quality.
 </div>
 
 <div class="info-box">
@@ -2259,6 +2305,21 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
                        f'<strong>{who}</strong> used the starless image to reduce '
                        f'star contamination of the spatial frequency maps.</div>')
 
+        roi_note = ""
+        roi_used = sm.get("roi_used")
+        if roi_used is not None:
+            rx0, ry0, rx1, ry1 = roi_used
+            roi_note = (
+                f'<div class="info-box"><strong>ROI applied:</strong> '
+                f'Std / LoG / wavelet maps were computed on the user-selected region '
+                f'({rx0}, {ry0}) → ({rx1}, {ry1}) px only. '
+                f'Each image was first normalised by its own full-image mean signal so '
+                f'the contrast ratios and wavelet SNR values are still directly '
+                f'comparable between images regardless of bandwidth differences. '
+                f'Cross-section profiles (if a line was drawn) sample the full image '
+                f'as the line coordinates are in full-image pixel space.</div>'
+            )
+
         smooth_note = (
             '<div class="info-box">ℹ All spatial detail maps are smoothed with a '
             'Gaussian filter (σ = 1.0 px) <strong>for display only</strong>. '
@@ -2295,6 +2356,7 @@ Use this to assess absolute signal levels and dynamic range between filters.</p>
 <h2>8. Spatial Detail Comparison &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
 {err}
 {sl_note}
+{roi_note}
 {smooth_note}
 <div class="info-box">All maps below are computed on mean-signal-normalised data
 (each image divided by its own mean signal), making them dimensionless and comparable
@@ -2379,7 +2441,7 @@ between the two filters.</p>
         if len(panels) == 1:
             axes = [axes]
         for ax, (disp, lbl) in zip(axes, panels):
-            im = ax.imshow(disp, origin="lower", cmap="plasma",
+            im = ax.imshow(disp, origin="upper", cmap="plasma",
                            vmin=vmin, vmax=vmax, interpolation="nearest")
             fig.colorbar(im, ax=ax, label="SNR (σ)", fraction=0.046, pad=0.04)
             ax.set_title(f"SNR map — {lbl}", fontsize=10)
@@ -2464,7 +2526,7 @@ between the two filters.</p>
             ])
             sl_pair_html = _img_tag(sl_pair_fig, "Starless SNR map comparison")
             starless_html = f"""
-<h3>9b. SNR — Starless Images</h3>
+<h3>3b. SNR — Starless Images</h3>
 <div class="info-box">★ SNR analysis repeated on the starless image(s). Stars inflate the
 global SNR and above-threshold percentages because bright star cores contribute many
 high-SNR pixels unrelated to the nebula emission. The starless values below reflect
@@ -2483,7 +2545,7 @@ pure nebula depth and are recommended for comparing image quality.</div>
 <p class="caption">Per-pixel SNR map on the starless image. Star flux removed so nebula
 depth drives the color scale. Both images share the same scale for direct comparison.</p>"""
         return f"""
-<h2>9. Signal-to-Noise Ratio (SNR)</h2>
+<h2>3. Signal-to-Noise Ratio (SNR)</h2>
 {err}
 <div class="info-box">
   <strong>Understanding the SNR metrics:</strong><br><br>
@@ -2665,7 +2727,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                   'context (filters had different bandwidths)</p>')
 
         return f"""
-<h2>10. Summary &amp; Recommendations</h2>
+<h2>9. Summary &amp; Recommendations</h2>
 {legend}
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>

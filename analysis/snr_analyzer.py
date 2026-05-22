@@ -104,7 +104,7 @@ class SNRAnalyzer:
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.imshow(
             snr_map,
-            origin="lower",
+            origin="upper",
             cmap="plasma",
             vmin=vmin,
             vmax=vmax,

@@ -22,6 +22,19 @@ from gui.main_window import MainWindow
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Astro Image Lab")
+    # Explicit tooltip colours so they remain readable in both dark and light mode.
+    # Qt inherits tooltip colours from the system palette; on Windows dark mode the
+    # default produces dark-grey text on a dark-grey background.
+    app.setStyleSheet("""
+        QToolTip {
+            background-color: #1e1e1e;
+            color: #f0f0f0;
+            border: 1px solid #555555;
+            padding: 4px 6px;
+            border-radius: 3px;
+            font-size: 9pt;
+        }
+    """)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

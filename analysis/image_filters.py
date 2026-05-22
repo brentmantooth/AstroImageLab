@@ -28,7 +28,8 @@ class SpatialDetailAnalyzer:
                 log_sigmas: tuple = LOG_SIGMAS,
                 wavelet: str = WAVELET_NAME,
                 levels: int = WAVELET_LEVELS,
-                crosshair: dict | None = None) -> dict:
+                crosshair: dict | None = None,
+                roi: tuple | None = None) -> dict:
 
         image_a.estimate_background()
         image_b.estimate_background()
@@ -54,13 +55,32 @@ class SpatialDetailAnalyzer:
         mask_neb_a, mask_bg_a = self._make_masks(image_a)
         mask_neb_b, mask_bg_b = self._make_masks(image_b)
 
-        # Bright-feature bounding box for display cropping (uses image A's mask)
-        display_roi = self._nebula_bounding_box(mask_neb_a, norm_a.shape)
+        # When a user ROI is provided, crop the analysis arrays to that region after
+        # normalisation so the global signal mean is used, not the ROI's local mean.
+        # The std/LoG/wavelet analysis and all display maps are then restricted to the
+        # ROI only.  Crosshair sampling always uses the full-image arrays because
+        # crosshair coordinates are always in full-image pixel space.
+        if roi is not None:
+            rx0, ry0, rx1, ry1 = roi
+            analysis_a  = norm_a[ry0:ry1, rx0:rx1]
+            analysis_b  = norm_b[ry0:ry1, rx0:rx1]
+            mask_neb_a  = mask_neb_a[ry0:ry1, rx0:rx1]
+            mask_bg_a   = mask_bg_a[ry0:ry1, rx0:rx1]
+            mask_neb_b  = mask_neb_b[ry0:ry1, rx0:rx1]
+            mask_bg_b   = mask_bg_b[ry0:ry1, rx0:rx1]
+            display_roi = None   # arrays are already the analysis region; no further cropping
+            result["roi_used"] = roi
+        else:
+            analysis_a  = norm_a
+            analysis_b  = norm_b
+            # Bright-feature bounding box for display cropping (uses image A's mask)
+            display_roi = self._nebula_bounding_box(mask_neb_a, norm_a.shape)
+
         result["display_roi"] = display_roi
 
         # 1. Local standard deviation maps
         std_figs = self._std_analysis(
-            norm_a, norm_b,
+            analysis_a, analysis_b,
             mask_neb_a, mask_bg_a,
             mask_neb_b, mask_bg_b,
             kernel_sizes,
@@ -73,7 +93,7 @@ class SpatialDetailAnalyzer:
 
         # 2. Laplacian of Gaussian maps
         log_figs = self._log_analysis(
-            norm_a, norm_b, log_sigmas,
+            analysis_a, analysis_b, log_sigmas,
             image_a.label, image_b.label,
             display_roi=display_roi,
             crosshair=crosshair,
@@ -82,7 +102,7 @@ class SpatialDetailAnalyzer:
 
         # 3. Wavelet decomposition
         wav_figs = self._wavelet_analysis(
-            norm_a, norm_b, wavelet, levels,
+            analysis_a, analysis_b, wavelet, levels,
             image_a.label, image_b.label,
             result,
             display_roi=display_roi,
@@ -419,7 +439,7 @@ class SpatialDetailAnalyzer:
         ax_a, ax_b, ax_diff = axes
 
         for ax, arr, title in zip([ax_a, ax_b], [arr_a, arr_b], [title_a, title_b]):
-            im = ax.imshow(arr, origin="lower", cmap=cmap,
+            im = ax.imshow(arr, origin="upper", cmap=cmap,
                            norm=norm if norm is not None else None,
                            vmin=None if norm is not None else vmin,
                            vmax=None if norm is not None else vmax,
@@ -428,7 +448,7 @@ class SpatialDetailAnalyzer:
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-        im_diff = ax_diff.imshow(diff, origin="lower", cmap="bwr",
+        im_diff = ax_diff.imshow(diff, origin="upper", cmap="bwr",
                                   vmin=dvmin, vmax=dvmax,
                                   interpolation="nearest", aspect="equal")
         ax_diff.set_title(diff_title, fontsize=10)
@@ -493,6 +513,7 @@ class SpatialDetailAnalyzer:
         diff = prof_a[:n] - prof_b[:n]
         ax2.plot(pos[:n], diff, color="#2ca02c", linewidth=1.2,
                  linestyle="--", alpha=0.85, label="A−B")
+        ax2.axhline(0, color="#2ca02c", linewidth=0.8, alpha=0.3)   # zero-crossing reference
         ax2.set_ylabel("Difference (A−B)", color="#2ca02c")
         ax2.tick_params(axis="y", labelcolor="#2ca02c")
         ax2.legend(loc="upper right", fontsize=8)

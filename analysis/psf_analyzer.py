@@ -301,7 +301,7 @@ class PSFAnalyzer:
     def _plot_epsf(self, epsf: np.ndarray, label: str) -> plt.Figure:
         fig, ax = plt.subplots(figsize=(4, 4))
         im = ax.imshow(np.log1p(epsf - epsf.min()),
-                       origin="lower", cmap="viridis", interpolation="nearest")
+                       origin="upper", cmap="viridis", interpolation="nearest")
         ax.set_title(f"ePSF — {label}")
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         fig.tight_layout()

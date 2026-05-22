@@ -41,11 +41,18 @@ class ZoomableImageLabel(QLabel):
         self._origin = QPoint()
         self._pixmap_orig: QPixmap | None = None
         self._display_arr: np.ndarray | None = None   # keeps buffer alive for QImage
+        self._full_image_shape: tuple | None = None   # (H, W) of the original full-res image
         self._roi_mode = False
+        self._roi_norm: tuple | None = None  # (x0n, y0n, x1n, y1n) normalised [0,1] persistent overlay
         self._line_mode: bool = False
         self._line_state: str = "idle"  # "idle" | "drawing" | "fixed"
         self._line_n0: tuple | None = None  # (xn, yn) normalised start
         self._line_n1: tuple | None = None  # (xn, yn) normalised end
+
+    def clear_roi_overlay(self) -> None:
+        """Remove the persistent ROI rectangle from the display."""
+        self._roi_norm = None
+        self.update()
 
     def set_roi_mode(self, enabled: bool) -> None:
         self._roi_mode = enabled
@@ -92,6 +99,8 @@ class ZoomableImageLabel(QLabel):
         return QPoint(int(ox + xn * pw), int(oy + yn * ph))
 
     def set_image_array(self, arr: np.ndarray) -> None:
+        self._full_image_shape = arr.shape[:2]   # store full-res shape before downsampling
+        self._roi_norm = None   # new image invalidates previous ROI overlay
         arr = _downsample_for_display(arr)
         h, w = arr.shape[:2]
         if arr.ndim == 2:
@@ -116,16 +125,27 @@ class ZoomableImageLabel(QLabel):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if (self._line_n0 is not None and self._line_n1 is not None
-                and self._line_state in ("drawing", "fixed")):
+        has_roi = self._roi_norm is not None
+        has_line = (self._line_n0 is not None and self._line_n1 is not None
+                    and self._line_state in ("drawing", "fixed"))
+        if not has_roi and not has_line:
+            return
+        painter = QPainter(self)
+        if has_roi:
+            pt0 = self._norm_to_widget(self._roi_norm[0], self._roi_norm[1])
+            pt2 = self._norm_to_widget(self._roi_norm[2], self._roi_norm[3])
+            if pt0 is not None and pt2 is not None:
+                painter.setPen(QPen(QColor("#17becf"), 2))
+                painter.setBrush(QColor(23, 190, 207, 35))   # semi-transparent cyan fill
+                painter.drawRect(QRect(pt0, pt2))
+        if has_line:
             pt0 = self._norm_to_widget(*self._line_n0)
             pt1 = self._norm_to_widget(*self._line_n1)
             if pt0 is not None and pt1 is not None:
-                painter = QPainter(self)
-                pen = QPen(QColor("#17becf"), 2)
-                painter.setPen(pen)
+                painter.setPen(QPen(QColor("#17becf"), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawLine(pt0, pt1)
-                painter.end()
+        painter.end()
 
     def mousePressEvent(self, event):
         if self._line_mode and event.button() == Qt.MouseButton.LeftButton:
@@ -169,6 +189,19 @@ class ZoomableImageLabel(QLabel):
             img_rect = self._image_coords(rect)
             if img_rect:
                 self.roi_selected.emit(*img_rect)
+                # Store normalised ROI for persistent transparent overlay
+                px = self.pixmap()
+                if px is not None:
+                    pw, ph = px.width(), px.height()
+                    ox = (self.width() - pw) // 2
+                    oy = (self.height() - ph) // 2
+                    self._roi_norm = (
+                        max(0.0, min(1.0, (rect.left() - ox) / pw)),
+                        max(0.0, min(1.0, (rect.top() - oy) / ph)),
+                        max(0.0, min(1.0, (rect.right() - ox) / pw)),
+                        max(0.0, min(1.0, (rect.bottom() - oy) / ph)),
+                    )
+                self.update()
             self._origin = QPoint()
 
     def _image_coords(self, widget_rect: QRect) -> tuple[int, int, int, int] | None:
@@ -179,14 +212,17 @@ class ZoomableImageLabel(QLabel):
         pw, ph = px.width(), px.height()
         ox = (lw - pw) // 2
         oy = (lh - ph) // 2
-        scale_x = self._pixmap_orig.width() / pw
-        scale_y = self._pixmap_orig.height() / ph
+        if self._full_image_shape is not None:
+            orig_h, orig_w = self._full_image_shape   # full-res dimensions
+        else:
+            orig_w = self._pixmap_orig.width()
+            orig_h = self._pixmap_orig.height()
+        scale_x = orig_w / pw
+        scale_y = orig_h / ph
         x0 = int((widget_rect.left() - ox) * scale_x)
         y0 = int((widget_rect.top() - oy) * scale_y)
         x1 = int((widget_rect.right() - ox) * scale_x)
         y1 = int((widget_rect.bottom() - oy) * scale_y)
-        orig_w = self._pixmap_orig.width()
-        orig_h = self._pixmap_orig.height()
         x0 = max(0, min(x0, orig_w))
         y0 = max(0, min(y0, orig_h))
         x1 = max(0, min(x1, orig_w))
@@ -308,6 +344,9 @@ class ImagePanel(QWidget):
 
     def set_roi_mode(self, enabled: bool) -> None:
         self._img_label.set_roi_mode(enabled)
+
+    def clear_roi_overlay(self) -> None:
+        self._img_label.clear_roi_overlay()
 
     def set_line_mode(self, enabled: bool) -> None:
         self._img_label.set_line_mode(enabled)

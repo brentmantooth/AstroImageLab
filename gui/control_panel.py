@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 
@@ -50,21 +50,36 @@ class AnalysisControlPanel(QWidget):
         metrics_box = QGroupBox("Metrics")
         metrics_layout = QGridLayout(metrics_box)
         metrics_layout.setColumnStretch(0, 1)
+        metrics_layout.setColumnMinimumWidth(1, 46)   # Export column
+        metrics_layout.setColumnMinimumWidth(2, 36)   # ROI column
+        metrics_layout.setColumnMinimumWidth(3, 36)   # XS (cross-section) column
 
-        hdr = QLabel("Export")
-        hdr.setStyleSheet("color: #444; font-size: 9pt;")
-        metrics_layout.addWidget(hdr, 0, 1, Qt.AlignmentFlag.AlignHCenter)
+        _hdr_style = "color: #444; font-size: 9pt;"
+        hdr_export = QLabel("Export")
+        hdr_export.setStyleSheet(_hdr_style)
+        hdr_export.setToolTip("Export analysis images as independent .png files")
+        metrics_layout.addWidget(hdr_export, 0, 1, Qt.AlignmentFlag.AlignHCenter)
+
+        hdr_roi = QLabel("ROI")
+        hdr_roi.setStyleSheet(_hdr_style)
+        hdr_roi.setToolTip("Uses the user-drawn ROI region when one is selected")
+        metrics_layout.addWidget(hdr_roi, 0, 2, Qt.AlignmentFlag.AlignHCenter)
+
+        hdr_xs = QLabel("XS")
+        hdr_xs.setStyleSheet(_hdr_style)
+        hdr_xs.setToolTip("Uses the cross-section line when one is drawn")
+        metrics_layout.addWidget(hdr_xs, 0, 3, Qt.AlignmentFlag.AlignHCenter)
 
         self._checks: dict[str, QCheckBox] = {}
         self._export_checks: dict[str, QCheckBox] = {}
-        for row, (key, label) in enumerate([
-            ("psf",     "PSF / MTF"),
-            ("halo",    "Halo analysis"),
-            ("ghost",   "Ghost detection"),
-            ("edge",    "Edge analysis (LSF)"),
-            ("power",   "Power spectrum"),
-            ("spatial", "Spatial detail (std / LoG / wavelet)"),
-            ("snr",     "Signal / Noise (SNR)"),
+        for row, (key, label, uses_roi, uses_xs) in enumerate([
+            #                                                      ROI    XS
+            ("snr",     "Signal / Noise (SNR)",                   False, False),
+            ("psf",     "PSF / MTF",                              False, False),
+            ("halo",    "Halo analysis",                          False, False),
+            ("edge",    "Edge analysis (LSF)",                    True,  False),
+            ("power",   "Power spectrum",                         True,  False),
+            ("spatial", "Spatial detail (std / LoG / wavelet)",   True,  True),
         ], start=1):
             cb = QCheckBox(label)
             cb.setChecked(True)
@@ -76,6 +91,14 @@ class AnalysisControlPanel(QWidget):
             ecb.setToolTip(f"Export {label} figures as PNG files to the output folder")
             metrics_layout.addWidget(ecb, row, 1, Qt.AlignmentFlag.AlignHCenter)
             self._export_checks[key] = ecb
+
+            for col, flag in ((2, uses_roi), (3, uses_xs)):
+                ind = QLabel("●" if flag else "—")
+                ind.setStyleSheet(
+                    "color: #2d8a3e; font-size: 10pt;" if flag
+                    else "color: #aaa; font-size: 10pt;"
+                )
+                metrics_layout.addWidget(ind, row, col, Qt.AlignmentFlag.AlignHCenter)
 
         root.addWidget(metrics_box)
 

@@ -12,7 +12,6 @@ MIN_STAR_SNR = 30.0
 HALO_MIN_STAR_SNR = 200.0
 ISOLATION_RADIUS_FWHM = 5.0
 HALO_FIT_RADIUS_PX = 80
-GHOST_SEARCH_RADIUS_PX = 200
 SATURATION_FRACTION = 0.90
 DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback
 SEEING_WARN_FWHM_ARCS = 3.0
@@ -33,6 +32,7 @@ SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension croppe
 
 PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
 PSF_SPATIAL_MAP_SMOOTH_SIGMA = 2.0   # Gaussian smoothing sigma (px) applied to spatial maps before display
+LABEL_MAX_LEN = 30   # characters; filenames longer than this are replaced with "Image A"/"Image B" in all plots and legends
 
 
 # === DATA CLASSES ===
@@ -40,9 +40,9 @@ PSF_SPATIAL_MAP_SMOOTH_SIGMA = 2.0   # Gaussian smoothing sigma (px) applied to 
 @dataclass
 class AnalysisResult:
     label: str
+    original_label: str | None = None   # set when label was abbreviated due to LABEL_MAX_LEN
     psf_metrics: dict | None = None
     halo_metrics: dict | None = None
-    ghost_metrics: dict | None = None
     edge_metrics: dict | None = None
     power_metrics: dict | None = None
     spatial_metrics: dict | None = None

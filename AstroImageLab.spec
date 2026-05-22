@@ -1,26 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_data_files, copy_metadata
 
 datas = []
+binaries = []
 hiddenimports = []
 
-# astropy — ships coordinate/FITS reference data files needed at runtime
+# astropy — data files only (excludes test data to keep bundle size manageable).
+# PyInstaller's built-in astropy hook covers the Cython extensions.
 datas += collect_data_files("astropy",
     excludes=["**/tests/**", "**/test_data/**", "**/codata/**"])
 
 # matplotlib — ships mpl-data (fonts, styles, colormaps)
 datas += collect_data_files("matplotlib")
 
-# Bundle the resources/ directory (PNG assets used at runtime)
+# Bundle the resources/ directory (PNG icon assets used at runtime)
 datas += [("resources", "resources")]
 
-# xisf metadata
+# xisf package metadata (needed for importlib.metadata lookups at startup)
 datas += copy_metadata("xisf")
+
+# photutils — collect_all bundles data files, Cython .pyd binaries, and all
+# submodule hidden imports together.  copy_metadata is also required because
+# photutils._optional_deps queries importlib.metadata for its own package at
+# startup, which fails if the dist-info directory is not present in the bundle.
+ph_datas, ph_bins, ph_hidden = collect_all("photutils")
+datas        += ph_datas
+binaries     += ph_bins
+hiddenimports += ph_hidden
+datas += copy_metadata("photutils")
 
 # Hidden imports that PyInstaller's static analysis misses
 hiddenimports += [
     "xisf", "zstandard", "lz4", "lz4.block",
-    # astropy subpackages accessed by string at runtime
+    # astropy subpackages accessed dynamically at runtime
     "astropy.io.fits",
     "astropy.nddata",
     "astropy.stats",
@@ -45,7 +57,7 @@ hiddenimports += [
 a = Analysis(
     ['AstroImageLab.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64 as _base64
 import concurrent.futures
@@ -9,10 +9,9 @@ from typing import Callable
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.astro_image import AstroImage
-from core.models import AnalysisResult
+from core.models import AnalysisResult, LABEL_MAX_LEN
 from analysis.psf_analyzer import PSFAnalyzer
 from analysis.halo_analyzer import HaloAnalyzer
-from analysis.ghost_detector import GhostDetector
 from analysis.edge_analyzer import EdgeAnalyzer
 from analysis.power_spectrum import PowerSpectrumAnalyzer
 from analysis.image_filters import SpatialDetailAnalyzer
@@ -62,8 +61,34 @@ class AnalysisThread(QThread):
             img_a.pixel_scale = pso
             img_b.pixel_scale = pso
 
-        result_a = AnalysisResult(label=img_a.label)
-        result_b = AnalysisResult(label=img_b.label)
+        # Long-filename substitution: abbreviate labels before any analyzer runs so all
+        # figure titles and legends use the short label from the first render.
+        # Original labels are stored in result.original_label for the report info box.
+        # Starless images are synced to "{main_label} (starless)" so they always match
+        # the abbreviated main label in every figure that uses a starless image.
+        _orig_label_a = img_a.label
+        _orig_label_b = img_b.label
+        if len(_orig_label_a) > LABEL_MAX_LEN:
+            img_a.label = "Image A"
+        if len(_orig_label_b) > LABEL_MAX_LEN:
+            img_b.label = "Image B"
+
+        # Always sync starless labels to keep them consistent with the main image label.
+        _orig_starless_label_a = self._starless_a.label if self._starless_a else None
+        _orig_starless_label_b = self._starless_b.label if self._starless_b else None
+        if self._starless_a is not None:
+            self._starless_a.label = f"{img_a.label} (starless)"
+        if self._starless_b is not None:
+            self._starless_b.label = f"{img_b.label} (starless)"
+
+        result_a = AnalysisResult(
+            label=img_a.label,
+            original_label=_orig_label_a if img_a.label != _orig_label_a else None,
+        )
+        result_b = AnalysisResult(
+            label=img_b.label,
+            original_label=_orig_label_b if img_b.label != _orig_label_b else None,
+        )
 
         # Alignment (always serial — must complete before analysis begins)
         self.progress.emit(2, "Aligning images…")
@@ -87,15 +112,6 @@ class AnalysisThread(QThread):
                 result_b.halo_metrics = a.analyze(img_b)
             tasks.append(("halo", "Analysing halos", _halo))
 
-        if metrics.get("ghost"):
-            def _ghost(img_a=img_a, img_b=img_b):
-                # In parallel mode PSF may not have completed yet; fallback to 4.0 px.
-                fwhm_a = (result_a.psf_metrics or {}).get("fwhm_px") or 4.0
-                fwhm_b = (result_b.psf_metrics or {}).get("fwhm_px") or 4.0
-                det = GhostDetector()
-                result_a.ghost_metrics = det.analyze(img_a, psf_fwhm_px=fwhm_a)
-                result_b.ghost_metrics = det.analyze(img_b, psf_fwhm_px=fwhm_b)
-            tasks.append(("ghost", "Searching for ghosts", _ghost))
 
         if metrics.get("edge"):
             sl_a = self._starless_a
@@ -177,9 +193,9 @@ class AnalysisThread(QThread):
             crosshair = s.get("crosshair")
 
             def _spatial(sd_a=self._starless_a or img_a, sd_b=self._starless_b or img_b,
-                          _ch=crosshair):
+                          _ch=crosshair, _roi=roi):
                 sda = SpatialDetailAnalyzer()
-                spatial = sda.analyze(sd_a, sd_b, levels=wavelet_levels, crosshair=_ch)
+                spatial = sda.analyze(sd_a, sd_b, levels=wavelet_levels, crosshair=_ch, roi=_roi)
                 spatial["used_starless_a"] = self._starless_a is not None
                 spatial["used_starless_b"] = self._starless_b is not None
                 result_a.spatial_metrics = spatial
@@ -238,6 +254,15 @@ class AnalysisThread(QThread):
         self.progress.emit(100, "Done")
         self.finished.emit(result_a, result_b, report_path)
 
+        # Restore original labels on the image objects so they remain correct
+        # for any GUI display after the analysis completes.
+        img_a.label = _orig_label_a
+        img_b.label = _orig_label_b
+        if self._starless_a is not None and _orig_starless_label_a is not None:
+            self._starless_a.label = _orig_starless_label_a
+        if self._starless_b is not None and _orig_starless_label_b is not None:
+            self._starless_b.label = _orig_starless_label_b
+
     # ------------------------------------------------------------------
     # Serial runner
     # ------------------------------------------------------------------
@@ -295,7 +320,6 @@ class AnalysisThread(QThread):
         metric_pairs = [
             ("psf",     result_a.psf_metrics,     result_b.psf_metrics),
             ("halo",    result_a.halo_metrics,     result_b.halo_metrics),
-            ("ghost",   result_a.ghost_metrics,    result_b.ghost_metrics),
             ("edge",    result_a.edge_metrics,     result_b.edge_metrics),
             ("power",   result_a.power_metrics,    result_b.power_metrics),
             ("spatial", result_a.spatial_metrics,  result_b.spatial_metrics),

@@ -119,6 +119,7 @@ class EdgeAnalyzer:
                 "edge_contrast_ratio":    ecr,
                 "esf":                    esf,
                 "lsf":                    lsf,
+                "positions":              positions.tolist(),
                 "figures": figs_to_b64({
                     "edge": self._plot_results(
                         roi_data, display_roi, analysis_rect,
@@ -321,9 +322,9 @@ class EdgeAnalyzer:
         disp = gm[::step, ::step]
         disp = median_filter(disp, size=3)
         vmax = float(np.percentile(disp, 99)) or 1.0
-        ax.imshow(disp, origin="lower", cmap="inferno",
+        ax.imshow(disp, origin="upper", cmap="inferno",
                   vmin=0, vmax=vmax,
-                  extent=[0, w, 0, h], aspect="equal", interpolation="nearest")
+                  extent=[0, w, h, 0], aspect="equal", interpolation="nearest")
         half = EDGE_ROI_MAP_INDICATOR_PX // 2
         for (x0, y0, x1, y1) in rois_used:
             cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -355,15 +356,15 @@ class EdgeAnalyzer:
                        edge_num: int = 1) -> plt.Figure:
         from matplotlib.patches import Rectangle
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        fig, ax = plt.subplots(figsize=(5, 5))
 
         h_disp, w_disp = display_roi.shape
-        axes[0].imshow(display_roi, origin="lower", cmap="gray",
-                       aspect="equal", interpolation="nearest",
-                       extent=[0, w_disp, 0, h_disp])
-        axes[0].set_title(f"Edge #{edge_num} ROI — {label}")
-        axes[0].set_xlabel("X (px)")
-        axes[0].set_ylabel("Y (px)")
+        ax.imshow(display_roi, origin="upper", cmap="gray",
+                  aspect="equal", interpolation="nearest",
+                  extent=[0, w_disp, h_disp, 0])
+        ax.set_title(f"Edge #{edge_num} ROI — {label}")
+        ax.set_xlabel("X (px)")
+        ax.set_ylabel("Y (px)")
 
         bx0, by0, bx1, by1 = analysis_rect
         rect = Rectangle(
@@ -371,7 +372,7 @@ class EdgeAnalyzer:
             linewidth=1.5, edgecolor="lime", facecolor="none",
             linestyle="--", zorder=5, label="Analysis region",
         )
-        axes[0].add_patch(rect)
+        ax.add_patch(rect)
 
         if edge_info is not None:
             xc    = edge_info["center_x"]
@@ -388,35 +389,18 @@ class EdgeAnalyzer:
                 return [x0_, x1_], [y0_, y1_]
 
             xs, ys = _clipped_line(xc, yc, angle)
-            axes[0].plot(xs, ys, color="cyan", linewidth=1.5, alpha=0.85,
-                         label="ESF scan direction")
+            ax.plot(xs, ys, color="cyan", linewidth=1.5, alpha=0.85,
+                    label="ESF scan direction")
 
             perp = angle + np.pi / 2
             xs, ys = _clipped_line(xc, yc, perp)
-            axes[0].plot(xs, ys, color="yellow", linewidth=1.2, linestyle="--",
-                         alpha=0.75, label="Edge orientation")
+            ax.plot(xs, ys, color="yellow", linewidth=1.2, linestyle="--",
+                    alpha=0.75, label="Edge orientation")
 
-            axes[0].legend(fontsize=7, loc="lower right")
+            ax.legend(fontsize=7, loc="lower right")
 
-        axes[0].set_xlim(0, w_disp)
-        axes[0].set_ylim(0, h_disp)
-
-        axes[1].plot(positions, esf, "b-", linewidth=1.5)
-        axes[1].axhline(0.10, color="gray", linestyle="--", linewidth=0.8)
-        axes[1].axhline(0.90, color="gray", linestyle="--", linewidth=0.8)
-        if width is not None:
-            axes[1].set_title(f"ESF — 10-90% width = {width:.2f} px")
-        else:
-            axes[1].set_title("ESF")
-        axes[1].set_xlabel("Position (px)")
-        axes[1].set_ylabel("Normalised intensity")
-        axes[1].grid(True, alpha=0.3)
-
-        axes[2].plot(positions, lsf, "r-", linewidth=1.5)
-        axes[2].set_title("LSF (derivative of ESF)")
-        axes[2].set_xlabel("Position (px)")
-        axes[2].set_ylabel("d(ESF)/dx")
-        axes[2].grid(True, alpha=0.3)
+        ax.set_xlim(0, w_disp)
+        ax.set_ylim(0, h_disp)
 
         fig.tight_layout()
         return fig

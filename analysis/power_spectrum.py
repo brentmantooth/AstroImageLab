@@ -189,8 +189,8 @@ class PowerSpectrumAnalyzer:
 
         im = axes[0].imshow(
             np.log10(ps2d + ps2d[ps2d > 0].min() * 0.01),
-            origin="lower", cmap="inferno",
-            extent=[-NYQUIST, NYQUIST, -NYQUIST, NYQUIST],
+            origin="upper", cmap="inferno",
+            extent=[-NYQUIST, NYQUIST, NYQUIST, -NYQUIST],
         )
         axes[0].set_title(f"2D Power Spectrum (log) — {label}")
         axes[0].set_xlabel("Freq X (cyc/px)")
