@@ -121,23 +121,14 @@ class AnalysisThread(QThread):
             if sl_b is not None:
                 sl_b.pixel_scale = img_b.pixel_scale
 
-            def _edge(src_a=sl_a or img_a, src_b=sl_b or img_b, _aligned=aligned):
+            def _edge(src_a=sl_a or img_a, src_b=sl_b or img_b):
                 ea = EdgeAnalyzer()
+                _ch = s.get("crosshair")
 
-                # First pass: A auto-detects top-N ROIs (or uses user-drawn roi).
-                result_a.edge_metrics = ea.analyze(src_a, roi=roi)
-
-                # Share A's ROI list with B so both cover identical pixel regions.
-                rois_a = result_a.edge_metrics.get("rois_used")
-                if _aligned and roi is None:
-                    shared = rois_a          # list of (x0,y0,x1,y1) tuples
-                elif roi is not None:
-                    shared = roi             # single user-drawn tuple
-                else:
-                    shared = None
-
-                # First pass on B (auto-detects angles within A's regions).
-                result_b.edge_metrics = ea.analyze(src_b, roi=shared)
+                # Always auto-detect top-N ROIs on the full image.
+                # The user ROI applies only to spatial detail and power spectrum.
+                result_a.edge_metrics = ea.analyze(src_a, roi=None)
+                result_b.edge_metrics = ea.analyze(src_b, roi=None)
 
                 # Angle normalisation: use the scan direction from whichever image
                 # has the stronger overall gradient, so both ESFs measure the same
@@ -148,14 +139,25 @@ class AnalysisThread(QThread):
                 b_max = max((e.get("gradient_magnitude") or 0 for e in edges_b), default=0)
 
                 if edges_a and edges_b and a_max != b_max:
+                    rois_a = result_a.edge_metrics.get("rois_used")
+                    rois_b = result_b.edge_metrics.get("rois_used")
                     if b_max > a_max:
                         forced = [e["angle_rad"] for e in edges_b]
-                        result_a.edge_metrics = ea.analyze(src_a, roi=shared,
+                        result_a.edge_metrics = ea.analyze(src_a, roi=rois_b,
                                                            forced_angles=forced)
                     else:
                         forced = [e["angle_rad"] for e in edges_a]
-                        result_b.edge_metrics = ea.analyze(src_b, roi=shared,
+                        result_b.edge_metrics = ea.analyze(src_b, roi=rois_a,
                                                            forced_angles=forced)
+
+                # Append crosshair edge ESF/LSF if a cross-section line was drawn.
+                if _ch is not None:
+                    xs_a = ea.analyze_crosshair(src_a, _ch)
+                    xs_b = ea.analyze_crosshair(src_b, _ch)
+                    if xs_a:
+                        result_a.edge_metrics["edges"].append(xs_a)
+                    if xs_b:
+                        result_b.edge_metrics["edges"].append(xs_b)
 
                 result_a.edge_metrics["used_starless"] = sl_a is not None
                 result_b.edge_metrics["used_starless"] = sl_b is not None

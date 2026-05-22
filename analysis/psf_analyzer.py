@@ -8,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from astropy.modeling import fitting
 from astropy.modeling.models import Moffat2D
+from astropy.stats import median_absolute_deviation as mad
 from astropy.table import Table
 from photutils.psf import EPSFBuilder, extract_stars
 
@@ -65,17 +66,28 @@ class PSFAnalyzer:
         median_fwhm = float(np.median(fwhms))
         median_beta = float(np.median(betas))
         fwhm_arcsec = median_fwhm * image.pixel_scale
+        fwhm_mad        = float(mad(fwhms))         if len(fwhms) > 1 else 0.0
+        beta_mad        = float(mad(betas))          if len(betas) > 1 else 0.0
+        fwhm_arcsec_mad = fwhm_mad * image.pixel_scale
 
         # Ellipticity + per-star eccentricity from image moments (needs bgsub + psf_stars)
         ell, pa, ell_per_star = self._measure_ellipticity(bgsub, psf_stars)
         ecc_by_pos = {(s["x"], s["y"]): s["eccentricity"] for s in ell_per_star}
 
+        ecc_values = [s["eccentricity"] for s in ell_per_star]
+        ell_values = [s["ellipticity"]  for s in ell_per_star]
+        ell_mad = float(mad(ell_values)) if len(ell_values) > 1 else 0.0
+        ecc_mad = float(mad(ecc_values)) if len(ecc_values) > 1 else 0.0
+
         result.update({
-            "n_stars_used": len(moffat_fits),
-            "fwhm_px": median_fwhm,
-            "fwhm_arcsec": fwhm_arcsec,
-            "beta": median_beta,
-            "seeing_dominated": fwhm_arcsec > SEEING_WARN_FWHM_ARCS,
+            "n_stars_used":      len(moffat_fits),
+            "fwhm_px":           median_fwhm,
+            "fwhm_arcsec":       fwhm_arcsec,
+            "beta":              median_beta,
+            "seeing_dominated":  fwhm_arcsec > SEEING_WARN_FWHM_ARCS,
+            "fwhm_px_mad":       fwhm_mad,
+            "fwhm_arcsec_mad":   fwhm_arcsec_mad,
+            "beta_mad":          beta_mad,
             "star_data": [
                 {"x": f["x"], "y": f["y"], "fwhm": f["fwhm"],
                  "eccentricity": ecc_by_pos.get((f["x"], f["y"]))}
@@ -83,12 +95,13 @@ class PSFAnalyzer:
             ],
         })
 
-        result["ellipticity"] = ell
-        result["position_angle"] = pa
+        result["ellipticity"]     = ell
+        result["ellipticity_mad"] = ell_mad
+        result["position_angle"]  = pa
         result["eccentricity"] = (
-            float(np.median([s["eccentricity"] for s in ell_per_star]))
-            if ell_per_star else None
+            float(np.median(ecc_values)) if ecc_values else None
         )
+        result["eccentricity_mad"] = ecc_mad
 
         # Empirical PSF and MTF
         epsf, freq, mtf = self._build_epsf_and_mtf(image, psf_stars, median_fwhm)
@@ -189,6 +202,7 @@ class PSFAnalyzer:
                 per_star.append({
                     "x": xc, "y": yc,
                     "eccentricity": float(props.eccentricity.value),
+                    "ellipticity":  float(props.ellipticity.value),
                 })
             except Exception:
                 continue

@@ -9,7 +9,7 @@ from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
-from core.models import EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX
+from core.models import EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX, SECTION8_BORDER_CROP_FRACTION
 
 EDGE_DISPLAY_HALF_WIDTH = 250   # half-side of the context window shown in the report figure
 N_TOP_EDGES = 3                  # number of gradient peaks to auto-detect
@@ -182,7 +182,8 @@ class EdgeAnalyzer:
         sigma = _gradient_sigma(image.pixel_scale)
         gm = gaussian_gradient_magnitude(stretched, sigma=sigma)
 
-        margin = EDGE_ROI_HALF_WIDTH + 5
+        h, w = gm.shape
+        margin = max(EDGE_ROI_HALF_WIDTH + 5, int(min(h, w) * SECTION8_BORDER_CROP_FRACTION))
         gm[:margin, :] = 0
         gm[-margin:, :] = 0
         gm[:, :margin] = 0
@@ -190,7 +191,6 @@ class EdgeAnalyzer:
 
         # 3× half-width separation keeps ROIs from overlapping
         min_sep = EDGE_ROI_HALF_WIDTH * 3
-        h, w = bgsub.shape
         hw = EDGE_ROI_HALF_WIDTH
 
         results: list[tuple[np.ndarray, tuple]] = []
@@ -312,26 +312,30 @@ class EdgeAnalyzer:
 
     def _plot_gradient_map(self, gm: np.ndarray, label: str,
                             rois_used: list) -> plt.Figure:
-        """Full-image gradient magnitude with detected ROI rectangles overlaid."""
+        """Full-image gradient magnitude (border-cropped) with detected ROI rectangles overlaid."""
         from matplotlib.patches import Rectangle
         h, w = gm.shape
-        aspect = h / max(w, 1)
-        fig_w = min(8.0, max(4.0, w / 400))
+        nb = int(min(h, w) * SECTION8_BORDER_CROP_FRACTION)
+        gm_crop = gm[nb:h - nb, nb:w - nb]
+        hc, wc = gm_crop.shape
+        aspect = hc / max(wc, 1)
+        fig_w = min(8.0, max(4.0, wc / 400))
         fig, ax = plt.subplots(figsize=(fig_w, fig_w * aspect))
-        step = max(1, max(h, w) // 800)
-        disp = gm[::step, ::step]
+        step = max(1, max(hc, wc) // 800)
+        disp = gm_crop[::step, ::step]
         disp = median_filter(disp, size=3)
         vmax = float(np.percentile(disp, 99)) or 1.0
         ax.imshow(disp, origin="upper", cmap="inferno",
                   vmin=0, vmax=vmax,
-                  extent=[0, w, h, 0], aspect="equal", interpolation="nearest")
+                  extent=[0, wc, hc, 0], aspect="equal", interpolation="nearest")
         half = EDGE_ROI_MAP_INDICATOR_PX // 2
         for (x0, y0, x1, y1) in rois_used:
-            cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+            cx = (x0 + x1) / 2.0 - nb
+            cy = (y0 + y1) / 2.0 - nb
             ix0 = max(0, cx - half)
             iy0 = max(0, cy - half)
-            ix1 = min(w, cx + half)
-            iy1 = min(h, cy + half)
+            ix1 = min(wc, cx + half)
+            iy1 = min(hc, cy + half)
             rect = Rectangle((ix0, iy0), ix1 - ix0, iy1 - iy0,
                               linewidth=2.0, edgecolor="cyan", facecolor="none",
                               linestyle="-")
@@ -404,3 +408,48 @@ class EdgeAnalyzer:
 
         fig.tight_layout()
         return fig
+
+    # ------------------------------------------------------------------
+    # Cross-section edge analysis along a user-drawn line
+    # ------------------------------------------------------------------
+
+    def analyze_crosshair(self, image: AstroImage, crosshair: dict) -> dict | None:
+        """Extract ESF + LSF along the user-drawn cross-section line.
+
+        crosshair has keys x0, y0, x1, y1 in normalised [0,1] full-image coords.
+        Returns an edge dict (same structure as entries in result["edges"]) or None.
+        """
+        from scipy.ndimage import map_coordinates
+        image.estimate_background()
+        bgsub = image.background_subtracted()
+        H, W = bgsub.shape
+        c0, r0 = crosshair["x0"] * W, crosshair["y0"] * H
+        c1, r1 = crosshair["x1"] * W, crosshair["y1"] * H
+        length = float(np.hypot(c1 - c0, r1 - r0))
+        if length < 5:
+            return None
+        n = max(20, int(length))
+        cols = np.linspace(c0, c1, n)
+        rows = np.linspace(r0, r1, n)
+        profile = map_coordinates(bgsub.astype(np.float64), [rows, cols],
+                                  order=1, mode="nearest")
+        positions = np.linspace(0.0, length, n)
+        lo, hi = profile.min(), profile.max()
+        if hi - lo < 1e-12:
+            return None
+        esf = (profile - lo) / (hi - lo)
+        lsf = self._compute_lsf(positions, esf)
+        width = self._measure_edge_width(positions, esf)
+        return {
+            "roi_used":                None,
+            "gradient_magnitude":      float(hi - lo),
+            "angle_rad":               float(np.arctan2(r1 - r0, c1 - c0)),
+            "edge_width_10_90_px":     width,
+            "edge_width_10_90_arcsec": (width * image.pixel_scale if width else None),
+            "edge_contrast_ratio":     None,
+            "esf":                     esf.tolist(),
+            "lsf":                     lsf.tolist() if lsf is not None else [],
+            "positions":               positions.tolist(),
+            "is_crosshair":            True,
+            "figures":                 {},
+        }

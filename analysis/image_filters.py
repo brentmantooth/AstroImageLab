@@ -10,7 +10,7 @@ import pywt
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64, figs_to_b64
-from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS, XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION
+from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS, XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -70,11 +70,25 @@ class SpatialDetailAnalyzer:
             mask_bg_b   = mask_bg_b[ry0:ry1, rx0:rx1]
             display_roi = None   # arrays are already the analysis region; no further cropping
             result["roi_used"] = roi
+            if crosshair is not None:
+                roi_w = rx1 - rx0
+                roi_h = ry1 - ry0
+                img_h, img_w = norm_a.shape[:2]
+                def _clip01(v): return max(0.0, min(1.0, v))
+                crosshair_roi = {
+                    "x0": _clip01((crosshair["x0"] * img_w - rx0) / roi_w),
+                    "y0": _clip01((crosshair["y0"] * img_h - ry0) / roi_h),
+                    "x1": _clip01((crosshair["x1"] * img_w - rx0) / roi_w),
+                    "y1": _clip01((crosshair["y1"] * img_h - ry0) / roi_h),
+                }
+            else:
+                crosshair_roi = None
         else:
             analysis_a  = norm_a
             analysis_b  = norm_b
             # Bright-feature bounding box for display cropping (uses image A's mask)
             display_roi = self._nebula_bounding_box(mask_neb_a, norm_a.shape)
+            crosshair_roi = crosshair   # full-image coords are correct when no ROI
 
         result["display_roi"] = display_roi
 
@@ -87,7 +101,7 @@ class SpatialDetailAnalyzer:
             image_a.label, image_b.label,
             result,
             display_roi=display_roi,
-            crosshair=crosshair,
+            crosshair=crosshair_roi,
         )
         figures.update(figs_to_b64(std_figs, dpi=150))
 
@@ -96,7 +110,7 @@ class SpatialDetailAnalyzer:
             analysis_a, analysis_b, log_sigmas,
             image_a.label, image_b.label,
             display_roi=display_roi,
-            crosshair=crosshair,
+            crosshair=crosshair_roi,
         )
         figures.update(figs_to_b64(log_figs, dpi=150))
 
@@ -106,7 +120,7 @@ class SpatialDetailAnalyzer:
             image_a.label, image_b.label,
             result,
             display_roi=display_roi,
-            crosshair=crosshair,
+            crosshair=crosshair_roi,
         )
         figures.update(figs_to_b64(wav_figs, dpi=150))
 
@@ -216,7 +230,7 @@ class SpatialDetailAnalyzer:
                 f"Local σ — kernel {ks}px — {label_a}",
                 f"Local σ — kernel {ks}px — {label_b}",
                 diff_title=f"Diff (A−B), kernel {ks}px",
-                cmap="viridis",
+                cmap=SECTION8_ANALYSIS_CMAP,
                 nonlinear_norm=True,
                 display_roi=None,
             )
@@ -281,7 +295,7 @@ class SpatialDetailAnalyzer:
                 f"|LoG| σ={sigma}px — {label_a}",
                 f"|LoG| σ={sigma}px — {label_b}",
                 diff_title=f"LoG diff (A−B), σ={sigma}px",
-                cmap="hot",
+                cmap=SECTION8_ANALYSIS_CMAP,
                 nonlinear_norm=True,
                 display_roi=None,
             )
@@ -340,7 +354,7 @@ class SpatialDetailAnalyzer:
                 f"Wavelet level {display_level} — {label_a}",
                 f"Wavelet level {display_level} — {label_b}",
                 diff_title=f"Level {display_level} diff (A−B)",
-                cmap="bwr",
+                cmap=SECTION8_ANALYSIS_CMAP,
                 symmetric_diff=True,
                 display_roi=None,
             )

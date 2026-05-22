@@ -109,6 +109,16 @@ def _val(v, fmt=".3f", fallback="—") -> str:
     return str(v)
 
 
+def _val_pm(v, spread, fmt=".3f", fallback="—") -> str:
+    """Format 'value ± MAD'; omits the ± term when spread is None or zero."""
+    if v is None:
+        return fallback
+    s = format(v, fmt)
+    if spread is not None and spread > 0:
+        s += f" ± {format(spread, fmt)}"
+    return s
+
+
 def _epsf_stars_cell(psf_metrics: dict) -> str:
     """Format the number of stars used to build the ePSF."""
     n = psf_metrics.get("epsf_n_stars")
@@ -556,11 +566,11 @@ ePSF fitting. A high raw detection count relative to stars used is normal and ex
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Stars detected (raw)</td><td>{_val(pa.get("n_stars_total"), "d")}</td><td>{_val(pb.get("n_stars_total"), "d")}</td></tr>
   <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td></tr>
-  <tr><td>FWHM (px)</td><td class="{ca}">{_val(pa.get("fwhm_px"))}</td><td class="{cb}">{_val(pb.get("fwhm_px"))}</td></tr>
-  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val(pa.get("fwhm_arcsec"))}</td><td class="{cb}">{_val(pb.get("fwhm_arcsec"))}</td></tr>
-  <tr><td>Moffat β</td><td>{_val(pa.get("beta"))}</td><td>{_val(pb.get("beta"))}</td></tr>
-  <tr><td>Ellipticity</td><td>{_val(pa.get("ellipticity"))}</td><td>{_val(pb.get("ellipticity"))}</td></tr>
-  <tr><td>Eccentricity</td><td>{_val(pa.get("eccentricity"))}</td><td>{_val(pb.get("eccentricity"))}</td></tr>
+  <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td></tr>
+  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td></tr>
+  <tr><td>Moffat β</td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td></tr>
+  <tr><td>Ellipticity</td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td></tr>
+  <tr><td>Eccentricity</td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td></tr>
   <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td></tr>
   <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td></tr>
   <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td></tr>
@@ -1141,6 +1151,97 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         fig.tight_layout()
         return fig
 
+    def _plot_psf_contrast_retention_ratios(self, sim: dict) -> "plt.Figure | None":
+        """Single grouped bar chart: original/convolved contrast retention ratio per band.
+
+        X-axis: 4 spatial-frequency bands. 6 bars per group (3 contrast levels × 2 images).
+        Colors distinguish contrast levels; solid fill = Image A, hatched fill = Image B.
+        Error bars show std of the pointwise per-pixel ratios within each band.
+        """
+        xs_data = sim.get("xs_data", {})
+        if not xs_data:
+            return None
+
+        def _envelope(arr: np.ndarray, half: int = 5) -> np.ndarray:
+            n = len(arr)
+            env = np.empty(n)
+            for i in range(n):
+                window = arr[max(0, i - half): min(n, i + half + 1)]
+                env[i] = window.max() - window.min()
+            return env
+
+        bands = [
+            ("Fine\n(1–40 px)",       slice(0,   40)),
+            ("Mid-fine\n(41–120 px)", slice(40,  120)),
+            ("Mid\n(121–300 px)",     slice(120, 300)),
+            ("Coarse\n(301+ px)",     slice(300, None)),
+        ]
+        level_info = [
+            ("high",   "High",   "#2196F3"),
+            ("medium", "Medium", "#FF9800"),
+            ("low",    "Low",    "#4CAF50"),
+        ]
+        available = [(k, t, c) for k, t, c in level_info if k in xs_data]
+        if not available:
+            return None
+
+        n_levels  = len(available)
+        n_bands   = len(bands)
+        bar_w     = 0.12
+        group_gap = n_levels * 2 * bar_w + 0.15
+        x_centers = np.arange(n_bands) * group_gap
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+
+        offsets = np.linspace(-(n_levels - 1) * bar_w, (n_levels - 1) * bar_w, n_levels)
+
+        from matplotlib.patches import Patch
+        legend_handles = []
+
+        for i, (level, title, color) in enumerate(available):
+            d        = xs_data[level]
+            env_orig = _envelope(d["original"][::-1])
+            env_a    = _envelope(d["conv_a"][::-1])
+            env_b    = _envelope(d["conv_b"][::-1])
+
+            ratios_a, errs_a = [], []
+            ratios_b, errs_b = [], []
+            for _, sl in bands:
+                orig_b = env_orig[sl]
+                a_b    = env_a[sl]
+                b_b    = env_b[sl]
+                pw_a = orig_b / np.clip(a_b, 1e-6, None)
+                pw_b = orig_b / np.clip(b_b, 1e-6, None)
+                ratios_a.append(float(pw_a.mean()))
+                errs_a.append(float(pw_a.std()))
+                ratios_b.append(float(pw_b.mean()))
+                errs_b.append(float(pw_b.std()))
+
+            pos_a = x_centers + offsets[i] - bar_w / 2
+            pos_b = x_centers + offsets[i] + bar_w / 2
+
+            ax.bar(pos_a, ratios_a, bar_w, color=color, alpha=0.85,
+                   yerr=errs_a, capsize=3, error_kw={"linewidth": 0.8})
+            ax.bar(pos_b, ratios_b, bar_w, color=color, alpha=0.85,
+                   hatch="///", yerr=errs_b, capsize=3, error_kw={"linewidth": 0.8})
+
+            legend_handles.append(Patch(facecolor=color, alpha=0.85, label=f"{title} — {sim['label_a']}"))
+            legend_handles.append(Patch(facecolor=color, alpha=0.85, hatch="///", label=f"{title} — {sim['label_b']}"))
+
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Perfect retention (ratio = 1)")
+        ax.set_xticks(x_centers)
+        ax.set_xticklabels([b[0] for b in bands], fontsize=8)
+        ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=9)
+        ax.set_ylabel("Contrast retention ratio  (original / convolved)", fontsize=9)
+        ax.set_title(f"Spatial-Frequency Contrast Retention — {sim['label_a']} vs {sim['label_b']}", fontsize=10)
+        ax.legend(handles=legend_handles + [
+            plt.Line2D([0], [0], color="black", linestyle="--", linewidth=1.0,
+                       label="Perfect retention (ratio = 1)")
+        ], fontsize=7, ncol=2, loc="upper right")
+        ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        return fig
+
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
         """Return HTML block with four PSF simulation panels at 1:1 pixel resolution."""
         sim = self._plot_psf_simulation(ra, rb)
@@ -1158,9 +1259,10 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             "Larger values in fine-detail regions indicate a measurable sharpness difference."
         )
 
-        xs_figs      = self._plot_psf_crosssections(sim)
-        mod_fig      = _img_tag(self._plot_psf_modulation(sim),      "Contrast modulation summary")
-        band_mod_fig = _img_tag(self._plot_psf_band_modulation(sim), "Frequency-band contrast retention")
+        xs_figs          = self._plot_psf_crosssections(sim)
+        mod_fig          = _img_tag(self._plot_psf_modulation(sim),                    "Contrast modulation summary")
+        band_mod_fig     = _img_tag(self._plot_psf_band_modulation(sim),               "Frequency-band contrast retention")
+        retention_fig    = _img_tag(self._plot_psf_contrast_retention_ratios(sim),     "Contrast retention ratios")
 
         xs_caption = (
             "<strong>Top panel (image strip):</strong> ~100-row grayscale strip from the original "
@@ -1220,7 +1322,14 @@ probe of PSF resolution at multiple spatial frequencies in a single exposure.</p
 <p class="caption">{mod_caption}</p>
 <h4>Spatial-frequency-resolved contrast retention</h4>
 {band_mod_fig}
-<p class="caption">{band_mod_caption}</p>"""
+<p class="caption">{band_mod_caption}</p>
+<h4>Contrast retention ratios</h4>
+{retention_fig}
+<p class="caption">Ratio of original local contrast to convolved local contrast (original / convolved)
+per spatial-frequency band. A ratio of 1.0 indicates perfect contrast retention; values above 1.0
+indicate that the PSF blurs contrast at that spatial scale. Error bars show the standard deviation of
+the per-pixel ratios within each band. Colors identify contrast level (high / medium / low);
+solid bars = {sim['label_a']}, hatched bars = {sim['label_b']}.</p>"""
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
@@ -2692,9 +2801,30 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 
         ecr_flag = "⚠" if bw_differ else "✓"
 
+        def row_pm(metric, val_a, val_b, spread_a, spread_b, fmt=".3f",
+                   higher_is_better=True, bw_flag="✓"):
+            ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
+            label = f'{metric} <span class="metric-label-ok">{bw_flag}</span>'
+            return (f"<tr><td>{label}</td>"
+                    f"<td class='{ca}'>{_val_pm(val_a, spread_a, fmt)}</td>"
+                    f"<td class='{cb}'>{_val_pm(val_b, spread_b, fmt)}</td></tr>")
+
         rows = "".join([
-            row("FWHM (px)", psf_a.get("fwhm_px"), psf_b.get("fwhm_px"),
-                higher_is_better=False),
+            row_pm("FWHM (px)", psf_a.get("fwhm_px"), psf_b.get("fwhm_px"),
+                   psf_a.get("fwhm_px_mad"), psf_b.get("fwhm_px_mad"),
+                   higher_is_better=False),
+            row_pm("FWHM (arcsec)", psf_a.get("fwhm_arcsec"), psf_b.get("fwhm_arcsec"),
+                   psf_a.get("fwhm_arcsec_mad"), psf_b.get("fwhm_arcsec_mad"),
+                   higher_is_better=False),
+            row_pm("Moffat β", psf_a.get("beta"), psf_b.get("beta"),
+                   psf_a.get("beta_mad"), psf_b.get("beta_mad"),
+                   higher_is_better=False),
+            row_pm("Ellipticity", psf_a.get("ellipticity"), psf_b.get("ellipticity"),
+                   psf_a.get("ellipticity_mad"), psf_b.get("ellipticity_mad"),
+                   higher_is_better=False),
+            row_pm("Eccentricity", psf_a.get("eccentricity"), psf_b.get("eccentricity"),
+                   psf_a.get("eccentricity_mad"), psf_b.get("eccentricity_mad"),
+                   higher_is_better=False),
             row("MTF50 (cyc/px)", psf_a.get("mtf50_cycles_per_px"),
                 psf_b.get("mtf50_cycles_per_px"), fmt=".4f"),
             row("Halo/core ratio", halo_a.get("halo_to_core_ratio"),

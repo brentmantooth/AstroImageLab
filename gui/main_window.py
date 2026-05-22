@@ -127,6 +127,25 @@ class MainWindow(QMainWindow):
         self._control._line_btn.setChecked(False)
         self._on_line_mode_toggled(False)
 
+        if self._roi is not None:
+            img = self._panel_a.image or self._panel_b.image
+            if img is not None:
+                H, W = img.data.shape[:2]
+                rx0, ry0, rx1, ry1 = self._roi
+                lx0, ly0 = x0n * W, y0n * H
+                lx1, ly1 = x1n * W, y1n * H
+                if not (rx0 <= lx0 <= rx1 and ry0 <= ly0 <= ry1 and
+                        rx0 <= lx1 <= rx1 and ry0 <= ly1 <= ry1):
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(
+                        self, "Cross-section outside ROI",
+                        "The drawn cross-section extends outside the selected ROI.\n\n"
+                        "Section 8 (Spatial Detail) profiles sample derived maps in ROI-relative "
+                        "coordinates. A line that extends beyond the ROI will be clipped to the "
+                        "ROI boundary for those subsections.\n\n"
+                        "Consider redrawing the line entirely within the ROI, or clear the ROI."
+                    )
+
     def _on_run(self, settings: dict) -> None:
         img_a = self._panel_a.image
         img_b = self._panel_b.image
