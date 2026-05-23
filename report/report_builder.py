@@ -1382,7 +1382,6 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             ("Fine\n(1–40 px)",       slice(0,   40)),
             ("Mid-fine\n(41–120 px)", slice(40,  120)),
             ("Mid\n(121–300 px)",     slice(120, 300)),
-            ("Coarse\n(301+ px)",     slice(300, None)),
         ]
         level_info = [
             ("high",   "High",   "#2196F3"),
@@ -1451,7 +1450,13 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         return fig
 
     def _psf_retention_table(self, sim: dict) -> str:
-        """HTML summary table: mean ± std of convolved/original contrast retention per band."""
+        """HTML summary table: mean ± std of convolved/original contrast retention per band and contrast level.
+
+        Columns: Band | Contrast | Image A | Image B | paired t-test p-value.
+        Paired t-test is appropriate because pw_a[i] and pw_b[i] share the same
+        env_orig[i] denominator — they are paired at each pixel position.
+        """
+        from scipy.stats import ttest_rel
         xs_data = sim.get("xs_data", {})
         if not xs_data:
             return ""
@@ -1468,7 +1473,6 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             ("Fine (1–40 px)",        slice(0,   40)),
             ("Mid-fine (41–120 px)",  slice(40,  120)),
             ("Mid (121–300 px)",      slice(120, 300)),
-            ("Coarse (301+ px)",      slice(300, None)),
         ]
         level_info = [
             ("high",   "High"),
@@ -1482,32 +1486,49 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         label_a = sim.get("label_a", "A")
         label_b = sim.get("label_b", "B")
 
-        # Build header
-        col_headers = []
-        for _, title in available:
-            col_headers.append(f"<th>{title}&nbsp;&mdash;&nbsp;{label_a}</th>")
-            col_headers.append(f"<th>{title}&nbsp;&mdash;&nbsp;{label_b}</th>")
-        header = f"<tr><th>Band</th>{''.join(col_headers)}</tr>"
+        header = (
+            f"<tr><th>Band</th><th>Contrast</th>"
+            f"<th>{label_a}</th><th>{label_b}</th>"
+            f"<th>Stat. test</th></tr>"
+        )
 
-        # Build rows
         rows = []
         for band_label, sl in bands:
-            cells = [f"<td><b>{band_label}</b></td>"]
-            for key, _ in available:
-                d = xs_data[key]
+            n_levels = len(available)
+            for idx, (key, level_title) in enumerate(available):
+                d        = xs_data[key]
                 env_orig = _envelope(d["original"][::-1])
                 env_a    = _envelope(d["conv_a"][::-1])
                 env_b    = _envelope(d["conv_b"][::-1])
                 pw_a = env_a[sl] / np.clip(env_orig[sl], 1e-6, None)
                 pw_b = env_b[sl] / np.clip(env_orig[sl], 1e-6, None)
-                cells.append(f"<td>{pw_a.mean():.3f} &plusmn; {pw_a.std():.3f}</td>")
-                cells.append(f"<td>{pw_b.mean():.3f} &plusmn; {pw_b.std():.3f}</td>")
-            rows.append(f"<tr>{''.join(cells)}</tr>")
+
+                _, p = ttest_rel(pw_a, pw_b)
+                p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
+                p_style = ' style="background:#ffe0b2;font-weight:bold"' if p < 0.05 else ""
+                p_cell  = f"<td{p_style}>{p_str}</td>"
+
+                # Span the Band cell across all contrast-level rows in this band
+                band_cell = (
+                    f'<td rowspan="{n_levels}"><b>{band_label}</b></td>'
+                    if idx == 0 else ""
+                )
+
+                rows.append(
+                    f"<tr>{band_cell}"
+                    f"<td>{level_title}</td>"
+                    f"<td>{pw_a.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_a.std():.3f}</td>"
+                    f"<td>{pw_b.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_b.std():.3f}</td>"
+                    f"{p_cell}</tr>"
+                )
 
         return (
             "<p><strong>Contrast retention summary (mean &plusmn; std, convolved / original):"
             "</strong></p>"
             f"<table>{header}{''.join(rows)}</table>"
+            "<p class=\"footnote\">Paired t-test on per-pixel retention ratios (same pixel positions, "
+            "different PSFs). Highlighted cells: p&lt;0.05 — the two images are statistically "
+            "distinguishable in that band/contrast combination.</p>"
         )
 
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
