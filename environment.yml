@@ -8,6 +8,7 @@ dependencies:
     # Scientific stack — all via pip to avoid conda-forge pulling in qt6-main
     - numpy
     - scipy
+    - seaborn
     - matplotlib
     - astropy
     - photutils

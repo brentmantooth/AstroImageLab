@@ -11,6 +11,9 @@ if TYPE_CHECKING:
 MIN_STAR_SNR = 30.0
 HALO_MIN_STAR_SNR = 200.0
 ISOLATION_RADIUS_FWHM = 5.0
+PSF_BETA_MIN = 1.0    # minimum plausible Moffat β; below this the PSF wings are unphysically steep
+PSF_BETA_MAX = 10.0   # maximum plausible Moffat β; above this the fit is likely unreliable
+PSF_FWHM_CLIP_NSIGMA = 3.0   # MAD multiplier for FWHM outlier sigma-clipping
 HALO_FIT_RADIUS_PX = 80
 SATURATION_FRACTION = 0.90
 DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback

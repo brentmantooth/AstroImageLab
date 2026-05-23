@@ -14,7 +14,7 @@ from photutils.psf import EPSFBuilder, extract_stars
 
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
-from core.models import SEEING_WARN_FWHM_ARCS
+from core.models import SEEING_WARN_FWHM_ARCS, PSF_BETA_MIN, PSF_BETA_MAX, PSF_FWHM_CLIP_NSIGMA
 from analysis.star_catalog import StarCatalogBuilder
 
 CUTOUT_SIZE = 25   # pixels per side for per-star cutouts
@@ -41,6 +41,8 @@ class PSFAnalyzer:
 
         result: dict = {
             "n_stars_total": len(catalog),
+            "n_psf_candidates": 0,
+            "n_outliers_rejected": 0,
             "n_stars_used": 0,
             "fwhm_px": None,
             "fwhm_arcsec": None,
@@ -57,9 +59,23 @@ class PSFAnalyzer:
             return result
 
         bgsub = image.background_subtracted()
+        n_psf_candidates = len(psf_stars)
         moffat_fits = self._fit_moffat_all(bgsub, psf_stars)
         if not moffat_fits:
             return result
+
+        # Second-pass: FWHM sigma-clip (needs full fit set to compute median/MAD)
+        moffat_fits = self._sigma_clip_fwhm(moffat_fits)
+        if not moffat_fits:
+            return result
+
+        # Build clean_psf_stars matching only the sigma-clipped fits so that
+        # ellipticity measurement and ePSF build use the same clean star set.
+        clean_xy = {(f["x"], f["y"]) for f in moffat_fits}
+        clean_psf_stars = psf_stars[np.array([
+            (int(round(row["x_centroid"])), int(round(row["y_centroid"]))) in clean_xy
+            for row in psf_stars
+        ])]
 
         fwhms = [f["fwhm"] for f in moffat_fits]
         betas = [f["alpha"] for f in moffat_fits]
@@ -70,9 +86,10 @@ class PSFAnalyzer:
         beta_mad        = float(mad(betas))          if len(betas) > 1 else 0.0
         fwhm_arcsec_mad = fwhm_mad * image.pixel_scale
 
-        # Ellipticity + per-star eccentricity from image moments (needs bgsub + psf_stars)
-        ell, pa, ell_per_star = self._measure_ellipticity(bgsub, psf_stars)
+        # Ellipticity + per-star eccentricity from image moments — use clean_psf_stars
+        ell, pa, ell_per_star = self._measure_ellipticity(bgsub, clean_psf_stars)
         ecc_by_pos = {(s["x"], s["y"]): s["eccentricity"] for s in ell_per_star}
+        ell_by_pos  = {(s["x"], s["y"]): s["ellipticity"]  for s in ell_per_star}
 
         ecc_values = [s["eccentricity"] for s in ell_per_star]
         ell_values = [s["ellipticity"]  for s in ell_per_star]
@@ -80,7 +97,9 @@ class PSFAnalyzer:
         ecc_mad = float(mad(ecc_values)) if len(ecc_values) > 1 else 0.0
 
         result.update({
-            "n_stars_used":      len(moffat_fits),
+            "n_psf_candidates":    n_psf_candidates,
+            "n_outliers_rejected": n_psf_candidates - len(moffat_fits),
+            "n_stars_used":        len(moffat_fits),
             "fwhm_px":           median_fwhm,
             "fwhm_arcsec":       fwhm_arcsec,
             "beta":              median_beta,
@@ -89,8 +108,15 @@ class PSFAnalyzer:
             "fwhm_arcsec_mad":   fwhm_arcsec_mad,
             "beta_mad":          beta_mad,
             "star_data": [
-                {"x": f["x"], "y": f["y"], "fwhm": f["fwhm"],
-                 "eccentricity": ecc_by_pos.get((f["x"], f["y"]))}
+                {
+                    "x":           f["x"],
+                    "y":           f["y"],
+                    "fwhm":        f["fwhm"],
+                    "fwhm_arcsec": f["fwhm"] * image.pixel_scale,
+                    "beta":        f["alpha"],
+                    "eccentricity": ecc_by_pos.get((f["x"], f["y"])),
+                    "ellipticity":  ell_by_pos.get((f["x"], f["y"])),
+                }
                 for f in moffat_fits
             ],
         })
@@ -103,8 +129,8 @@ class PSFAnalyzer:
         )
         result["eccentricity_mad"] = ecc_mad
 
-        # Empirical PSF and MTF
-        epsf, freq, mtf = self._build_epsf_and_mtf(image, psf_stars, median_fwhm)
+        # Empirical PSF and MTF — use clean_psf_stars (same set as metric statistics)
+        epsf, freq, mtf = self._build_epsf_and_mtf(image, clean_psf_stars, median_fwhm)
         if epsf is not None:
             mtf50 = self._find_mtf50(freq, mtf)
             mtf_nyq = float(np.interp(0.5, freq, mtf))
@@ -160,7 +186,7 @@ class PSFAnalyzer:
 
             gamma = abs(fitted.gamma.value)
             alpha = abs(fitted.alpha.value)
-            if alpha < 0.5 or gamma < 0.1:
+            if not (PSF_BETA_MIN <= alpha <= PSF_BETA_MAX) or gamma < 0.1:
                 continue
             fwhm = _moffat_fwhm(gamma, alpha)
             if fwhm < 0.5 or fwhm > CUTOUT_SIZE:
@@ -168,6 +194,21 @@ class PSFAnalyzer:
             results.append({"x": xc, "y": yc, "fwhm": fwhm, "alpha": alpha, "gamma": gamma})
 
         return results
+
+    @staticmethod
+    def _sigma_clip_fwhm(fits: list[dict]) -> list[dict]:
+        """Remove fits whose FWHM deviates more than PSF_FWHM_CLIP_NSIGMA*MAD from median.
+
+        Requires at least 5 fits; returns the list unchanged if MAD is zero.
+        """
+        if len(fits) < 5:
+            return fits
+        fwhms = np.array([f["fwhm"] for f in fits])
+        med = float(np.median(fwhms))
+        m = float(mad(fwhms))
+        if m == 0:
+            return fits
+        return [f for f in fits if abs(f["fwhm"] - med) <= PSF_FWHM_CLIP_NSIGMA * m]
 
     # ------------------------------------------------------------------
     # Ellipticity via image moments

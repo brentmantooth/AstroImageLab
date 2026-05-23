@@ -119,6 +119,133 @@ def _val_pm(v, spread, fmt=".3f", fallback="—") -> str:
     return s
 
 
+def _psf_distributions_figure(sd_a: list, sd_b: list,
+                               label_a: str, label_b: str) -> tuple[str, str]:
+    """Five-panel horizontal distribution figure, one subplot per PSF metric.
+
+    Returns (img_html, caption_html), or ("", "") if no metric has enough data.
+    Adapts: stripplot (N<30), swarmplot (30-250), violinplot (N>250).
+    Violin: median drawn in magenta, Q1/Q3 in cyan (inner=None + manual lines).
+    """
+    import seaborn as sns
+    import pandas as pd
+
+    metrics = [
+        ("fwhm",         "FWHM (px)"),
+        ("fwhm_arcsec",  "FWHM (arcsec)"),
+        ("beta",         "Moffat β"),
+        ("ellipticity",  "Ellipticity"),
+        ("eccentricity", "Eccentricity"),
+    ]
+
+    has_data = any(
+        sum(1 for s in sd_a if s.get(k) is not None) >= 3 and
+        sum(1 for s in sd_b if s.get(k) is not None) >= 3
+        for k, _ in metrics
+    )
+    if not has_data:
+        return "", ""
+
+    fig, axes = plt.subplots(5, 1, figsize=(7, 7))
+    fig.subplots_adjust(hspace=0.55, left=0.18, right=0.97, top=0.95, bottom=0.06)
+    palette = {label_a: "steelblue", label_b: "tomato"}
+    plot_types_used: set[str] = set()
+
+    for ax, (key, title) in zip(axes, metrics):
+        va = [s[key] for s in sd_a if s.get(key) is not None]
+        vb = [s[key] for s in sd_b if s.get(key) is not None]
+
+        if len(va) < 3 or len(vb) < 3:
+            ax.set_visible(False)
+            continue
+
+        n_max = max(len(va), len(vb))
+        df = pd.DataFrame({
+            "value": va + vb,
+            "image": ([label_a] * len(va)) + ([label_b] * len(vb)),
+        })
+
+        if n_max < 30:
+            plot_types_used.add("strip")
+            sns.stripplot(data=df, x="value", y="image",
+                          order=[label_a, label_b], palette=palette,
+                          size=3, jitter=True, ax=ax)
+            for i, vals in enumerate([va, vb]):
+                ax.plot([np.median(vals)], [i], "|", color="magenta",
+                        markersize=12, markeredgewidth=2, zorder=5)
+        elif n_max <= 250:
+            plot_types_used.add("swarm")
+            sns.swarmplot(data=df, x="value", y="image",
+                          order=[label_a, label_b], palette=palette,
+                          size=3, ax=ax)
+            for i, vals in enumerate([va, vb]):
+                ax.plot([np.median(vals)], [i], "|", color="magenta",
+                        markersize=12, markeredgewidth=2, zorder=5)
+        else:
+            plot_types_used.add("violin")
+            # inner=None so we can draw quartile lines with distinct colors
+            sns.violinplot(data=df, x="value", y="image",
+                           order=[label_a, label_b], palette=palette,
+                           inner=None, linewidth=0.8, ax=ax)
+            for i, vals in enumerate([va, vb]):
+                q1, med, q3 = np.percentile(vals, [25, 50, 75])
+                y_lo, y_hi = i - 0.4, i + 0.4
+                ax.plot([q1, q1], [y_lo, y_hi], color="cyan",    lw=1.2, zorder=5)
+                ax.plot([med, med], [y_lo, y_hi], color="magenta", lw=2.0, zorder=5)
+                ax.plot([q3, q3], [y_lo, y_hi], color="cyan",    lw=1.2, zorder=5)
+
+        ax.set_title(title, fontsize=8, loc="left", pad=2)
+        ax.set_xlabel("", fontsize=7)
+        ax.set_ylabel("", fontsize=7)
+        ax.tick_params(axis="x", labelsize=7)
+        ax.tick_params(axis="y", labelsize=7, pad=1)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    img_html = _img_tag(fig, "psf_distributions")
+
+    # Build an adaptive caption describing only the plot type(s) actually rendered
+    type_desc: list[str] = []
+    if "strip" in plot_types_used:
+        type_desc.append(
+            "<b>strip plot</b> (N&nbsp;&lt;&nbsp;30): each dot is one star with random "
+            "y-jitter to reduce overlap; the <span style='color:magenta'><b>magenta&nbsp;|</b></span> "
+            "marks the median"
+        )
+    if "swarm" in plot_types_used:
+        type_desc.append(
+            "<b>beeswarm / swarm plot</b> (30&nbsp;&le;&nbsp;N&nbsp;&le;&nbsp;250): dots are placed "
+            "at their exact measured value with collision-avoidance spread in y so no two dots "
+            "overlap; the <span style='color:magenta'><b>magenta&nbsp;|</b></span> marks the median"
+        )
+    if "violin" in plot_types_used:
+        type_desc.append(
+            "<b>violin plot</b> (N&nbsp;&gt;&nbsp;250): the filled shape is a kernel density "
+            "estimate (KDE) of the distribution &mdash; wider = more stars at that value; "
+            "the <span style='color:magenta'><b>magenta</b></span> vertical line is the median; "
+            "the <span style='color:cyan; background:#555; padding:0 2px'><b>cyan</b></span> "
+            "lines are Q1 and Q3 (the interquartile range, IQR, spans the middle 50% of stars)"
+        )
+
+    type_sentences = "; ".join(type_desc) + "."
+
+    caption_html = (
+        f'<p class="caption">'
+        f"<b>Per-star metric distributions.</b> "
+        f"Each row shows <span style='color:steelblue'><b>Image A (blue)</b></span> above "
+        f"<span style='color:tomato'><b>Image B (red)</b></span>. "
+        f"Plot type adapts to the number of stars measured (N): {type_sentences} "
+        f"<b>How to read statistical differences:</b> if the distributions for A and B are "
+        f"well-separated (little or no overlap), the two filters produce measurably different "
+        f"values for that metric. Overlapping distributions indicate consistent measurements. "
+        f"For violin plots, a shift in the magenta median line between A and B is the clearest "
+        f"single-value indicator of a systematic difference; non-overlapping IQR boxes (cyan lines) "
+        f"provide stronger evidence of a real separation."
+        f"</p>"
+    )
+
+    return img_html, caption_html
+
+
 def _epsf_stars_cell(psf_metrics: dict) -> str:
     """Format the number of stars used to build the ePSF."""
     n = psf_metrics.get("epsf_n_stars")
@@ -549,6 +676,12 @@ shown in the metadata table above.</div>"""
             ecc_vals_a, ecc_vals_b, ra.label, rb.label,
             "Eccentricity", "Eccentricity distribution"), "Eccentricity histogram")
 
+        dist_fig, dist_caption = _psf_distributions_figure(stars_a, stars_b, ra.label, rb.label)
+        dist_html = (
+            "<h4>Per-star metric distributions</h4>" + dist_fig + dist_caption
+            if dist_fig else ""
+        )
+
         return f"""
 <h2>4. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
 {err}
@@ -557,14 +690,32 @@ shown in the metadata table above.</div>"""
 The Modulation Transfer Function (MTF) shows how well contrast is preserved at each
 spatial frequency; MTF50 is the frequency at which contrast falls to 50%.
 These metrics are normalised to unit amplitude and are valid regardless of filter bandwidth.</div>
-<div class="info-box">Stars are detected with DAOStarFinder at a 5σ threshold, which
-intentionally casts a wide net. Only isolated, high-quality stars (SNR ≥ 30,
-separation ≥ 5×FWHM from neighbours, 50-pixel border margin) are passed to PSF and
-ePSF fitting. A high raw detection count relative to stars used is normal and expected.</div>
+<div class="info-box"><strong>Star quality pipeline &mdash; how the table counts are derived</strong><br><br>
+Stars pass through a two-stage quality pipeline before any metric or ePSF is computed.
+All five metrics (FWHM, &beta;, ellipticity, eccentricity) and the ePSF are computed from
+the same final clean set, so the statistics are self-consistent.<br><br>
+<b>Stage 1 &mdash; spatial and photometric filters (Candidate PSF stars):</b>
+DAOStarFinder detects all sources above a 5&sigma; threshold. Candidates are then kept only
+if they are: (a) unsaturated (peak &lt; 90&nbsp;% of the data range); (b) high signal-to-noise
+(peak&nbsp;/&nbsp;background&nbsp;RMS &ge; 30); (c) at least 50&nbsp;px from any image border
+(to avoid edge-truncated PSFs); and (d) isolated (no neighbour within 5&times;FWHM, which would
+contaminate the Moffat fit or the ePSF cutout).<br><br>
+<b>Stage 2 &mdash; Moffat fit quality gates (Outliers rejected):</b>
+A Moffat&nbsp;2D profile is fitted to each candidate. Stars are excluded if:
+the fit fails to converge; the fitted &gamma; &lt; 0.1 (unphysically narrow);
+the fitted &beta; falls outside [1.0,&nbsp;10.0] (unphysical wing-falloff exponent &mdash;
+pure Kolmogorov turbulence predicts &beta;&nbsp;&asymp;&nbsp;4.77, so values below 1 or above 10 indicate
+a failed or pathological fit); or the resulting FWHM deviates by more than 3&times;MAD
+from the median FWHM of the full candidate set (sigma-clipping to remove occasional
+saturated, trailed, or double stars that survived stage 1).<br><br>
+A large ratio of detected to used stars is normal; deep narrowband frames with rich nebulosity
+can contain thousands of faint and crowded sources that are correctly excluded.</div>
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Stars detected (raw)</td><td>{_val(pa.get("n_stars_total"), "d")}</td><td>{_val(pb.get("n_stars_total"), "d")}</td></tr>
+  <tr><td>Candidate PSF stars</td><td>{_val(pa.get("n_psf_candidates"), "d")}</td><td>{_val(pb.get("n_psf_candidates"), "d")}</td></tr>
+  <tr><td>Outliers rejected</td><td>{_val(pa.get("n_outliers_rejected"), "d")}</td><td>{_val(pb.get("n_outliers_rejected"), "d")}</td></tr>
   <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td></tr>
   <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td></tr>
   <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td></tr>
@@ -576,26 +727,35 @@ ePSF fitting. A high raw detection count relative to stars used is normal and ex
   <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td></tr>
 </table>
 
+{dist_html}
+
 <div class="info-box">
   <strong>Understanding the PSF metrics:</strong><br><br>
 
   <strong>FWHM (Full Width at Half Maximum)</strong> &mdash; The diameter of a star
-  image at half its peak brightness. Smaller = sharper. Ground-based imaging is
-  typically seeing-limited (1&ndash;3 arcsec); the best sites achieve sub-arcsecond
-  FWHM. For filter comparison the arcsec value is the primary metric (it is
-  scale-independent). A larger FWHM in one image may indicate that session had
-  worse seeing, or that the filter introduces additional softening (e.g. from
-  substrate wedge or coating scatter).<br><br>
+  image at half its peak brightness, derived from a Moffat&nbsp;2D fit. Smaller = sharper.
+  Ground-based imaging is typically seeing-limited (1&ndash;3 arcsec); the best sites
+  achieve sub-arcsecond FWHM. For filter comparison the arcsec value is the primary metric
+  (scale-independent). A larger FWHM in one image may indicate worse seeing during that
+  session, or additional softening introduced by the filter (e.g. substrate wedge or
+  coating scatter). The reported value is the <em>median</em> of the clean per-star FWHM
+  distribution; the &plusmn; figure is the Median Absolute Deviation (MAD), a robust spread
+  measure that, like the median, is insensitive to the outlier stars removed by the quality
+  pipeline. Stars whose FWHM deviates by more than 3&times;MAD from the median are excluded
+  before the aggregate is computed.<br><br>
 
   <strong>Moffat &beta; (beta)</strong> &mdash; The wing-falloff exponent of the Moffat
-  profile fitted to each star: I(r) = A &times; (1 + (r/&gamma;)&sup2;)<sup>&minus;&beta;</sup>. Higher &beta;
-  means the stellar wings fall off more steeply, leaving less scattered light
-  outside the core. Pure Kolmogorov atmospheric turbulence predicts &beta; &asymp; 4.765;
-  in practice values of 2&ndash;6 are typical. <strong>Ideal: &beta; &gt; 3.</strong> Low
-  &beta; (1&ndash;2) indicates extended wings from vibration, wind shake, or poor tracking;
-  very high &beta; (&gt; 6) suggests an unusually compact PSF or unusually thin
-  atmosphere. A consistently lower &beta; for one filter implies it scatters more light
-  into the halo/wing region &mdash; compare with the Halo Analysis section.<br><br>
+  profile I(r)&nbsp;=&nbsp;A&nbsp;&times;&nbsp;(1&nbsp;+&nbsp;(r/&gamma;)&sup2;)<sup>&minus;&beta;</sup>
+  fitted to each star. Higher &beta; means the stellar wings fall off more steeply,
+  leaving less scattered light outside the core. Pure Kolmogorov atmospheric turbulence
+  predicts &beta;&nbsp;&asymp;&nbsp;4.77; in practice values of 2&ndash;6 are typical.
+  <strong>Ideal: &beta;&nbsp;&gt;&nbsp;3.</strong>
+  Low &beta; (1&ndash;2) indicates extended wings from vibration, wind shake, or poor tracking;
+  very high &beta; (&gt;&nbsp;6) suggests an unusually compact PSF or thin atmosphere.
+  A consistently lower &beta; for one filter implies it scatters more light into the
+  halo/wing region &mdash; compare with the Halo Analysis section.
+  Only fits with &beta; in [1.0,&nbsp;10.0] are accepted; values outside this range are
+  considered pathological fits and are excluded from the statistics and ePSF.<br><br>
 
   <strong>Ellipticity</strong> &mdash; How non-circular the average star shape is,
   measured from second-order image moments (0 = perfectly round, 1 = infinitely
