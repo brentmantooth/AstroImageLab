@@ -119,17 +119,17 @@ def _val_pm(v, spread, fmt=".3f", fallback="—") -> str:
     return s
 
 
-def _psf_stat_test(va: list, vb: list) -> str:
+def _psf_stat_test(va: list, vb: list) -> tuple[str, float | None]:
     """Mann-Whitney U + Cliff's delta for two per-star metric distributions.
 
-    Returns a compact two-line HTML string: effect rating + stars on line 1,
-    p-value and delta on line 2. Returns "" if either list has < 3 values.
+    Returns (html, p_value). html is a compact two-line string: effect rating + stars
+    on line 1, p-value and delta on line 2. Returns ("", None) if either list < 3 values.
     d > 0 means A values tend to be higher than B.
     """
     from scipy.stats import mannwhitneyu
 
     if len(va) < 3 or len(vb) < 3:
-        return ""
+        return "", None
 
     _, p = mannwhitneyu(va, vb, alternative="two-sided")
 
@@ -150,7 +150,7 @@ def _psf_stat_test(va: list, vb: list) -> str:
         rating, stars = "trivial", "~"
 
     p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
-    return f"{stars}&nbsp;{rating}<br><small>{p_str},&nbsp;&delta;={delta:+.2f}</small>"
+    return f"{stars}&nbsp;{rating}<br><small>{p_str},&nbsp;&delta;={delta:+.2f}</small>", float(p)
 
 
 def _psf_distributions_figure(sd_a: list, sd_b: list,
@@ -720,13 +720,19 @@ shown in the metadata table above.</div>"""
         def _sig(key):
             va = [s[key] for s in stars_a if s.get(key) is not None]
             vb = [s[key] for s in stars_b if s.get(key) is not None]
-            return _psf_stat_test(va, vb)
+            return _psf_stat_test(va, vb)   # (html, p | None)
 
-        sig_fwhm_px     = _sig("fwhm")
-        sig_fwhm_arcsec = _sig("fwhm_arcsec")
-        sig_beta        = _sig("beta")
-        sig_ell         = _sig("ellipticity")
-        sig_ecc         = _sig("eccentricity")
+        def _sig_td(html, p):
+            if p is None:
+                return f"<td>{html}</td>"
+            style = 'style="background:#b3e5fc"' if p < 0.05 else 'style="background:#e0e0e0"'
+            return f"<td {style}>{html}</td>"
+
+        (sig_fwhm_px,     p_fwhm_px)     = _sig("fwhm")
+        (sig_fwhm_arcsec, p_fwhm_arcsec) = _sig("fwhm_arcsec")
+        (sig_beta,        p_beta)         = _sig("beta")
+        (sig_ell,         p_ell)          = _sig("ellipticity")
+        (sig_ecc,         p_ecc)          = _sig("eccentricity")
 
         return f"""
 <h2>4. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
@@ -763,11 +769,11 @@ can contain thousands of faint and crowded sources that are correctly excluded.<
   <tr><td>Candidate PSF stars</td><td>{_val(pa.get("n_psf_candidates"), "d")}</td><td>{_val(pb.get("n_psf_candidates"), "d")}</td><td></td></tr>
   <tr><td>Outliers rejected</td><td>{_val(pa.get("n_outliers_rejected"), "d")}</td><td>{_val(pb.get("n_outliers_rejected"), "d")}</td><td></td></tr>
   <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td><td></td></tr>
-  <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td><td>{sig_fwhm_px}</td></tr>
-  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td><td>{sig_fwhm_arcsec}</td></tr>
-  <tr><td>Moffat β</td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td><td>{sig_beta}</td></tr>
-  <tr><td>Ellipticity</td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td><td>{sig_ell}</td></tr>
-  <tr><td>Eccentricity</td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td><td>{sig_ecc}</td></tr>
+  <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td>{_sig_td(sig_fwhm_px, p_fwhm_px)}</tr>
+  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td>{_sig_td(sig_fwhm_arcsec, p_fwhm_arcsec)}</tr>
+  <tr><td>Moffat β</td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td>{_sig_td(sig_beta, p_beta)}</tr>
+  <tr><td>Ellipticity</td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td>{_sig_td(sig_ell, p_ell)}</tr>
+  <tr><td>Eccentricity</td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td>{_sig_td(sig_ecc, p_ecc)}</tr>
   <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td><td></td></tr>
   <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td><td></td></tr>
   <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td><td></td></tr>
@@ -1505,8 +1511,20 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
 
                 _, p = ttest_rel(pw_a, pw_b)
                 p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
-                p_style = ' style="background:#ffe0b2;font-weight:bold"' if p < 0.05 else ""
+                p_style = (' style="background:#b3e5fc"' if p < 0.05
+                           else ' style="background:#e0e0e0"')
                 p_cell  = f"<td{p_style}>{p_str}</td>"
+
+                # Green/red: larger retention = better
+                tol = 1e-4
+                if pw_a.mean() > pw_b.mean() + tol:
+                    sa_style = ' style="background:#c8e6c9"'
+                    sb_style = ' style="background:#ffcdd2"'
+                elif pw_b.mean() > pw_a.mean() + tol:
+                    sa_style = ' style="background:#ffcdd2"'
+                    sb_style = ' style="background:#c8e6c9"'
+                else:
+                    sa_style = sb_style = ""
 
                 # Span the Band cell across all contrast-level rows in this band
                 band_cell = (
@@ -1517,8 +1535,8 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 rows.append(
                     f"<tr>{band_cell}"
                     f"<td>{level_title}</td>"
-                    f"<td>{pw_a.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_a.std():.3f}</td>"
-                    f"<td>{pw_b.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_b.std():.3f}</td>"
+                    f"<td{sa_style}>{pw_a.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_a.std():.3f}</td>"
+                    f"<td{sb_style}>{pw_b.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_b.std():.3f}</td>"
                     f"{p_cell}</tr>"
                 )
 
@@ -1549,7 +1567,6 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         )
 
         xs_figs          = self._plot_psf_crosssections(sim)
-        mod_fig          = _img_tag(self._plot_psf_modulation(sim),                    "Contrast modulation summary")
         band_mod_fig     = _img_tag(self._plot_psf_band_modulation(sim),               "Frequency-band contrast retention")
         retention_fig    = _img_tag(self._plot_psf_contrast_retention_ratios(sim),     "Contrast retention ratios")
 
@@ -1569,13 +1586,6 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             "matter most; the coarser end is gently compressed. "
             f"Black = original; blue = {sim['label_a']}; red = {sim['label_b']}. "
             "A filter with a tighter PSF retains a higher envelope as x approaches 1."
-        )
-        mod_caption = (
-            "Michelson contrast (I<sub>max</sub> &minus; I<sub>min</sub>) / "
-            "(I<sub>max</sub> + I<sub>min</sub>) for each bar group. "
-            "A value of 1.0 = perfect black-to-white swing; 0 = bars completely blurred. "
-            "The reduction from <em>Original</em> to each filter column quantifies how much "
-            "contrast that filter's PSF costs at each spatial frequency represented by the bar width."
         )
         band_mod_caption = (
             "Three charts — one per contrast row (high / medium / low) — each showing mean "
@@ -1607,8 +1617,6 @@ pixel row. The bar pattern cycles from coarse to fine across the strip, making i
 probe of PSF resolution at multiple spatial frequencies in a single exposure.</p>
 {xs_imgs}
 <p class="caption">{xs_caption}</p>
-{mod_fig}
-<p class="caption">{mod_caption}</p>
 <h4>Spatial-frequency-resolved contrast retention</h4>
 {band_mod_fig}
 <p class="caption">{band_mod_caption}</p>
@@ -1621,6 +1629,7 @@ lower bars = more blurring. Error bars show the standard deviation of the per-pi
 each band. Colors identify contrast level (high / medium / low); solid bars = {sim['label_a']},
 hatched bars = {sim['label_b']}.</p>
 {self._psf_retention_table(sim)}"""
+            self._cached_retention_html = self._psf_retention_table(sim)
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
@@ -1917,7 +1926,7 @@ bright stars.</div>"""
                   interpolation="nearest", vmin=0, vmax=1)
 
         circle_r = max(dw, dh) * 0.012
-        font_size = max(6, int(circle_r * 0.6))
+        font_size = max(8, int(circle_r * 0.8))
 
         for rank, (sa, _sb) in enumerate(matched, start=1):
             xd = sa["xc"] * scale
@@ -1925,7 +1934,7 @@ bright stars.</div>"""
             circ = plt.Circle((xd, yd), circle_r, color="red",
                                fill=False, linewidth=1.2)
             ax.add_patch(circ)
-            ax.text(xd + circle_r * 0.8, yd + circle_r * 0.8,
+            ax.text(xd + circle_r * 1.4, yd + circle_r * 1.4,
                     str(rank), color="red", fontsize=font_size,
                     fontweight="bold", ha="left", va="bottom",
                     clip_on=True)
@@ -1936,7 +1945,7 @@ bright stars.</div>"""
             circ = plt.Circle((xd, yd), circle_r, color="magenta",
                                fill=False, linewidth=1.2, linestyle="--")
             ax.add_patch(circ)
-            ax.text(xd + circle_r * 0.8, yd + circle_r * 0.8,
+            ax.text(xd + circle_r * 1.4, yd + circle_r * 1.4,
                     f"S{i}", color="magenta", fontsize=font_size,
                     fontweight="bold", ha="left", va="bottom",
                     clip_on=True)
@@ -3147,6 +3156,13 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                   '<span class="metric-label-warn">⚠</span> = interpret with bandwidth '
                   'context (filters had different bandwidths)</p>')
 
+        retention_block = getattr(self, "_cached_retention_html", "")
+        retention_section = (
+            "<h3>Contrast Retention Detail (convolved / original)</h3>"
+            + retention_block
+            if retention_block else ""
+        )
+
         return f"""
 <h2>9. Summary &amp; Recommendations</h2>
 {legend}
@@ -3158,4 +3174,5 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 Green cells indicate the better value for that metric.
 Red cells indicate the worse value. Metrics marked ⚠ may be influenced by the
 difference in filter bandwidth and should not be used as the sole basis for
-comparison.</div>"""
+comparison.</div>
+{retention_section}"""

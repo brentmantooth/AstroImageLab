@@ -31,7 +31,12 @@ class SNRAnalyzer:
         # --- Per-star SNR ------------------------------------------------
         # Uses peak count from DAOStarFinder catalog, divided by the median
         # background RMS (same estimator used in star_catalog.py filtering).
+        # image.catalog may be None if PSFAnalyzer hasn't run yet (parallel mode),
+        # so build it on demand here without filtering.
         cat = getattr(image, "catalog", None)
+        if cat is None:
+            from analysis.star_catalog import StarCatalogBuilder
+            cat = StarCatalogBuilder().build(image)
         star_snr_median: float | None = None
         star_snr_iqr: float | None = None
         if cat is not None and len(cat) > 0 and noise > 0:
