@@ -119,6 +119,40 @@ def _val_pm(v, spread, fmt=".3f", fallback="—") -> str:
     return s
 
 
+def _psf_stat_test(va: list, vb: list) -> str:
+    """Mann-Whitney U + Cliff's delta for two per-star metric distributions.
+
+    Returns a compact two-line HTML string: effect rating + stars on line 1,
+    p-value and delta on line 2. Returns "" if either list has < 3 values.
+    d > 0 means A values tend to be higher than B.
+    """
+    from scipy.stats import mannwhitneyu
+
+    if len(va) < 3 or len(vb) < 3:
+        return ""
+
+    _, p = mannwhitneyu(va, vb, alternative="two-sided")
+
+    arr_a = np.array(va)
+    arr_b = np.array(vb)
+    delta = float(np.sign(arr_a[:, None] - arr_b[None, :]).sum()) / (len(va) * len(vb))
+    abs_d = abs(delta)
+
+    if p >= 0.05:
+        rating, stars = "n.s.", "~"
+    elif abs_d >= 0.474:
+        rating, stars = "large", "&#9733;&#9733;&#9733;"
+    elif abs_d >= 0.33:
+        rating, stars = "medium", "&#9733;&#9733;"
+    elif abs_d >= 0.147:
+        rating, stars = "small", "&#9733;"
+    else:
+        rating, stars = "trivial", "~"
+
+    p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
+    return f"{stars}&nbsp;{rating}<br><small>{p_str},&nbsp;&delta;={delta:+.2f}</small>"
+
+
 def _psf_distributions_figure(sd_a: list, sd_b: list,
                                label_a: str, label_b: str) -> tuple[str, str]:
     """Five-panel horizontal distribution figure, one subplot per PSF metric.
@@ -682,6 +716,18 @@ shown in the metadata table above.</div>"""
             if dist_fig else ""
         )
 
+        # Statistical difference column (Mann-Whitney U + Cliff's delta per metric)
+        def _sig(key):
+            va = [s[key] for s in stars_a if s.get(key) is not None]
+            vb = [s[key] for s in stars_b if s.get(key) is not None]
+            return _psf_stat_test(va, vb)
+
+        sig_fwhm_px     = _sig("fwhm")
+        sig_fwhm_arcsec = _sig("fwhm_arcsec")
+        sig_beta        = _sig("beta")
+        sig_ell         = _sig("ellipticity")
+        sig_ecc         = _sig("eccentricity")
+
         return f"""
 <h2>4. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
 {err}
@@ -712,20 +758,21 @@ A large ratio of detected to used stars is normal; deep narrowband frames with r
 can contain thousands of faint and crowded sources that are correctly excluded.</div>
 
 <table>
-  <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
-  <tr><td>Stars detected (raw)</td><td>{_val(pa.get("n_stars_total"), "d")}</td><td>{_val(pb.get("n_stars_total"), "d")}</td></tr>
-  <tr><td>Candidate PSF stars</td><td>{_val(pa.get("n_psf_candidates"), "d")}</td><td>{_val(pb.get("n_psf_candidates"), "d")}</td></tr>
-  <tr><td>Outliers rejected</td><td>{_val(pa.get("n_outliers_rejected"), "d")}</td><td>{_val(pb.get("n_outliers_rejected"), "d")}</td></tr>
-  <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td></tr>
-  <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td></tr>
-  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td></tr>
-  <tr><td>Moffat β</td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td></tr>
-  <tr><td>Ellipticity</td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td></tr>
-  <tr><td>Eccentricity</td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td></tr>
-  <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td></tr>
-  <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td></tr>
-  <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td></tr>
+  <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th><th>Difference</th></tr>
+  <tr><td>Stars detected (raw)</td><td>{_val(pa.get("n_stars_total"), "d")}</td><td>{_val(pb.get("n_stars_total"), "d")}</td><td></td></tr>
+  <tr><td>Candidate PSF stars</td><td>{_val(pa.get("n_psf_candidates"), "d")}</td><td>{_val(pb.get("n_psf_candidates"), "d")}</td><td></td></tr>
+  <tr><td>Outliers rejected</td><td>{_val(pa.get("n_outliers_rejected"), "d")}</td><td>{_val(pb.get("n_outliers_rejected"), "d")}</td><td></td></tr>
+  <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td><td></td></tr>
+  <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td><td>{sig_fwhm_px}</td></tr>
+  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td><td>{sig_fwhm_arcsec}</td></tr>
+  <tr><td>Moffat β</td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td><td>{sig_beta}</td></tr>
+  <tr><td>Ellipticity</td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td><td>{sig_ell}</td></tr>
+  <tr><td>Eccentricity</td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td><td>{sig_ecc}</td></tr>
+  <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td><td></td></tr>
+  <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td><td></td></tr>
+  <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td><td></td></tr>
 </table>
+<p class="footnote">&#9733;&nbsp;small (|&delta;|&ge;0.147),&nbsp;&nbsp;&#9733;&#9733;&nbsp;medium (|&delta;|&ge;0.33),&nbsp;&nbsp;&#9733;&#9733;&#9733;&nbsp;large (|&delta;|&ge;0.474);&nbsp;&nbsp;n.s.&nbsp;= p&ge;0.05;&nbsp;&nbsp;&delta;&gt;0 means {ra.label} values tend higher.</p>
 
 {dist_html}
 
@@ -1312,11 +1359,12 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         return fig
 
     def _plot_psf_contrast_retention_ratios(self, sim: dict) -> "plt.Figure | None":
-        """Single grouped bar chart: original/convolved contrast retention ratio per band.
+        """Single grouped bar chart: convolved/original contrast retention ratio per band.
 
         X-axis: 4 spatial-frequency bands. 6 bars per group (3 contrast levels × 2 images).
         Colors distinguish contrast levels; solid fill = Image A, hatched fill = Image B.
         Error bars show std of the pointwise per-pixel ratios within each band.
+        Values <= 1.0: ratio = 1 means no blur; lower = more blur from that filter's PSF.
         """
         xs_data = sim.get("xs_data", {})
         if not xs_data:
@@ -1370,8 +1418,8 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 orig_b = env_orig[sl]
                 a_b    = env_a[sl]
                 b_b    = env_b[sl]
-                pw_a = orig_b / np.clip(a_b, 1e-6, None)
-                pw_b = orig_b / np.clip(b_b, 1e-6, None)
+                pw_a = a_b / np.clip(orig_b, 1e-6, None)
+                pw_b = b_b / np.clip(orig_b, 1e-6, None)
                 ratios_a.append(float(pw_a.mean()))
                 errs_a.append(float(pw_a.std()))
                 ratios_b.append(float(pw_b.mean()))
@@ -1388,19 +1436,79 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             legend_handles.append(Patch(facecolor=color, alpha=0.85, label=f"{title} — {sim['label_a']}"))
             legend_handles.append(Patch(facecolor=color, alpha=0.85, hatch="///", label=f"{title} — {sim['label_b']}"))
 
-        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Perfect retention (ratio = 1)")
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Full retention (ratio = 1)")
         ax.set_xticks(x_centers)
         ax.set_xticklabels([b[0] for b in bands], fontsize=8)
         ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=9)
-        ax.set_ylabel("Contrast retention ratio  (original / convolved)", fontsize=9)
+        ax.set_ylabel("Contrast retention ratio  (convolved / original)", fontsize=9)
         ax.set_title(f"Spatial-Frequency Contrast Retention — {sim['label_a']} vs {sim['label_b']}", fontsize=10)
         ax.legend(handles=legend_handles + [
             plt.Line2D([0], [0], color="black", linestyle="--", linewidth=1.0,
-                       label="Perfect retention (ratio = 1)")
+                       label="Full retention (ratio = 1)")
         ], fontsize=7, ncol=2, loc="upper right")
         ax.grid(True, alpha=0.3, axis="y")
         fig.tight_layout()
         return fig
+
+    def _psf_retention_table(self, sim: dict) -> str:
+        """HTML summary table: mean ± std of convolved/original contrast retention per band."""
+        xs_data = sim.get("xs_data", {})
+        if not xs_data:
+            return ""
+
+        def _envelope(arr: np.ndarray, half: int = 5) -> np.ndarray:
+            n = len(arr)
+            env = np.empty(n)
+            for i in range(n):
+                window = arr[max(0, i - half): min(n, i + half + 1)]
+                env[i] = window.max() - window.min()
+            return env
+
+        bands = [
+            ("Fine (1–40 px)",        slice(0,   40)),
+            ("Mid-fine (41–120 px)",  slice(40,  120)),
+            ("Mid (121–300 px)",      slice(120, 300)),
+            ("Coarse (301+ px)",      slice(300, None)),
+        ]
+        level_info = [
+            ("high",   "High"),
+            ("medium", "Medium"),
+            ("low",    "Low"),
+        ]
+        available = [(k, t) for k, t in level_info if k in xs_data]
+        if not available:
+            return ""
+
+        label_a = sim.get("label_a", "A")
+        label_b = sim.get("label_b", "B")
+
+        # Build header
+        col_headers = []
+        for _, title in available:
+            col_headers.append(f"<th>{title}&nbsp;&mdash;&nbsp;{label_a}</th>")
+            col_headers.append(f"<th>{title}&nbsp;&mdash;&nbsp;{label_b}</th>")
+        header = f"<tr><th>Band</th>{''.join(col_headers)}</tr>"
+
+        # Build rows
+        rows = []
+        for band_label, sl in bands:
+            cells = [f"<td><b>{band_label}</b></td>"]
+            for key, _ in available:
+                d = xs_data[key]
+                env_orig = _envelope(d["original"][::-1])
+                env_a    = _envelope(d["conv_a"][::-1])
+                env_b    = _envelope(d["conv_b"][::-1])
+                pw_a = env_a[sl] / np.clip(env_orig[sl], 1e-6, None)
+                pw_b = env_b[sl] / np.clip(env_orig[sl], 1e-6, None)
+                cells.append(f"<td>{pw_a.mean():.3f} &plusmn; {pw_a.std():.3f}</td>")
+                cells.append(f"<td>{pw_b.mean():.3f} &plusmn; {pw_b.std():.3f}</td>")
+            rows.append(f"<tr>{''.join(cells)}</tr>")
+
+        return (
+            "<p><strong>Contrast retention summary (mean &plusmn; std, convolved / original):"
+            "</strong></p>"
+            f"<table>{header}{''.join(rows)}</table>"
+        )
 
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
         """Return HTML block with four PSF simulation panels at 1:1 pixel resolution."""
@@ -1485,11 +1593,13 @@ probe of PSF resolution at multiple spatial frequencies in a single exposure.</p
 <p class="caption">{band_mod_caption}</p>
 <h4>Contrast retention ratios</h4>
 {retention_fig}
-<p class="caption">Ratio of original local contrast to convolved local contrast (original / convolved)
-per spatial-frequency band. A ratio of 1.0 indicates perfect contrast retention; values above 1.0
-indicate that the PSF blurs contrast at that spatial scale. Error bars show the standard deviation of
-the per-pixel ratios within each band. Colors identify contrast level (high / medium / low);
-solid bars = {sim['label_a']}, hatched bars = {sim['label_b']}.</p>"""
+<p class="caption">Fraction of original local contrast retained after convolution with each filter's ePSF
+(convolved / original) per spatial-frequency band. A ratio of 1.0 indicates perfect contrast
+retention; values below 1.0 indicate that the PSF reduces contrast at that spatial scale —
+lower bars = more blurring. Error bars show the standard deviation of the per-pixel ratios within
+each band. Colors identify contrast level (high / medium / low); solid bars = {sim['label_a']},
+hatched bars = {sim['label_b']}.</p>
+{self._psf_retention_table(sim)}"""
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
