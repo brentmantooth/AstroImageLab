@@ -16,12 +16,83 @@ if not getattr(sys, "frozen", False):
         if os.path.isdir(_qt_bin):
             os.environ["PATH"] = _qt_bin + os.pathsep + os.environ.get("PATH", "")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QSplashScreen
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QRadialGradient
+from PyQt6.QtCore import Qt
 from gui.main_window import MainWindow
+
+
+def _make_splash_pixmap() -> QPixmap:
+    W, H = 600, 300
+    pix = QPixmap(W, H)
+    pix.fill(QColor(13, 17, 23))
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Dividing line
+    p.setPen(QColor(200, 200, 200))
+    p.drawLine(W // 2, 20, W // 2, H - 20)
+
+    # Left panel label (A)
+    p.setFont(QFont("Segoe UI", 10))
+    p.setPen(QColor(139, 191, 255))
+    p.drawText(20, 30, "A")
+
+    # Right panel label (B)
+    p.setPen(QColor(255, 200, 120))
+    p.drawText(W - 30, 30, "B")
+
+    # Left star — broad blurry radial glow (Image A, muted blue-white)
+    grad_a = QRadialGradient(W // 4, H // 2, H // 3)
+    grad_a.setColorAt(0.0, QColor(139, 191, 255, 160))
+    grad_a.setColorAt(0.4, QColor(100, 140, 200, 60))
+    grad_a.setColorAt(1.0, QColor(13, 17, 23, 0))
+    p.setBrush(grad_a)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(W // 4 - H // 3, H // 2 - H // 3, H // 3 * 2, H // 3 * 2)
+
+    # Right star — tight bright radial glow (Image B, warm white)
+    grad_b = QRadialGradient(3 * W // 4, H // 2, H // 8)
+    grad_b.setColorAt(0.0, QColor(255, 252, 224, 255))
+    grad_b.setColorAt(0.3, QColor(255, 220, 120, 120))
+    grad_b.setColorAt(1.0, QColor(13, 17, 23, 0))
+    p.setBrush(grad_b)
+    p.drawEllipse(3 * W // 4 - H // 8, H // 2 - H // 8, H // 4, H // 4)
+
+    # Title
+    p.setPen(QColor(240, 240, 240))
+    title_font = QFont("Segoe UI", 24, QFont.Weight.Bold)
+    p.setFont(title_font)
+    p.drawText(pix.rect(), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+               "Astro Image Lab")
+
+    # Subtitle
+    p.setPen(QColor(160, 170, 185))
+    p.setFont(QFont("Segoe UI", 10))
+    sub_rect = pix.rect().adjusted(0, H // 2 + 10, 0, 0)
+    p.drawText(sub_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+               "Astronomical Image Comparison & Analysis")
+
+    p.end()
+    return pix
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Astro Image Lab")
+
+    # Application icon
+    _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "resources", "icon.ico")
+    if os.path.exists(_icon_path):
+        app.setWindowIcon(QIcon(_icon_path))
+
+    # Splash screen
+    splash = QSplashScreen(_make_splash_pixmap(),
+                           Qt.WindowType.WindowStaysOnTopHint)
+    splash.show()
+    app.processEvents()
+
     # Explicit tooltip colours so they remain readable in both dark and light mode.
     # Qt inherits tooltip colours from the system palette; on Windows dark mode the
     # default produces dark-grey text on a dark-grey background.
@@ -37,4 +108,5 @@ if __name__ == "__main__":
     """)
     window = MainWindow()
     window.show()
+    splash.finish(window)
     sys.exit(app.exec())

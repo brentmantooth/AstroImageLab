@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from scipy.signal import fftconvolve
 from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_filter
 from scipy.interpolate import griddata as _griddata
@@ -171,6 +172,13 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
         ("ellipticity",  "Ellipticity"),
         ("eccentricity", "Eccentricity"),
     ]
+    # Theoretically ideal or physically expected reference values per metric.
+    # FWHM has no universal ideal (seeing-dependent), so it is omitted.
+    _IDEAL_REF = {
+        "beta":         4.77,   # Kolmogorov atmospheric turbulence
+        "ellipticity":  0.0,    # perfectly round star
+        "eccentricity": 0.0,    # perfectly round star
+    }
 
     has_data = any(
         sum(1 for s in sd_a if s.get(k) is not None) >= 3 and
@@ -228,6 +236,10 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
                 ax.plot([med, med], [y_lo, y_hi], color="magenta", lw=2.0, zorder=5)
                 ax.plot([q3, q3], [y_lo, y_hi], color="cyan",    lw=1.2, zorder=5)
 
+        if key in _IDEAL_REF:
+            ax.axvline(_IDEAL_REF[key], color="red", linestyle="--",
+                       linewidth=1.0, alpha=0.8, zorder=3)
+
         ax.set_title(title, fontsize=8, loc="left", pad=2)
         ax.set_xlabel("", fontsize=7)
         ax.set_ylabel("", fontsize=7)
@@ -273,7 +285,11 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
         f"values for that metric. Overlapping distributions indicate consistent measurements. "
         f"For violin plots, a shift in the magenta median line between A and B is the clearest "
         f"single-value indicator of a systematic difference; non-overlapping IQR boxes (cyan lines) "
-        f"provide stronger evidence of a real separation."
+        f"provide stronger evidence of a real separation. "
+        f"A <span style='color:red'><b>red dashed line</b></span> marks the theoretically ideal "
+        f"or physically expected reference value where applicable: Moffat&nbsp;&beta;&nbsp;=&nbsp;4.77 "
+        f"(Kolmogorov atmospheric turbulence); Ellipticity&nbsp;=&nbsp;Eccentricity&nbsp;=&nbsp;0 "
+        f"(perfectly round stars)."
         f"</p>"
     )
 
@@ -2073,6 +2089,7 @@ bright stars.</div>"""
                 ax_xs.legend(fontsize=7)
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
+                ax_xs.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
             # Per-star RDF (log10-space stats, inverse-transformed for display)
             rdf_r_a = sa.get("rdf_radii")
@@ -2102,6 +2119,7 @@ bright stars.</div>"""
                 ax_rdf.legend(fontsize=6)
                 ax_rdf.grid(True, alpha=0.25, which="both")
                 ax_rdf.axis("on")
+                ax_rdf.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
         fig.tight_layout()
         return fig
@@ -2189,6 +2207,7 @@ bright stars.</div>"""
                 ax_xs.legend(fontsize=7)
                 ax_xs.grid(True, alpha=0.25, which="both")
                 ax_xs.axis("on")
+                ax_xs.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
             # Per-star RDF (log10-space stats, inverse-transformed for display)
             rdf_r_a = sa.get("rdf_radii")
@@ -2218,6 +2237,7 @@ bright stars.</div>"""
                 ax_rdf.legend(fontsize=6)
                 ax_rdf.grid(True, alpha=0.25, which="both")
                 ax_rdf.axis("on")
+                ax_rdf.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
         fig.tight_layout()
         return fig
@@ -2252,6 +2272,7 @@ bright stars.</div>"""
         ax.set_title(title)
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
         fig.tight_layout()
         return fig
 
@@ -2563,6 +2584,7 @@ bright stars.</div>"""
         ax.set_xlim(0, 0.5)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, which="both")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
         fig.tight_layout()
         return fig
 
@@ -2697,6 +2719,17 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
                     out += _hires_img_tag(figs[key], key) + "\n"
             return out
 
+        def paired_figs_for(img_prefix: str, xs_prefix: str) -> str:
+            """Emit each image immediately followed by its matching cross-section."""
+            out = ""
+            for img_key in sorted(k for k in figs if k.startswith(img_prefix)):
+                suffix = img_key[len(img_prefix):]
+                out += _hires_img_tag(figs[img_key], img_key) + "\n"
+                xs_key = xs_prefix + suffix
+                if xs_key in figs:
+                    out += _hires_img_tag(figs[xs_key], xs_key) + "\n"
+            return out
+
         has_crosshair = sm.get("crosshair") is not None
         xs_note = (
             '<div class="info-box">ℹ Cross-section profiles below are extracted along '
@@ -2736,31 +2769,6 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
             'the raw unsmoothed data.</div>'
         )
 
-        xs_context_html = ""
-        if has_crosshair and "xs_context" in figs:
-            xs_context_html = f"""
-<div class="info-box">The cross-section extracts a 1-D brightness profile along the
-line drawn in the viewer. The normalised profile shows relative brightness scaled to the
-mean signal level — use it to compare which filter captures more emission or suppresses
-more continuum. The raw profile shows actual pixel counts, making it easy to assess the
-absolute signal difference and dynamic range. A flatter profile in a continuum-dominated
-field may indicate better sky suppression; a higher peak in an emission region indicates
-greater throughput for that line.</div>
-{_hires_img_tag(figs["xs_context"], "xs_context")}
-<p class="caption">Zoomed crop centred on the cross-section line.
-Orange line = {ra.label}, blue line = {rb.label}.</p>
-{_hires_img_tag(figs.get("xs_image_profile"), "xs_image_profile")}
-<p class="caption">Brightness profile along the drawn line (mean-signal-normalised).</p>
-{_hires_img_tag(figs.get("xs_image_profile_raw"), "xs_image_profile_raw")}
-<p class="caption">Raw pixel counts (ADU) along the cross-section line.
-Use this to assess absolute signal levels and dynamic range between filters.</p>"""
-        else:
-            xs_context_html = (
-                '<div class="info-box">No cross-section line was drawn. '
-                'Draw a line in the GUI before running the analysis to see '
-                'cross-section profiles here.</div>'
-            )
-
         return f"""
 <h2>8. Spatial Detail Comparison &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
 {err}
@@ -2771,9 +2779,6 @@ Use this to assess absolute signal levels and dynamic range between filters.</p>
 (each image divided by its own mean signal), making them dimensionless and comparable
 across different filter bandwidths. Images are shown side-by-side with a shared
 colour scale; the third panel shows the difference A−B.</div>
-
-<h3>8a. Image Cross-Section</h3>
-{xs_context_html}
 
 <h3>8b. Local Standard Deviation Maps</h3>
 <div class="info-box">Measures how much pixel values vary within a neighbourhood.
@@ -2790,10 +2795,10 @@ along the selected line.</div>
   <tr><th>Kernel size</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   {cr_rows}
 </table>
-{figs_for("std_")}
-<p class="caption">Side-by-side local σ maps at each kernel size (shared colour scale).
+{xs_note}{paired_figs_for("std_", "xs_std_")}
+<p class="caption">Side-by-side local σ maps at each kernel size (shared colour scale),
+each followed by its cross-section profile.
 The difference map (right) highlights where one filter preserves more local variation.</p>
-{xs_note}{xs_figs_for("xs_std_")}
 <h3>8c. Laplacian of Gaussian (LoG) Maps</h3>
 <div class="info-box">The Laplacian of Gaussian highlights regions of rapid intensity
 change at a specific spatial scale (controlled by σ). Brighter regions in |LoG| maps
@@ -2805,10 +2810,10 @@ boundaries. |LoG| is shown so bright-to-dark and dark-to-bright edges are treate
 equally. Compare maps at each σ: a sharper or higher-contrast filter will show
 brighter LoG response at small σ values. Cross-section profiles reveal subtle
 differences in edge sharpness along the selected line.</div>
-{figs_for("log_")}
-<p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per row).
+{paired_figs_for("log_", "xs_log_")}
+<p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
+each followed by its cross-section profile.
 A filter preserving more fine detail shows brighter, more defined boundaries at small σ.</p>
-{xs_figs_for("xs_log_")}
 <h3>8d. Wavelet Decomposition</h3>
 <div class="info-box">A 4-level Daubechies-4 wavelet decomposition separates the
 image into spatial scale bands. Level 1 (~2 px) is noise-dominated and used only
@@ -2833,11 +2838,10 @@ Cross-section profiles show how detail amplitude varies spatially along the sele
   {snr_rows}
 </table>
 
-{figs_for("wavelet_level")}
+{paired_figs_for("wavelet_level", "xs_wavelet_level")}
 <p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
-diverging colourmap). The difference panel (right) shows where fine structure differs
-between the two filters.</p>
-{xs_figs_for("xs_wavelet_level")}"""
+diverging colourmap), each followed by its cross-section profile.
+The difference panel (right) shows where fine structure differs between the two filters.</p>"""
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
@@ -2935,7 +2939,7 @@ between the two filters.</p>
             ])
             sl_pair_html = _img_tag(sl_pair_fig, "Starless SNR map comparison")
             starless_html = f"""
-<h3>3b. SNR — Starless Images</h3>
+<h3>3c. SNR — Starless Images</h3>
 <div class="info-box">★ SNR analysis repeated on the starless image(s). Stars inflate the
 global SNR and above-threshold percentages because bright star cores contribute many
 high-SNR pixels unrelated to the nebula emission. The starless values below reflect
@@ -2953,6 +2957,31 @@ pure nebula depth and are recommended for comparing image quality.</div>
 {sl_pair_html}
 <p class="caption">Per-pixel SNR map on the starless image. Star flux removed so nebula
 depth drives the color scale. Both images share the same scale for direct comparison.</p>"""
+        # --- Cross-section subsection (figures live in spatial_metrics) ---
+        _sm = ra.spatial_metrics or {}
+        _figs = _sm.get("figures", {})
+        _has_xs = _sm.get("crosshair") is not None
+        if _has_xs and "xs_context" in _figs:
+            xs_crosshair_html = f"""
+<h3>3b. Image Cross-Section</h3>
+<div class="info-box">The cross-section extracts a 1-D brightness profile along the
+line drawn in the viewer. The normalised profile shows relative brightness scaled to the
+mean signal level — use it to compare which filter captures more emission or suppresses
+more continuum. The raw profile shows actual pixel counts, making it easy to assess the
+absolute signal difference and dynamic range. A flatter profile in a continuum-dominated
+field may indicate better sky suppression; a higher peak in an emission region indicates
+greater throughput for that line.</div>
+{_hires_img_tag(_figs["xs_context"], "xs_context")}
+<p class="caption">Zoomed crop centred on the cross-section line.
+Orange line = {ra.label}, blue line = {rb.label}.</p>
+{_hires_img_tag(_figs.get("xs_image_profile"), "xs_image_profile")}
+<p class="caption">Brightness profile along the drawn line (mean-signal-normalised).</p>
+{_hires_img_tag(_figs.get("xs_image_profile_raw"), "xs_image_profile_raw")}
+<p class="caption">Raw pixel counts (ADU) along the cross-section line.
+Use this to assess absolute signal levels and dynamic range between filters.</p>"""
+        else:
+            xs_crosshair_html = ""
+
         return f"""
 <h2>3. Signal-to-Noise Ratio (SNR)</h2>
 {err}
@@ -3067,6 +3096,7 @@ depth drives the color scale. Both images share the same scale for direct compar
 Both images share the same color scale (P2&ndash;P98 of the higher-SNR image) for direct
 comparison. Bright regions have high SNR; blank sky clusters near zero.
 A uniformly brighter map indicates deeper, more signal-rich data.</p>
+{xs_crosshair_html}
 {starless_html}"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from scipy.optimize import curve_fit
 
 from core.astro_image import AstroImage
@@ -397,6 +398,7 @@ class HaloAnalyzer:
         ax.semilogy(r_fine, total, "b-", linewidth=1.5, label="Total fit")
         ax.semilogy(r_fine, core, "g--", linewidth=1, label="Core")
         ax.semilogy(r_fine, halo, "r--", linewidth=1, label="Halo")
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
         ax.axvline(r[-1], color="gray", linestyle=":", linewidth=1.2,
                    label=f"Data limit ({r[-1]:.0f} px)")
