@@ -22,6 +22,23 @@ from core.astro_image import AstroImage
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
 
 
+def _inspector_display(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
+    """Return uint8 stretched display image, downsampled so max dimension ≤ max_dim."""
+    arr = img.display_image(stretch=True)
+    h, w = arr.shape[:2]
+    scale = min(1.0, max_dim / max(h, w))
+    if scale < 1.0:
+        pil = _PILImage.fromarray(arr)
+        arr = np.array(pil.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS))
+    return arr
+
+
+def _decode_b64_to_uint8(b64_str: str) -> np.ndarray:
+    """Decode a base64 PNG string to a uint8 numpy array."""
+    buf = io.BytesIO(base64.b64decode(b64_str))
+    return np.array(_PILImage.open(buf).convert("RGB"))
+
+
 def _make_moffat_kernel(fwhm_px: float, beta: float = REF_SEEING_BETA,
                          size: int | None = None) -> np.ndarray:
     """2D Moffat PSF kernel at native pixel scale, normalized to unit sum."""
@@ -514,7 +531,148 @@ class ReportBuilder:
 
         if open_browser:
             webbrowser.open(out_path.as_uri())
+
+        inspector_path = output_dir / (stem + "_inspector.npz")
+        try:
+            self._write_inspector_file(
+                inspector_path, image_a, image_b, result_a, result_b
+            )
+        except Exception:
+            pass   # never block report delivery for inspector failures
+
         return out_path
+
+    # ── Inspector file writer ─────────────────────────────────────────────────
+
+    def _write_inspector_file(self,
+                               path: Path,
+                               image_a: AstroImage, image_b: AstroImage,
+                               result_a: AnalysisResult,
+                               result_b: AnalysisResult) -> None:
+        """Write a companion .npz file for the Report Inspector."""
+        import json as _json
+        arrays: dict[str, np.ndarray] = {}
+        catalog_sections: dict[str, list] = {}
+
+        def _add(key: str, arr: np.ndarray) -> None:
+            arrays[key] = arr
+
+        def _add_entry(section: str, name: str, key_a: str, key_b: str) -> None:
+            if key_a in arrays and key_b in arrays:
+                catalog_sections.setdefault(section, []).append(
+                    {"name": name, "key_a": key_a, "key_b": key_b}
+                )
+
+        # ── Input images ──────────────────────────────────────────────────────
+        _add("display_a", _inspector_display(image_a))
+        _add("display_b", _inspector_display(image_b))
+        _add_entry("Input Images", "Original", "display_a", "display_b")
+
+        if image_a.starless_image is not None and image_b.starless_image is not None:
+            _add("display_sl_a", _inspector_display(image_a.starless_image))
+            _add("display_sl_b", _inspector_display(image_b.starless_image))
+            _add_entry("Input Images", "Starless", "display_sl_a", "display_sl_b")
+
+        # ── PSF / MTF ─────────────────────────────────────────────────────────
+        pa = result_a.psf_metrics or {}
+        pb = result_b.psf_metrics or {}
+        if pa.get("epsf_data") is not None and pb.get("epsf_data") is not None:
+            ea = pa["epsf_data"].astype(np.float64)
+            eb = pb["epsf_data"].astype(np.float64)
+            _add("epsf_a", np.log1p(ea - ea.min()).astype(np.float32))
+            _add("epsf_b", np.log1p(eb - eb.min()).astype(np.float32))
+            _add_entry("PSF / MTF", "ePSF", "epsf_a", "epsf_b")
+        for fig_key, label in (("mtf", "MTF chart"), ("epsf", "ePSF (individual)")):
+            fa = (pa.get("figures") or {}).get(fig_key)
+            fb = (pb.get("figures") or {}).get(fig_key)
+            if fa:
+                k = f"fig_psf_{fig_key}"
+                _add(k, _decode_b64_to_uint8(fa))
+                if fb:
+                    kb = f"fig_psf_{fig_key}_b"
+                    _add(kb, _decode_b64_to_uint8(fb))
+                    _add_entry("PSF / MTF", label, k, kb)
+
+        # ── PSF Simulation ────────────────────────────────────────────────────
+        sim = self._plot_psf_simulation(result_a, result_b)
+        sim_ref_label = ""
+        if sim is not None:
+            for skey in ("original", "conv_a", "conv_b", "conv_ref", "diff"):
+                arr = sim.get(skey)
+                if arr is not None:
+                    _add(f"sim_{skey}", arr)
+            sim_ref_label = sim.get("label_ref") or ""
+            _add_entry("PSF Simulation", "Test chart (original)",
+                       "sim_original", "sim_original")
+            _add_entry("PSF Simulation", "Convolved A vs B",
+                       "sim_conv_a", "sim_conv_b")
+            if "sim_conv_ref" in arrays:
+                _add_entry("PSF Simulation", "Convolved A vs Ref",
+                           "sim_conv_a", "sim_conv_ref")
+            _add_entry("PSF Simulation", "Difference map",
+                       "sim_diff", "sim_diff")
+
+        # ── SNR ───────────────────────────────────────────────────────────────
+        sa = result_a.snr_metrics or {}
+        sb = result_b.snr_metrics or {}
+        if sa.get("snr_display") is not None and sb.get("snr_display") is not None:
+            _add("snr_display_a", sa["snr_display"].astype(np.float32))
+            _add("snr_display_b", sb["snr_display"].astype(np.float32))
+            _add_entry("SNR", "SNR map", "snr_display_a", "snr_display_b")
+        sl_a = sa.get("starless") or {}
+        sl_b = sb.get("starless") or {}
+        if sl_a.get("snr_display") is not None and sl_b.get("snr_display") is not None:
+            _add("snr_display_sl_a", sl_a["snr_display"].astype(np.float32))
+            _add("snr_display_sl_b", sl_b["snr_display"].astype(np.float32))
+            _add_entry("SNR", "Starless SNR map",
+                       "snr_display_sl_a", "snr_display_sl_b")
+
+        # ── Edge Detection ────────────────────────────────────────────────────
+        ea_m = result_a.edge_metrics or {}
+        eb_m = result_b.edge_metrics or {}
+        if ea_m.get("gm_display") is not None and eb_m.get("gm_display") is not None:
+            _add("gm_display_a", ea_m["gm_display"].astype(np.float32))
+            _add("gm_display_b", eb_m["gm_display"].astype(np.float32))
+            _add_entry("Edge Detection", "Gradient map",
+                       "gm_display_a", "gm_display_b")
+
+        # ── Section Figures (all base64 PNGs from metrics dicts) ──────────────
+        fig_sources = [
+            ("psf",     result_a.psf_metrics),
+            ("halo",    result_a.halo_metrics),
+            ("edge",    result_a.edge_metrics),
+            ("power",   result_a.power_metrics),
+            ("spatial", result_a.spatial_metrics),
+            ("snr",     result_a.snr_metrics),
+        ]
+        for sec_tag, metrics in fig_sources:
+            if not metrics:
+                continue
+            figs = metrics.get("figures") or {}
+            for fig_key, b64_str in figs.items():
+                if not b64_str:
+                    continue
+                npz_key = f"fig_{sec_tag}_{fig_key}"
+                try:
+                    arr = _decode_b64_to_uint8(b64_str)
+                    _add(npz_key, arr)
+                    pretty = fig_key.replace("_", " ").capitalize()
+                    _add_entry("Section Figures", f"{sec_tag.upper()} — {pretty}",
+                               npz_key, npz_key)
+                except Exception:
+                    pass
+
+        # ── Catalog JSON ──────────────────────────────────────────────────────
+        catalog = {
+            "label_a": result_a.label,
+            "label_b": result_b.label,
+            "sim_label_ref": sim_ref_label,
+            "sections": catalog_sections,
+        }
+        json_bytes = _json.dumps(catalog, ensure_ascii=False).encode("utf-8")
+        arrays["catalog_json"] = np.frombuffer(json_bytes, dtype=np.uint8).copy()
+
+        np.savez_compressed(str(path), **arrays)
 
     # ── Section 1: Header ─────────────────────────────────────────────────────
 

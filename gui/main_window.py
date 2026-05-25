@@ -76,6 +76,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_open_b)
 
         file_menu.addSeparator()
+        act_open_inspector = QAction("Open Report &Inspector…", self)
+        act_open_inspector.triggered.connect(self._open_inspector)
+        file_menu.addAction(act_open_inspector)
+
+        file_menu.addSeparator()
         act_quit = QAction("&Quit", self)
         act_quit.triggered.connect(self.close)
         file_menu.addAction(act_quit)
@@ -224,6 +229,44 @@ class MainWindow(QMainWindow):
         if result_a.warnings:
             msg += "\n\nWarnings:\n" + "\n".join(f"• {w[:200]}" for w in result_a.warnings)
         QMessageBox.information(self, "Done", msg)
+
+        if report_path:
+            from pathlib import Path as _Path
+            from gui.report_inspector import ReportInspector
+            npz_path = _Path(report_path).with_name(
+                _Path(report_path).stem + "_inspector.npz")
+            if npz_path.exists():
+                self._inspector = ReportInspector(npz_path, parent=self)
+                self._inspector.show()
+
+    def _open_inspector(self) -> None:
+        from pathlib import Path as _Path
+        from gui.report_inspector import ReportInspector
+        start_dir = self._control.settings().get("output_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Report Inspector",
+            start_dir,
+            "Astro Image Lab Report (*.html *_inspector.npz);;All files (*)",
+        )
+        if not path:
+            return
+        p = _Path(path)
+        if p.suffix.lower() == ".html":
+            npz_path = p.with_name(p.stem + "_inspector.npz")
+        else:
+            npz_path = p
+        if not npz_path.exists():
+            QMessageBox.warning(
+                self,
+                "Inspector file not found",
+                f"No inspector data file found for this report.\n\n"
+                f"Expected: {npz_path.name}\n\n"
+                "Run the analysis again to regenerate the inspector file.",
+            )
+            return
+        self._inspector = ReportInspector(npz_path, parent=self)
+        self._inspector.show()
 
     def _on_error(self, msg: str) -> None:
         self._control.reset_progress()
