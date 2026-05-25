@@ -33,11 +33,6 @@ def _inspector_display(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
     return arr
 
 
-def _decode_b64_to_uint8(b64_str: str) -> np.ndarray:
-    """Decode a base64 PNG string to a uint8 numpy array."""
-    buf = io.BytesIO(base64.b64decode(b64_str))
-    return np.array(_PILImage.open(buf).convert("RGB"))
-
 
 def _make_moffat_kernel(fwhm_px: float, beta: float = REF_SEEING_BETA,
                          size: int | None = None) -> np.ndarray:
@@ -64,6 +59,29 @@ def _ref_fwhm_px(pa: dict, pb: dict,
             pixel_scale = fwhm_as / fwhm_px   # arcsec / px
             return ref_seeing_arcsec / pixel_scale
     return None
+
+
+def _psf_make_map(pts: list, img_h: int, img_w: int) -> "np.ndarray | None":
+    """Interpolate per-star (x, y, val) triplets onto a smoothed float32 grid.
+
+    Grid long-axis is PSF_SPATIAL_MAP_SIZE px with aspect ratio preserved.
+    Returns None when pts is empty.
+    """
+    if not pts:
+        return None
+    if img_w >= img_h:
+        gw = PSF_SPATIAL_MAP_SIZE
+        gh = max(1, int(PSF_SPATIAL_MAP_SIZE * img_h / img_w))
+    else:
+        gh = PSF_SPATIAL_MAP_SIZE
+        gw = max(1, int(PSF_SPATIAL_MAP_SIZE * img_w / img_h))
+    gx, gy = np.meshgrid(np.linspace(0, img_w, gw), np.linspace(0, img_h, gh))
+    coords = np.array([(p[0], p[1]) for p in pts])
+    vals   = np.array([p[2]         for p in pts])
+    m  = _griddata(coords, vals, (gx, gy), method="linear")
+    nn = _griddata(coords, vals, (gx, gy), method="nearest")
+    m  = np.where(np.isnan(m), nn, m)
+    return _gaussian_filter(m, sigma=PSF_SPATIAL_MAP_SMOOTH_SIGMA).astype(np.float32)
 
 
 # ── CSS ──────────────────────────────────────────────────────────────────────
@@ -557,21 +575,24 @@ class ReportBuilder:
         def _add(key: str, arr: np.ndarray) -> None:
             arrays[key] = arr
 
-        def _add_entry(section: str, name: str, key_a: str, key_b: str) -> None:
-            if key_a in arrays and key_b in arrays:
+        def _add_options_entry(section: str, name: str, options: dict) -> None:
+            valid = {k: v for k, v in options.items() if v in arrays}
+            if valid:
                 catalog_sections.setdefault(section, []).append(
-                    {"name": name, "key_a": key_a, "key_b": key_b}
+                    {"name": name, "options": valid}
                 )
 
         # ── Input images ──────────────────────────────────────────────────────
         _add("display_a", _inspector_display(image_a))
         _add("display_b", _inspector_display(image_b))
-        _add_entry("Input Images", "Original", "display_a", "display_b")
+        _add_options_entry("Input Images", "Original",
+                           {"Image A": "display_a", "Image B": "display_b"})
 
         if image_a.starless_image is not None and image_b.starless_image is not None:
             _add("display_sl_a", _inspector_display(image_a.starless_image))
             _add("display_sl_b", _inspector_display(image_b.starless_image))
-            _add_entry("Input Images", "Starless", "display_sl_a", "display_sl_b")
+            _add_options_entry("Input Images", "Starless",
+                               {"Image A": "display_sl_a", "Image B": "display_sl_b"})
 
         # ── PSF / MTF ─────────────────────────────────────────────────────────
         pa = result_a.psf_metrics or {}
@@ -581,17 +602,43 @@ class ReportBuilder:
             eb = pb["epsf_data"].astype(np.float64)
             _add("epsf_a", np.log1p(ea - ea.min()).astype(np.float32))
             _add("epsf_b", np.log1p(eb - eb.min()).astype(np.float32))
-            _add_entry("PSF / MTF", "ePSF", "epsf_a", "epsf_b")
-        for fig_key, label in (("mtf", "MTF chart"), ("epsf", "ePSF (individual)")):
-            fa = (pa.get("figures") or {}).get(fig_key)
-            fb = (pb.get("figures") or {}).get(fig_key)
-            if fa:
-                k = f"fig_psf_{fig_key}"
-                _add(k, _decode_b64_to_uint8(fa))
-                if fb:
-                    kb = f"fig_psf_{fig_key}_b"
-                    _add(kb, _decode_b64_to_uint8(fb))
-                    _add_entry("PSF / MTF", label, k, kb)
+            ref_fwhm = _ref_fwhm_px(pa, pb, self._ref_seeing_arcsec)
+            if ref_fwhm is not None:
+                # Match the measured ePSF size so cross-sections sample the same pixel grid
+                epsf_size = int(ea.shape[0])
+                kern_ref = _make_moffat_kernel(ref_fwhm, size=epsf_size)
+                kr = np.log1p(kern_ref - kern_ref.min()).astype(np.float32)
+                _add("epsf_ref", kr)
+            epsf_opts: dict[str, str] = {"Image A": "epsf_a", "Image B": "epsf_b"}
+            if "epsf_ref" in arrays:
+                epsf_opts["Reference"] = "epsf_ref"
+            _add_options_entry("PSF / MTF", "ePSF", epsf_opts)
+
+        # ── PSF spatial maps (FWHM gradient, eccentricity) ────────────────────
+        stars_a = pa.get("star_data", [])
+        stars_b = pb.get("star_data", [])
+        img_h_a, img_w_a = image_a.data.shape[:2]
+        img_h_b, img_w_b = image_b.data.shape[:2]
+
+        fwhm_pts_a = [(s["x"], s["y"], s["fwhm"]) for s in stars_a if s.get("fwhm") is not None]
+        fwhm_pts_b = [(s["x"], s["y"], s["fwhm"]) for s in stars_b if s.get("fwhm") is not None]
+        fwhm_map_a = _psf_make_map(fwhm_pts_a, img_h_a, img_w_a)
+        fwhm_map_b = _psf_make_map(fwhm_pts_b, img_h_b, img_w_b)
+        if fwhm_map_a is not None and fwhm_map_b is not None:
+            _add("psf_fwhm_map_a", fwhm_map_a)
+            _add("psf_fwhm_map_b", fwhm_map_b)
+            _add_options_entry("PSF / MTF", "FWHM gradient map",
+                               {"Image A": "psf_fwhm_map_a", "Image B": "psf_fwhm_map_b"})
+
+        ecc_pts_a = [(s["x"], s["y"], s["eccentricity"]) for s in stars_a if s.get("eccentricity") is not None]
+        ecc_pts_b = [(s["x"], s["y"], s["eccentricity"]) for s in stars_b if s.get("eccentricity") is not None]
+        ecc_map_a = _psf_make_map(ecc_pts_a, img_h_a, img_w_a)
+        ecc_map_b = _psf_make_map(ecc_pts_b, img_h_b, img_w_b)
+        if ecc_map_a is not None and ecc_map_b is not None:
+            _add("psf_ecc_map_a", ecc_map_a)
+            _add("psf_ecc_map_b", ecc_map_b)
+            _add_options_entry("PSF / MTF", "Eccentricity map",
+                               {"Image A": "psf_ecc_map_a", "Image B": "psf_ecc_map_b"})
 
         # ── PSF Simulation ────────────────────────────────────────────────────
         sim = self._plot_psf_simulation(result_a, result_b)
@@ -602,15 +649,14 @@ class ReportBuilder:
                 if arr is not None:
                     _add(f"sim_{skey}", arr)
             sim_ref_label = sim.get("label_ref") or ""
-            _add_entry("PSF Simulation", "Test chart (original)",
-                       "sim_original", "sim_original")
-            _add_entry("PSF Simulation", "Convolved A vs B",
-                       "sim_conv_a", "sim_conv_b")
-            if "sim_conv_ref" in arrays:
-                _add_entry("PSF Simulation", "Convolved A vs Ref",
-                           "sim_conv_a", "sim_conv_ref")
-            _add_entry("PSF Simulation", "Difference map",
-                       "sim_diff", "sim_diff")
+            chart_opts: dict[str, str] = {}
+            for lbl, k in [("Original", "sim_original"), ("Image A", "sim_conv_a"),
+                            ("Image B", "sim_conv_b"), ("Reference", "sim_conv_ref")]:
+                if k in arrays:
+                    chart_opts[lbl] = k
+            _add_options_entry("PSF Simulation", "Convolved test chart", chart_opts)
+            _add_options_entry("PSF Simulation", "A−B difference",
+                               {"Diff (A−B)": "sim_diff"})
 
         # ── SNR ───────────────────────────────────────────────────────────────
         sa = result_a.snr_metrics or {}
@@ -618,14 +664,16 @@ class ReportBuilder:
         if sa.get("snr_display") is not None and sb.get("snr_display") is not None:
             _add("snr_display_a", sa["snr_display"].astype(np.float32))
             _add("snr_display_b", sb["snr_display"].astype(np.float32))
-            _add_entry("SNR", "SNR map", "snr_display_a", "snr_display_b")
+            _add_options_entry("SNR", "SNR map",
+                               {"Image A": "snr_display_a", "Image B": "snr_display_b"})
         sl_a = sa.get("starless") or {}
         sl_b = sb.get("starless") or {}
         if sl_a.get("snr_display") is not None and sl_b.get("snr_display") is not None:
             _add("snr_display_sl_a", sl_a["snr_display"].astype(np.float32))
             _add("snr_display_sl_b", sl_b["snr_display"].astype(np.float32))
-            _add_entry("SNR", "Starless SNR map",
-                       "snr_display_sl_a", "snr_display_sl_b")
+            _add_options_entry("SNR", "Starless SNR map",
+                               {"Image A": "snr_display_sl_a",
+                                "Image B": "snr_display_sl_b"})
 
         # ── Edge Detection ────────────────────────────────────────────────────
         ea_m = result_a.edge_metrics or {}
@@ -633,34 +681,37 @@ class ReportBuilder:
         if ea_m.get("gm_display") is not None and eb_m.get("gm_display") is not None:
             _add("gm_display_a", ea_m["gm_display"].astype(np.float32))
             _add("gm_display_b", eb_m["gm_display"].astype(np.float32))
-            _add_entry("Edge Detection", "Gradient map",
-                       "gm_display_a", "gm_display_b")
+            _add_options_entry("Edge Detection", "Gradient map",
+                               {"Image A": "gm_display_a", "Image B": "gm_display_b"})
 
-        # ── Section Figures (all base64 PNGs from metrics dicts) ──────────────
-        fig_sources = [
-            ("psf",     result_a.psf_metrics),
-            ("halo",    result_a.halo_metrics),
-            ("edge",    result_a.edge_metrics),
-            ("power",   result_a.power_metrics),
-            ("spatial", result_a.spatial_metrics),
-            ("snr",     result_a.snr_metrics),
-        ]
-        for sec_tag, metrics in fig_sources:
-            if not metrics:
+        # ── Spatial Detail subsections ────────────────────────────────────────
+        _PANEL_SECTION_NAMES = {
+            "std_5px":    "Std Dev — 5 px kernel",
+            "std_15px":   "Std Dev — 15 px kernel",
+            "std_31px":   "Std Dev — 31 px kernel",
+            "log_1.5":    "LoG — σ 1.5 px",
+            "log_3.0":    "LoG — σ 3.0 px",
+            "log_6.0":    "LoG — σ 6.0 px",
+            "wavelet_2":  "Wavelet — Level 2",
+            "wavelet_3":  "Wavelet — Level 3",
+        }
+        panels_a = (result_a.spatial_metrics or {}).get("panels", {})
+        panels_b = (result_b.spatial_metrics or {}).get("panels", {})
+        for pkey, sec_name in _PANEL_SECTION_NAMES.items():
+            pa_panel = panels_a.get(pkey)
+            pb_panel = panels_b.get(pkey)
+            if pa_panel is None or pb_panel is None:
                 continue
-            figs = metrics.get("figures") or {}
-            for fig_key, b64_str in figs.items():
-                if not b64_str:
-                    continue
-                npz_key = f"fig_{sec_tag}_{fig_key}"
-                try:
-                    arr = _decode_b64_to_uint8(b64_str)
-                    _add(npz_key, arr)
-                    pretty = fig_key.replace("_", " ").capitalize()
-                    _add_entry("Section Figures", f"{sec_tag.upper()} — {pretty}",
-                               npz_key, npz_key)
-                except Exception:
-                    pass
+            npz_a    = f"sp_{pkey}_a"
+            npz_b    = f"sp_{pkey}_b"
+            npz_diff = f"sp_{pkey}_diff"
+            _add(npz_a,    pa_panel["a"])
+            _add(npz_b,    pb_panel["b"])
+            _add(npz_diff, pa_panel["diff"])
+            _add_options_entry(sec_name, "Maps",
+                               {"Image A":     npz_a,
+                                "Image B":     npz_b,
+                                "Diff (A−B)": npz_diff})
 
         # ── Catalog JSON ──────────────────────────────────────────────────────
         catalog = {
@@ -1205,25 +1256,8 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         all_vals = [p[2] for p in pts_a] + [p[2] for p in pts_b]
         vmin, vmax = float(np.percentile(all_vals, 1)), float(np.percentile(all_vals, 99))
 
-        def _make_map(pts, img_h, img_w):
-            if not pts:
-                return None
-            # Grid with same aspect ratio as image; long axis = PSF_SPATIAL_MAP_SIZE px
-            if img_w >= img_h:
-                gw, gh = PSF_SPATIAL_MAP_SIZE, max(1, int(PSF_SPATIAL_MAP_SIZE * img_h / img_w))
-            else:
-                gh, gw = PSF_SPATIAL_MAP_SIZE, max(1, int(PSF_SPATIAL_MAP_SIZE * img_w / img_h))
-            gx, gy = np.meshgrid(np.linspace(0, img_w, gw),
-                                  np.linspace(0, img_h, gh))
-            coords = np.array([(p[0], p[1]) for p in pts])
-            vals   = np.array([p[2] for p in pts])
-            m = _griddata(coords, vals, (gx, gy), method="linear")
-            nn = _griddata(coords, vals, (gx, gy), method="nearest")
-            m = np.where(np.isnan(m), nn, m)
-            return _gaussian_filter(m, sigma=PSF_SPATIAL_MAP_SMOOTH_SIGMA)
-
-        map_a = _make_map(pts_a, img_h_a, img_w_a)
-        map_b = _make_map(pts_b, img_h_b, img_w_b)
+        map_a = _psf_make_map(pts_a, img_h_a, img_w_a)
+        map_b = _psf_make_map(pts_b, img_h_b, img_w_b)
 
         fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
         fig.suptitle(title, fontsize=11)

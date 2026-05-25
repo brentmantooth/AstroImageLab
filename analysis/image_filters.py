@@ -44,6 +44,7 @@ class SpatialDetailAnalyzer:
             "wavelet_snr_b": {},
             "sigma_noise_a": None,
             "sigma_noise_b": None,
+            "panels": {},
         }
         figures: dict = {}
 
@@ -109,6 +110,7 @@ class SpatialDetailAnalyzer:
         log_figs = self._log_analysis(
             analysis_a, analysis_b, log_sigmas,
             image_a.label, image_b.label,
+            result,
             display_roi=display_roi,
             crosshair=crosshair_roi,
         )
@@ -225,6 +227,12 @@ class SpatialDetailAnalyzer:
             result["contrast_ratios_a"][ks] = cr_a
             result["contrast_ratios_b"][ks] = cr_b
 
+            result["panels"][f"std_{ks}px"] = {
+                "a":    std_a.astype(np.float32),
+                "b":    std_b.astype(np.float32),
+                "diff": (std_a - std_b).astype(np.float32),
+            }
+
             fig = self._plot_side_by_side(
                 self._crop_border(std_a, SECTION8_BORDER_CROP_FRACTION), self._crop_border(std_b, SECTION8_BORDER_CROP_FRACTION),
                 f"Local σ — kernel {ks}px — {label_a}",
@@ -283,12 +291,18 @@ class SpatialDetailAnalyzer:
 
     def _log_analysis(self, norm_a, norm_b, sigmas,
                        label_a, label_b,
+                       result: dict,
                        display_roi=None,
                        crosshair=None) -> dict:
         figures = {}
         for sigma in sigmas:
             log_a = np.abs(gaussian_laplace(norm_a, sigma=sigma))
             log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma))
+            result["panels"][f"log_{sigma}"] = {
+                "a":    log_a.astype(np.float32),
+                "b":    log_b.astype(np.float32),
+                "diff": (log_a - log_b).astype(np.float32),
+            }
             fig = self._plot_side_by_side(
                 self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
                 self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
@@ -349,6 +363,11 @@ class SpatialDetailAnalyzer:
             coeff_idx = levels + 1 - display_level
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
             rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels)
+            result["panels"][f"wavelet_{display_level}"] = {
+                "a":    rec_a.astype(np.float32),
+                "b":    rec_b.astype(np.float32),
+                "diff": (rec_a - rec_b).astype(np.float32),
+            }
             fig = self._plot_side_by_side(
                 self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION), self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
                 f"Wavelet level {display_level} — {label_a}",

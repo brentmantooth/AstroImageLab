@@ -36,13 +36,13 @@ def _make_splash_pixmap() -> QPixmap:
     p.drawLine(W // 2, 20, W // 2, H - 20)
 
     # Left panel label (A)
-    p.setFont(QFont("Segoe UI", 10))
+    p.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
     p.setPen(QColor(139, 191, 255))
-    p.drawText(20, 30, "A")
+    p.drawText(18, 44, "A")
 
     # Right panel label (B)
     p.setPen(QColor(255, 200, 120))
-    p.drawText(W - 30, 30, "B")
+    p.drawText(W - 34, 44, "B")
 
     # Left star — broad blurry radial glow (Image A, muted blue-white)
     grad_a = QRadialGradient(W // 4, H // 2, H // 3)
@@ -63,15 +63,15 @@ def _make_splash_pixmap() -> QPixmap:
 
     # Title
     p.setPen(QColor(240, 240, 240))
-    title_font = QFont("Segoe UI", 24, QFont.Weight.Bold)
+    title_font = QFont("Segoe UI", 26, QFont.Weight.Bold)
     p.setFont(title_font)
     p.drawText(pix.rect(), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                "Astro Image Lab")
 
     # Subtitle
     p.setPen(QColor(160, 170, 185))
-    p.setFont(QFont("Segoe UI", 10))
-    sub_rect = pix.rect().adjusted(0, H // 2 + 10, 0, 0)
+    p.setFont(QFont("Segoe UI", 12))
+    sub_rect = pix.rect().adjusted(0, H // 2 + 44, 0, 0)
     p.drawText(sub_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                "Astronomical Image Comparison & Analysis")
 

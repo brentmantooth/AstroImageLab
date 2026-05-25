@@ -281,5 +281,6 @@ class MainWindow(QMainWindow):
             "Astrophotography narrowband filter characterisation tool.<br><br>"
             "Metrics: PSF/MTF · Halo · Ghost · Edge · Power spectrum · "
             "Spatial detail (std / LoG / wavelet)<br><br>"
-            "Supports FITS and XISF input formats.",
+            "Supports FITS and XISF input formats.<br><br>"
+            "Developed by: Brent Mantooth (bmantooth@gmail.com)",
         )

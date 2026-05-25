@@ -43,10 +43,10 @@ from PyQt6.QtWidgets import (
 
 def _bilinear_sample(data: np.ndarray, y: float, x: float) -> float:
     h, w = data.shape[:2]
-    x0, y0 = int(x), int(y)
+    x0 = max(0, min(int(x), w - 1))
+    y0 = max(0, min(int(y), h - 1))
     x1 = min(x0 + 1, w - 1)
     y1 = min(y0 + 1, h - 1)
-    x0 = max(x0, 0);  y0 = max(y0, 0)
     fx = x - x0;      fy = y - y0
     return float(
         data[y0, x0] * (1 - fx) * (1 - fy) +
@@ -94,9 +94,8 @@ def _to_uint8_display(arr: np.ndarray) -> np.ndarray:
 
 @dataclass
 class _Entry:
-    name:  str
-    key_a: str
-    key_b: str
+    name:    str
+    options: dict[str, str]   # display_label → npz_key; ordered
 
 
 @dataclass
@@ -115,11 +114,23 @@ def _load_inspector_data(npz: "np.lib.npyio.NpzFile") -> _InspectorData:
         label_b=cat.get("label_b", "Image B"),
         sim_label_ref=cat.get("sim_label_ref", ""),
     )
+    npz_keys = set(npz.files)
     for section, entries in cat.get("sections", {}).items():
-        data.sections[section] = [
-            _Entry(name=e["name"], key_a=e["key_a"], key_b=e["key_b"])
-            for e in entries
-        ]
+        parsed = []
+        for e in entries:
+            # Support both new {options: {...}} and legacy {key_a, key_b} formats
+            if "options" in e:
+                opts = {k: v for k, v in e["options"].items() if v in npz_keys}
+            else:
+                opts = {}
+                if e.get("key_a") in npz_keys:
+                    opts["Image A"] = e["key_a"]
+                if e.get("key_b") in npz_keys:
+                    opts["Image B"] = e["key_b"]
+            if opts:
+                parsed.append(_Entry(name=e["name"], options=opts))
+        if parsed:
+            data.sections[section] = parsed
     return data
 
 
@@ -202,6 +213,11 @@ class InspectorImageCanvas(QWidget):
         self._reveal = max(0.01, min(0.99, frac))
         if self._mode == "slider":
             self._redraw()
+
+    def set_labels(self, la: str, lb: str) -> None:
+        self._label_a = la
+        self._label_b = lb
+        self._redraw()
 
     def clear_line(self) -> None:
         self._state = "idle"
@@ -451,13 +467,23 @@ class ReportInspector(QMainWindow):
 
         top_row.addWidget(QLabel("Section:"))
         self._section_combo = QComboBox()
-        self._section_combo.setMinimumWidth(180)
+        self._section_combo.setMinimumWidth(200)
         top_row.addWidget(self._section_combo)
 
-        top_row.addWidget(QLabel("Image:"))
-        self._image_combo = QComboBox()
-        self._image_combo.setMinimumWidth(220)
-        top_row.addWidget(self._image_combo)
+        top_row.addWidget(QLabel("Image set:"))
+        self._image_set_combo = QComboBox()
+        self._image_set_combo.setMinimumWidth(160)
+        top_row.addWidget(self._image_set_combo)
+
+        top_row.addWidget(QLabel("Left:"))
+        self._left_combo = QComboBox()
+        self._left_combo.setMinimumWidth(130)
+        top_row.addWidget(self._left_combo)
+
+        top_row.addWidget(QLabel("Right:"))
+        self._right_combo = QComboBox()
+        self._right_combo.setMinimumWidth(130)
+        top_row.addWidget(self._right_combo)
 
         top_row.addStretch()
         root.addLayout(top_row)
@@ -489,7 +515,9 @@ class ReportInspector(QMainWindow):
         # ── Signal wiring ───────────────────────────────────────────────
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self._section_combo.currentIndexChanged.connect(self._on_section_changed)
-        self._image_combo.currentIndexChanged.connect(self._on_image_changed)
+        self._image_set_combo.currentIndexChanged.connect(self._on_image_set_changed)
+        self._left_combo.currentIndexChanged.connect(self._on_left_changed)
+        self._right_combo.currentIndexChanged.connect(self._on_right_changed)
         self._reveal_slider.valueChanged.connect(self._on_reveal_slider_changed)
         self._image_canvas.line_updated.connect(self._on_line_updated)
         self._image_canvas.reveal_changed.connect(self._on_reveal_changed)
@@ -505,13 +533,6 @@ class ReportInspector(QMainWindow):
             self._section_combo.addItem(section)
         self._section_combo.blockSignals(False)
 
-    def _populate_image_combo(self, section: str) -> None:
-        self._image_combo.blockSignals(True)
-        self._image_combo.clear()
-        for entry in self._data.sections.get(section, []):
-            self._image_combo.addItem(entry.name)
-        self._image_combo.blockSignals(False)
-
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
@@ -526,11 +547,37 @@ class ReportInspector(QMainWindow):
 
     def _on_section_changed(self, idx: int) -> None:
         section = self._section_combo.currentText()
-        self._populate_image_combo(section)
-        self._load_current_entry()
+        entries = self._data.sections.get(section, [])
+        self._image_set_combo.blockSignals(True)
+        self._image_set_combo.clear()
+        for entry in entries:
+            self._image_set_combo.addItem(entry.name)
+        self._image_set_combo.blockSignals(False)
+        self._on_image_set_changed(0)
 
-    def _on_image_changed(self, idx: int) -> None:
-        self._load_current_entry()
+    def _on_image_set_changed(self, idx: int) -> None:
+        section = self._section_combo.currentText()
+        entries = self._data.sections.get(section, [])
+        if idx < 0 or idx >= len(entries):
+            return
+        option_labels = list(entries[idx].options.keys())
+        self._left_combo.blockSignals(True)
+        self._right_combo.blockSignals(True)
+        self._left_combo.clear()
+        self._right_combo.clear()
+        self._left_combo.addItems(option_labels)
+        self._right_combo.addItems(option_labels)
+        if len(option_labels) >= 2:
+            self._right_combo.setCurrentIndex(1)
+        self._left_combo.blockSignals(False)
+        self._right_combo.blockSignals(False)
+        self._load_current_panels()
+
+    def _on_left_changed(self, idx: int) -> None:
+        self._load_current_panels()
+
+    def _on_right_changed(self, idx: int) -> None:
+        self._load_current_panels()
 
     def _on_reveal_slider_changed(self, val: int) -> None:
         self._reveal_pct_label.setText(f"{val} %")
@@ -547,44 +594,63 @@ class ReportInspector(QMainWindow):
             self._profile_canvas.clear()
             return
         dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1)
-        dist_b, prof_b = _sample_line(self._current_arr_b, p0, p1)
+        # Scale line coordinates to the right panel's pixel space if sizes differ.
+        # p0/p1 are in the left panel's (arr_a) pixel coordinate system.
+        ha, wa = self._current_arr_a.shape[:2]
+        hb, wb = self._current_arr_b.shape[:2]
+        if (ha, wa) != (hb, wb):
+            p0b = (p0[0] * wb / wa, p0[1] * hb / ha)
+            p1b = (p1[0] * wb / wa, p1[1] * hb / ha)
+        else:
+            p0b, p1b = p0, p1
+        dist_b, prof_b = _sample_line(self._current_arr_b, p0b, p1b)
         self._profile_canvas.update_profiles(
             dist_a, prof_a, dist_b, prof_b,
-            self._data.label_a, self._data.label_b)
+            self._left_combo.currentText(),
+            self._right_combo.currentText())
 
     # ------------------------------------------------------------------
-    # Entry loading
+    # Panel loading
     # ------------------------------------------------------------------
 
-    def _load_current_entry(self) -> None:
+    def _load_current_panels(self) -> None:
         section = self._section_combo.currentText()
-        img_idx = self._image_combo.currentIndex()
+        img_set_idx = self._image_set_combo.currentIndex()
         entries = self._data.sections.get(section, [])
-        if img_idx < 0 or img_idx >= len(entries):
+        if img_set_idx < 0 or img_set_idx >= len(entries):
             return
-        entry = entries[img_idx]
+        entry = entries[img_set_idx]
 
-        raw_a = _get_array(self._npz, entry.key_a)
-        raw_b = _get_array(self._npz, entry.key_b)
-        if raw_a is None or raw_b is None:
+        left_label  = self._left_combo.currentText()
+        right_label = self._right_combo.currentText()
+        if not left_label or not right_label:
+            return
+        key_left  = entry.options.get(left_label)
+        key_right = entry.options.get(right_label)
+        if key_left is None or key_right is None:
             return
 
-        arr_a = _prepare_for_display(raw_a)
-        arr_b = _prepare_for_display(raw_b)
+        raw_left  = _get_array(self._npz, key_left)
+        raw_right = _get_array(self._npz, key_right)
+        if raw_left is None or raw_right is None:
+            return
+
+        arr_left  = _prepare_for_display(raw_left)
+        arr_right = _prepare_for_display(raw_right)
 
         old_shape = self._current_shape
-        new_shape = arr_a.shape[:2]
+        new_shape = arr_left.shape[:2]
         keep_line = (old_shape is not None and old_shape == new_shape)
 
-        # Float32 arrays used for cross-section (normalized to [0,1])
-        self._current_arr_a = raw_a.astype(np.float32)
-        self._current_arr_b = raw_b.astype(np.float32)
+        self._current_arr_a = raw_left.astype(np.float32)
+        self._current_arr_b = raw_right.astype(np.float32)
         if self._current_arr_a.max() > 1.5:
             self._current_arr_a /= 255.0
         if self._current_arr_b.max() > 1.5:
             self._current_arr_b /= 255.0
         self._current_shape = new_shape
 
-        self._image_canvas.load_entry(arr_a, arr_b, keep_line=keep_line)
+        self._image_canvas.set_labels(left_label, right_label)
+        self._image_canvas.load_entry(arr_left, arr_right, keep_line=keep_line)
         if not keep_line:
             self._profile_canvas.clear()
