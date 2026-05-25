@@ -14,7 +14,8 @@ from photutils.psf import EPSFBuilder, extract_stars
 
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
-from core.models import SEEING_WARN_FWHM_ARCS, PSF_BETA_MIN, PSF_BETA_MAX, PSF_FWHM_CLIP_NSIGMA
+from core.models import (SEEING_WARN_FWHM_ARCS, PSF_BETA_MIN, PSF_BETA_MAX, PSF_FWHM_CLIP_NSIGMA,
+                          ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC)
 from analysis.star_catalog import StarCatalogBuilder
 
 CUTOUT_SIZE = 25   # pixels per side for per-star cutouts
@@ -88,8 +89,9 @@ class PSFAnalyzer:
 
         # Ellipticity + per-star eccentricity from image moments — use clean_psf_stars
         ell, pa, ell_per_star = self._measure_ellipticity(bgsub, clean_psf_stars)
-        ecc_by_pos = {(s["x"], s["y"]): s["eccentricity"] for s in ell_per_star}
-        ell_by_pos  = {(s["x"], s["y"]): s["ellipticity"]  for s in ell_per_star}
+        ecc_by_pos    = {(s["x"], s["y"]): s["eccentricity"]  for s in ell_per_star}
+        ell_by_pos    = {(s["x"], s["y"]): s["ellipticity"]   for s in ell_per_star}
+        orient_by_pos = {(s["x"], s["y"]): s["orientation"]   for s in ell_per_star}
 
         ecc_values = [s["eccentricity"] for s in ell_per_star]
         ell_values = [s["ellipticity"]  for s in ell_per_star]
@@ -116,6 +118,7 @@ class PSFAnalyzer:
                     "beta":        f["alpha"],
                     "eccentricity": ecc_by_pos.get((f["x"], f["y"])),
                     "ellipticity":  ell_by_pos.get((f["x"], f["y"])),
+                    "orientation":  orient_by_pos.get((f["x"], f["y"])),  # radians, photutils convention
                 }
                 for f in moffat_fits
             ],
@@ -128,6 +131,9 @@ class PSFAnalyzer:
             float(np.median(ecc_values)) if ecc_values else None
         )
         result["eccentricity_mad"] = ecc_mad
+
+        img_h, img_w = bgsub.shape
+        result["aberration"] = self._aberration_analysis(result["star_data"], img_h, img_w)
 
         # Empirical PSF and MTF — use clean_psf_stars (same set as metric statistics)
         epsf, freq, mtf = self._build_epsf_and_mtf(image, clean_psf_stars, median_fwhm)
@@ -211,6 +217,108 @@ class PSFAnalyzer:
         return [f for f in fits if abs(f["fwhm"] - med) <= PSF_FWHM_CLIP_NSIGMA * m]
 
     # ------------------------------------------------------------------
+    # Field aberration analysis
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _aberration_analysis(stars: list[dict], img_h: int, img_w: int) -> dict:
+        """Compute per-field aberration indices from per-star orientation + eccentricity data.
+
+        Returns a dict with scalar scores and per-star arrays for plotting.
+        Returns a warning key instead when fewer than ABERRATION_MIN_STARS stars
+        have valid orientation measurements.
+        """
+        from scipy.stats import circstd
+
+        stars_ok = [s for s in stars
+                    if s.get("orientation") is not None
+                    and s.get("eccentricity") is not None
+                    and s.get("fwhm") is not None]
+        n = len(stars_ok)
+        if n < ABERRATION_MIN_STARS:
+            return {
+                "warning": (f"Only {n} stars with orientation data "
+                            f"(minimum {ABERRATION_MIN_STARS}); aberration analysis skipped."),
+                "n_stars_used": n,
+            }
+
+        xs    = np.array([s["x"]            for s in stars_ok], dtype=float)
+        ys    = np.array([s["y"]            for s in stars_ok], dtype=float)
+        ecc   = np.array([s["eccentricity"] for s in stars_ok], dtype=float)
+        theta = np.array([s["orientation"]  for s in stars_ok], dtype=float)
+        fwhm  = np.array([s["fwhm"]         for s in stars_ok], dtype=float)
+
+        cx, cy = img_w / 2.0, img_h / 2.0
+        ri  = np.hypot(xs - cx, ys - cy)
+        phi = np.arctan2(ys - cy, xs - cx)
+
+        # Radial/tangential decomposition of eccentricity
+        er = ecc * np.cos(2.0 * (theta - phi))  # positive = elongated away from centre
+        et = ecc * np.sin(2.0 * (theta - phi))  # positive = elongated tangentially CCW
+
+        # Coma index: Pearson r between |er| and radial distance
+        abs_er = np.abs(er)
+        if np.std(ri) > 0 and np.std(abs_er) > 0:
+            coma_index = float(np.corrcoef(ri, abs_er)[0, 1])
+        else:
+            coma_index = 0.0
+
+        # Radial elongation fraction: mean |er|/ecc for sufficiently elongated stars
+        mask_elong = ecc > 0.05
+        radial_frac = float(np.mean(abs_er[mask_elong] / ecc[mask_elong])) if mask_elong.sum() > 0 else 0.0
+
+        # Collimation uniformity: circular std of orientation angles
+        # Use double-angle trick so π-periodicity is handled correctly
+        collimation_circstd_deg = float(np.degrees(circstd(2.0 * theta)) / 2.0)
+
+        # FWHM radial gradient: quadratic fit on normalised radius
+        r_norm = ri / max(float(ri.max()), 1.0)
+        coeffs = np.polyfit(r_norm, fwhm, 2)
+        fwhm_radial_linear    = float(coeffs[1])   # linear coefficient
+        fwhm_radial_quadratic = float(coeffs[0])   # quadratic coefficient
+
+        # Corner/centre FWHM ratio
+        r_frac = ri / max(float(ri.max()), 1.0)
+        outer_mask = r_frac >= (1.0 - ABERRATION_OUTER_RADIUS_FRAC)
+        inner_mask = r_frac <= ABERRATION_OUTER_RADIUS_FRAC
+        corner_centre_ratio = None
+        if outer_mask.sum() >= 3 and inner_mask.sum() >= 3:
+            corner_centre_ratio = float(np.median(fwhm[outer_mask]) / np.median(fwhm[inner_mask]))
+
+        # Quadrant mean orientations (degrees) for astigmatism hint
+        quads = {
+            "NW": (xs < cx) & (ys < cy),
+            "NE": (xs >= cx) & (ys < cy),
+            "SW": (xs < cx) & (ys >= cy),
+            "SE": (xs >= cx) & (ys >= cy),
+        }
+        quad_mean_deg: dict[str, float] = {}
+        for qname, qmask in quads.items():
+            if qmask.sum() >= 3:
+                t = theta[qmask]
+                mean_rad = float(np.arctan2(np.mean(np.sin(2.0 * t)),
+                                             np.mean(np.cos(2.0 * t))) / 2.0)
+                quad_mean_deg[qname] = float(np.degrees(mean_rad))
+
+        return {
+            "n_stars_used":             n,
+            "coma_index":               coma_index,
+            "radial_frac":              radial_frac,
+            "collimation_circstd_deg":  collimation_circstd_deg,
+            "fwhm_radial_linear":       fwhm_radial_linear,
+            "fwhm_radial_quadratic":    fwhm_radial_quadratic,
+            "corner_centre_ratio":      corner_centre_ratio,
+            "quad_mean_deg":            quad_mean_deg,
+            # Per-star arrays for plotting (stored as Python lists for JSON-ability)
+            "star_xs":    xs.tolist(),
+            "star_ys":    ys.tolist(),
+            "star_ecc":   ecc.tolist(),
+            "star_theta": theta.tolist(),
+            "star_er":    er.tolist(),
+            "star_et":    et.tolist(),
+        }
+
+    # ------------------------------------------------------------------
     # Ellipticity via image moments
     # ------------------------------------------------------------------
 
@@ -244,6 +352,7 @@ class PSFAnalyzer:
                     "x": xc, "y": yc,
                     "eccentricity": float(props.eccentricity.value),
                     "ellipticity":  float(props.ellipticity.value),
+                    "orientation":  float(props.orientation.value),  # radians
                 })
             except Exception:
                 continue

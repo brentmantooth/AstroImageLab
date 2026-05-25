@@ -34,7 +34,7 @@ def make_frame(size: int) -> Image.Image:
     cy = size / 2.0
 
     # Left half — Image A: broad, muted blue-white star
-    sigma_a = size * 0.14
+    sigma_a = size * 0.10
     blob_a = _gaussian(size, cx * 0.58, cy, sigma_a, peak=1.0)
     # Muted blue-white colour (#8BBFFF) at 45% brightness
     img[:, :, 0] += blob_a * 0.396 * 255  # R
@@ -42,7 +42,7 @@ def make_frame(size: int) -> Image.Image:
     img[:, :, 2] += blob_a * 0.710 * 255  # B
 
     # Right half — Image B: tight, bright warm-white star
-    sigma_b = size * 0.045
+    sigma_b = size * 0.055
     blob_b = _gaussian(size, cx * 1.42, cy, sigma_b, peak=1.0)
     # Warm white (#FFFCE0) at 95% brightness
     img[:, :, 0] += blob_b * 1.000 * 255  # R

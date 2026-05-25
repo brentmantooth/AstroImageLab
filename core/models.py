@@ -38,8 +38,10 @@ PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentrici
 PSF_SPATIAL_MAP_SMOOTH_SIGMA = 2.0   # Gaussian smoothing sigma (px) applied to spatial maps before display
 LABEL_MAX_LEN = 30   # characters; filenames longer than this are replaced with "Image A"/"Image B" in all plots and legends
 SPLASH_DURATION_MS = 4000   # ms; minimum time the splash screen stays visible on startup
-REF_SEEING_ARCSEC = 2.0     # arcsec; reference "good seeing" FWHM for the benchmark PSF in PSF/MTF reports
+REF_SEEING_ARCSEC = 3.0     # arcsec; reference "good seeing" FWHM for the benchmark PSF in PSF/MTF reports
 REF_SEEING_BETA   = 4.77    # Moffat β for Kolmogorov atmospheric turbulence (used for reference PSF)
+ABERRATION_MIN_STARS = 15          # minimum stars with orientation data required for aberration analysis
+ABERRATION_OUTER_RADIUS_FRAC = 0.30   # fractional radius threshold separating inner/outer field zones
 
 
 # === DATA CLASSES ===

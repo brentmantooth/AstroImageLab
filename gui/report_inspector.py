@@ -201,6 +201,9 @@ class InspectorImageCanvas(QWidget):
             self._state = "idle"
             self._p0 = self._p1 = None
             self.line_updated.emit(None, None)
+        elif self._p0 is not None and self._p1 is not None:
+            # Arrays replaced but line retained — re-emit so profile resamples from new data
+            self.line_updated.emit(self._p0, self._p1)
         self._rebuild_axes()
         self._redraw()
 
@@ -492,11 +495,20 @@ class ReportInspector(QMainWindow):
         self._slider_row_widget = QWidget()
         slider_layout = QHBoxLayout(self._slider_row_widget)
         slider_layout.setContentsMargins(0, 0, 0, 0)
-        slider_layout.addWidget(QLabel("Reveal A ←"))
+        slider_layout.setSpacing(4)
+        # Left spacer — dynamically sized to match the axes left margin so the
+        # slider track lines up with the left edge of the displayed image.
+        self._slider_left_spacer = QWidget()
+        self._slider_left_spacer.setFixedWidth(0)
+        slider_layout.addWidget(self._slider_left_spacer)
         self._reveal_slider = QSlider(Qt.Orientation.Horizontal)
         self._reveal_slider.setRange(0, 100)
         self._reveal_slider.setValue(50)
         slider_layout.addWidget(self._reveal_slider, stretch=1)
+        # Right spacer — mirrors the axes right margin.
+        self._slider_right_spacer = QWidget()
+        self._slider_right_spacer.setFixedWidth(0)
+        slider_layout.addWidget(self._slider_right_spacer)
         self._reveal_pct_label = QLabel("50 %")
         self._reveal_pct_label.setFixedWidth(40)
         slider_layout.addWidget(self._reveal_pct_label)
@@ -521,6 +533,9 @@ class ReportInspector(QMainWindow):
         self._reveal_slider.valueChanged.connect(self._on_reveal_slider_changed)
         self._image_canvas.line_updated.connect(self._on_line_updated)
         self._image_canvas.reveal_changed.connect(self._on_reveal_changed)
+        # Sync slider margins after every matplotlib draw so spacers stay aligned
+        # with the axes bounds (which shift slightly on resize or content change).
+        self._image_canvas._canvas.mpl_connect("draw_event", self._on_canvas_drawn)
 
     # ------------------------------------------------------------------
     # Combo population
@@ -544,6 +559,25 @@ class ReportInspector(QMainWindow):
         else:
             self._slider_row_widget.setVisible(True)
             self._image_canvas.set_mode("slider")
+            self._sync_slider_margins()
+
+    def _on_canvas_drawn(self, event) -> None:
+        if self._mode_combo.currentIndex() == 1:
+            self._sync_slider_margins()
+
+    def _sync_slider_margins(self) -> None:
+        """Resize the slider's left/right spacers to align its track with the image axes."""
+        ax = self._image_canvas._ax_a
+        if ax is None:
+            return
+        pos = ax.get_position()   # axes bbox as fractions of the figure [0, 1]
+        w = self._image_canvas._canvas.width()
+        new_left  = max(0, int(pos.x0 * w))
+        new_right = max(0, int((1.0 - pos.x1) * w))
+        if (self._slider_left_spacer.width()  != new_left or
+                self._slider_right_spacer.width() != new_right):
+            self._slider_left_spacer.setFixedWidth(new_left)
+            self._slider_right_spacer.setFixedWidth(new_right)
 
     def _on_section_changed(self, idx: int) -> None:
         section = self._section_combo.currentText()

@@ -16,7 +16,10 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX, PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX, LABEL_MAX_LEN, REF_SEEING_ARCSEC, REF_SEEING_BETA
+from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX,
+                          PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX,
+                          LABEL_MAX_LEN, REF_SEEING_ARCSEC, REF_SEEING_BETA,
+                          ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC)
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -640,6 +643,18 @@ class ReportBuilder:
             _add_options_entry("PSF / MTF", "Eccentricity map",
                                {"Image A": "psf_ecc_map_a", "Image B": "psf_ecc_map_b"})
 
+        ab_a = pa.get("aberration", {})
+        ab_b = pb.get("aberration", {})
+        er_pts_a = list(zip(ab_a.get("star_xs", []), ab_a.get("star_ys", []), ab_a.get("star_er", [])))
+        er_pts_b = list(zip(ab_b.get("star_xs", []), ab_b.get("star_ys", []), ab_b.get("star_er", [])))
+        er_map_a = _psf_make_map(er_pts_a, img_h_a, img_w_a)
+        er_map_b = _psf_make_map(er_pts_b, img_h_b, img_w_b)
+        if er_map_a is not None and er_map_b is not None:
+            _add("psf_er_map_a", er_map_a)
+            _add("psf_er_map_b", er_map_b)
+            _add_options_entry("PSF / MTF", "Radial elongation map",
+                               {"Image A": "psf_er_map_a", "Image B": "psf_er_map_b"})
+
         # ── PSF Simulation ────────────────────────────────────────────────────
         sim = self._plot_psf_simulation(result_a, result_b)
         sim_ref_label = ""
@@ -1239,7 +1254,219 @@ similar between filters; a large difference suggests filter tilt, substrate
 wedge, or different seeing conditions between sessions. If the ePSFs show
 the same asymmetric tail in both images, the cause is common to both (optics
 or tracking) and does not reflect a filter quality difference &mdash; what matters
-for comparison is whether the tail is <em>more pronounced</em> in one image.</div>"""
+for comparison is whether the tail is <em>more pronounced</em> in one image.</div>""" + self._section_psf_aberration(ra, rb, img_a, img_b)
+
+    def _section_psf_aberration(self, ra: AnalysisResult, rb: AnalysisResult,
+                                  img_a: AstroImage, img_b: AstroImage) -> str:
+        """Aberration analysis subsection appended to the PSF section."""
+        pa = ra.psf_metrics or {}
+        pb = rb.psf_metrics or {}
+        ab_a = pa.get("aberration", {})
+        ab_b = pb.get("aberration", {})
+
+        if not ab_a and not ab_b:
+            return ""
+
+        warn_a = ab_a.get("warning", "")
+        warn_b = ab_b.get("warning", "")
+        n_a = ab_a.get("n_stars_used", 0)
+        n_b = ab_b.get("n_stars_used", 0)
+
+        html = "\n<h3>Field Aberration Analysis</h3>\n"
+
+        if warn_a and warn_b:
+            return (html + f'<div class="info-box"><strong>Insufficient star coverage for '
+                    f'aberration analysis.</strong><br>{warn_a}<br>{warn_b}</div>')
+
+        def _score_td(val, lo, hi, higher_is_bad: bool = True, fmt: str = ".3f") -> str:
+            if val is None:
+                return "<td>—</td>"
+            if higher_is_bad:
+                bg = ("#c8e6c9" if val < lo else "#fff9c4" if val < hi else "#ffcdd2")
+            else:
+                bg = ("#c8e6c9" if val > hi else "#fff9c4" if val > lo else "#ffcdd2")
+            return f'<td style="background:{bg}">{val:{fmt}}</td>'
+
+        ci_a  = ab_a.get("coma_index")
+        ci_b  = ab_b.get("coma_index")
+        rf_a  = ab_a.get("radial_frac")
+        rf_b  = ab_b.get("radial_frac")
+        cs_a  = ab_a.get("collimation_circstd_deg")
+        cs_b  = ab_b.get("collimation_circstd_deg")
+        cc_a  = ab_a.get("corner_centre_ratio")
+        cc_b  = ab_b.get("corner_centre_ratio")
+
+        na_lbl = f"{ra.label} ({n_a} stars)"
+        nb_lbl = f"{rb.label} ({n_b} stars)"
+        html += f"""<table>
+  <tr><th>Metric</th><th>{na_lbl}</th><th>{nb_lbl}</th></tr>
+  <tr><td>Coma index (Pearson r, |e<sub>r</sub>| vs radius)</td>{_score_td(ci_a,0.3,0.6)}{_score_td(ci_b,0.3,0.6)}</tr>
+  <tr><td>Radial elongation fraction</td>{_score_td(rf_a,0.3,0.5)}{_score_td(rf_b,0.3,0.5)}</tr>
+  <tr><td>Orientation circular std (°)</td>{_score_td(cs_a,20.0,45.0,higher_is_bad=False,fmt=".1f")}{_score_td(cs_b,20.0,45.0,higher_is_bad=False,fmt=".1f")}</tr>
+  <tr><td>Corner/centre FWHM ratio</td>{_score_td(cc_a,1.2,1.5,fmt=".3f")}{_score_td(cc_b,1.2,1.5,fmt=".3f")}</tr>
+</table>
+<p class="footnote">Colour coding — green: no significant signal; yellow: mild; red: significant. Thresholds are heuristic. Lower orientation circular std = more uniform elongation direction. All findings should be read as &ldquo;patterns consistent with&rdquo;, not definitive diagnoses.</p>\n"""
+
+        if warn_a:
+            html += f'<p class="footnote"><em>{ra.label}: {warn_a}</em></p>\n'
+        if warn_b:
+            html += f'<p class="footnote"><em>{rb.label}: {warn_b}</em></p>\n'
+
+        def _interpret(ab: dict, label: str) -> str:
+            ci = ab.get("coma_index")
+            rf = ab.get("radial_frac")
+            cs = ab.get("collimation_circstd_deg")
+            cc = ab.get("corner_centre_ratio")
+            if ci is None:
+                return ""
+            findings = []
+            if ci is not None and rf is not None and ci > 0.5 and rf > 0.5:
+                findings.append(
+                    "pattern consistent with <strong>off-axis coma</strong> "
+                    "(elongation grows with field radius and points radially outward)")
+            if cs is not None and rf is not None and cs < 20.0 and rf > 0.4:
+                findings.append(
+                    "pattern consistent with <strong>collimation error / tilt coma</strong> "
+                    "(stars elongated in a near-uniform direction across the field)")
+            if cc is not None and cc > 1.3 and (ci is None or ci < 0.3):
+                findings.append(
+                    "pattern consistent with <strong>field curvature or defocus</strong> "
+                    "(FWHM grows toward corners without radial elongation direction)")
+            if not findings:
+                return f"<p><strong>{label}:</strong> No dominant aberration signature detected.</p>\n"
+            bullets = "".join(f"<li>{f}</li>" for f in findings)
+            return (f"<p><strong>{label}:</strong></p>"
+                    f"<ul style='margin:0.3em 0 0.8em 1.2em;padding:0;'>{bullets}</ul>\n")
+
+        interp_a = _interpret(ab_a, ra.label)
+        interp_b = _interpret(ab_b, rb.label)
+        if interp_a or interp_b:
+            html += "<h4>Interpretation</h4>\n" + interp_a + interp_b
+
+        img_h_a, img_w_a = img_a.data.shape[:2]
+        img_h_b, img_w_b = img_b.data.shape[:2]
+
+        vec_fig = self._plot_aberration_vector_field(
+            ab_a, ab_b, ra.label, rb.label, img_h_a, img_w_a, img_h_b, img_w_b)
+        er_fig = self._plot_radial_elongation_map(
+            ab_a, ab_b, ra.label, rb.label, img_h_a, img_w_a, img_h_b, img_w_b)
+
+        if vec_fig:
+            html += _img_tag(vec_fig, "Elongation vector field")
+            html += ('<p class="caption">Per-star elongation vector field. '
+                     'Each line shows the orientation and magnitude of eccentricity. '
+                     'A uniform direction across the field suggests collimation error; '
+                     'elongation pointing away from the field centre is consistent with coma.</p>\n')
+        if er_fig:
+            html += _img_tag(er_fig, "Radial elongation component map")
+            html += ('<p class="caption">Smoothed radial elongation component '
+                     'e<sub>r</sub>&nbsp;=&nbsp;e&thinsp;&middot;&thinsp;cos(2(&theta;&minus;&phi;)). '
+                     'Red: stars elongated radially outward from field centre (coma signature). '
+                     'Blue: tangentially elongated. Near zero: circular or mixed orientation.</p>\n')
+
+        html += f"""<div class="info-box">
+<strong>Limitations of single-image aberration analysis:</strong>
+<ul style="margin:0.4em 0 0 1.2em;padding:0;">
+  <li><strong>Seeing vs optics:</strong> Atmospheric seeing produces random per-frame elongation.
+      Optical aberrations are repeatable across nights. A single image cannot separate the two
+      &mdash; compare results from multiple sessions to identify genuine optical signatures.</li>
+  <li><strong>No absolute wavefront error:</strong> Converting these indices to nm of wavefront
+      error requires focal ratio and aperture, which are not reliably encoded in image headers.
+      All scores are relative/comparative only.</li>
+  <li><strong>Field curvature / defocus degeneracy:</strong> Both produce isotropic FWHM growth
+      toward the field corners and cannot be distinguished without a through-focus sequence.</li>
+  <li><strong>Star count sensitivity:</strong> Scores are unreliable with fewer than
+      {ABERRATION_MIN_STARS} well-distributed stars with valid orientation measurements.</li>
+  <li><strong>Monochromatic:</strong> Chromatic aberration cannot be detected from a single-filter
+      image.</li>
+</ul>
+</div>\n"""
+        return html
+
+    @staticmethod
+    def _plot_aberration_vector_field(
+            ab_a: dict, ab_b: dict, label_a: str, label_b: str,
+            img_h_a: int, img_w_a: int, img_h_b: int, img_w_b: int
+    ) -> "plt.Figure | None":
+        from matplotlib.collections import LineCollection
+        xs_a, ys_a = ab_a.get("star_xs", []), ab_a.get("star_ys", [])
+        xs_b, ys_b = ab_b.get("star_xs", []), ab_b.get("star_ys", [])
+        if not xs_a and not xs_b:
+            return None
+
+        fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+        fig.suptitle("Elongation vector field  (line length ∝ eccentricity, direction = orientation)",
+                     fontsize=11)
+
+        for ax, ab, img_h, img_w, lbl in [
+            (ax_a, ab_a, img_h_a, img_w_a, label_a),
+            (ax_b, ab_b, img_h_b, img_w_b, label_b),
+        ]:
+            xs    = ab.get("star_xs", [])
+            ys    = ab.get("star_ys", [])
+            ecc   = ab.get("star_ecc", [])
+            theta = ab.get("star_theta", [])
+            if xs:
+                xs_arr    = np.array(xs)
+                ys_arr    = np.array(ys)
+                ecc_arr   = np.array(ecc)
+                theta_arr = np.array(theta)
+                scale = max(img_w, img_h) * 0.04   # px per unit eccentricity
+                dx = ecc_arr * np.cos(theta_arr) * scale
+                dy = ecc_arr * np.sin(theta_arr) * scale
+                segs = [[(xi - dxi, yi - dyi), (xi + dxi, yi + dyi)]
+                        for xi, yi, dxi, dyi in zip(xs_arr, ys_arr, dx, dy)]
+                lc = LineCollection(segs, array=ecc_arr, cmap="plasma",
+                                    linewidths=1.2, alpha=0.85,
+                                    norm=mcolors.Normalize(vmin=0, vmax=1))
+                ax.add_collection(lc)
+                fig.colorbar(lc, ax=ax, label="Eccentricity", fraction=0.046, pad=0.04)
+            ax.set_xlim(0, img_w)
+            ax.set_ylim(img_h, 0)
+            ax.set_title(lbl, fontsize=10)
+            ax.set_xlabel("x (px)")
+            ax.set_ylabel("y (px)")
+            ax.set_aspect("equal")
+        return fig
+
+    @staticmethod
+    def _plot_radial_elongation_map(
+            ab_a: dict, ab_b: dict, label_a: str, label_b: str,
+            img_h_a: int, img_w_a: int, img_h_b: int, img_w_b: int
+    ) -> "plt.Figure | None":
+        xs_a, ys_a, er_a = ab_a.get("star_xs",[]), ab_a.get("star_ys",[]), ab_a.get("star_er",[])
+        xs_b, ys_b, er_b = ab_b.get("star_xs",[]), ab_b.get("star_ys",[]), ab_b.get("star_er",[])
+        if not xs_a and not xs_b:
+            return None
+
+        pts_a = list(zip(xs_a, ys_a, er_a))
+        pts_b = list(zip(xs_b, ys_b, er_b))
+        map_a = _psf_make_map(pts_a, img_h_a, img_w_a)
+        map_b = _psf_make_map(pts_b, img_h_b, img_w_b)
+
+        all_er = er_a + er_b
+        vlim = max(float(np.percentile(np.abs(all_er), 98)) if all_er else 0.0, 0.05)
+
+        fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+        fig.suptitle("Radial elongation component  (er = e · cos(2·(θ − φ)))", fontsize=11)
+
+        for ax, m, xs, ys, er, img_h, img_w, lbl in [
+            (ax_a, map_a, xs_a, ys_a, er_a, img_h_a, img_w_a, label_a),
+            (ax_b, map_b, xs_b, ys_b, er_b, img_h_b, img_w_b, label_b),
+        ]:
+            if m is not None:
+                im = ax.imshow(m, origin="upper", cmap="RdBu_r", vmin=-vlim, vmax=vlim,
+                               extent=[0, img_w, img_h, 0], aspect="equal",
+                               interpolation="bilinear")
+                fig.colorbar(im, ax=ax, label="er", fraction=0.046, pad=0.04)
+            if xs:
+                ax.scatter(xs, ys, c=er, cmap="RdBu_r",
+                           s=18, edgecolors="white", linewidths=0.5, zorder=3,
+                           norm=mcolors.Normalize(vmin=-vlim, vmax=vlim))
+            ax.set_title(lbl, fontsize=10)
+            ax.set_xlabel("x (px)")
+            ax.set_ylabel("y (px)")
+        return fig
 
     @staticmethod
     def _plot_psf_spatial_map(
