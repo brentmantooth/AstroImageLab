@@ -57,8 +57,13 @@ def _bilinear_sample(data: np.ndarray, y: float, x: float) -> float:
 
 
 def _sample_line(data: np.ndarray, p0: tuple, p1: tuple,
-                  n: int = 512) -> tuple[np.ndarray, np.ndarray]:
-    """Bilinear cross-section. Returns (distance_px, values normalized to [0,1])."""
+                  n: int = 512, normalize: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Bilinear cross-section.
+
+    Returns (distance_px, profile). When normalize=True each profile is divided
+    by its own peak so it maps to [0, 1]. When normalize=False the raw array
+    values are returned, keeping both profiles on a shared absolute scale.
+    """
     x0, y0 = p0
     x1, y1 = p1
     dist = float(np.hypot(x1 - x0, y1 - y0))
@@ -73,9 +78,10 @@ def _sample_line(data: np.ndarray, p0: tuple, p1: tuple,
                  0.0722 * fdata[:, :, 2])
     profile = np.array([_bilinear_sample(fdata, float(y), float(x))
                         for x, y in zip(xs, ys)], dtype=np.float32)
-    peak = float(profile.max())
-    if peak > 0:
-        profile /= peak
+    if normalize:
+        peak = float(profile.max())
+        if peak > 0:
+            profile /= peak
     return np.linspace(0.0, dist, n), profile
 
 
@@ -103,6 +109,8 @@ class _InspectorData:
     label_a: str
     label_b: str
     sim_label_ref: str
+    filename_a: str = ""
+    filename_b: str = ""
     sections: dict[str, list[_Entry]] = field(default_factory=dict)
 
 
@@ -113,6 +121,8 @@ def _load_inspector_data(npz: "np.lib.npyio.NpzFile") -> _InspectorData:
         label_a=cat.get("label_a", "Image A"),
         label_b=cat.get("label_b", "Image B"),
         sim_label_ref=cat.get("sim_label_ref", ""),
+        filename_a=cat.get("filename_a", ""),
+        filename_b=cat.get("filename_b", ""),
     )
     npz_keys = set(npz.files)
     for section, entries in cat.get("sections", {}).items():
@@ -399,12 +409,13 @@ class _ProfileCanvas(QWidget):
 
     def update_profiles(self, dist_a: np.ndarray, prof_a: np.ndarray,
                          dist_b: np.ndarray, prof_b: np.ndarray,
-                         label_a: str, label_b: str) -> None:
+                         label_a: str, label_b: str,
+                         normalized: bool = True) -> None:
         self._ax.cla()
         self._ax.plot(dist_a, prof_a, color="steelblue", lw=1.2, label=label_a)
         self._ax.plot(dist_b, prof_b, color="tomato",    lw=1.2, label=label_b)
         self._ax.set_xlabel("Distance (px)", fontsize=8)
-        self._ax.set_ylabel("Normalized intensity", fontsize=8)
+        self._ax.set_ylabel("Normalized intensity" if normalized else "Value", fontsize=8)
         self._ax.legend(fontsize=7, loc="upper right")
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
@@ -491,6 +502,17 @@ class ReportInspector(QMainWindow):
         top_row.addStretch()
         root.addLayout(top_row)
 
+        # ── Filename info row (unobtrusive) ────────────────────────────
+        fn_a = self._data.filename_a or self._data.label_a
+        fn_b = self._data.filename_b or self._data.label_b
+        if fn_a or fn_b:
+            fn_row = QHBoxLayout()
+            fn_lbl = QLabel(f"A: {fn_a}    │    B: {fn_b}")
+            fn_lbl.setStyleSheet("color: #888888; font-size: 8pt;")
+            fn_row.addWidget(fn_lbl)
+            fn_row.addStretch()
+            root.addLayout(fn_row)
+
         # ── Slider reveal row (hidden in side-by-side mode) ────────────
         self._slider_row_widget = QWidget()
         slider_layout = QHBoxLayout(self._slider_row_widget)
@@ -524,6 +546,19 @@ class ReportInspector(QMainWindow):
         self._profile_canvas = _ProfileCanvas(self)
         root.addWidget(self._profile_canvas)
 
+        # ── Profile options row ─────────────────────────────────────────
+        from PyQt6.QtWidgets import QCheckBox
+        prof_opts = QHBoxLayout()
+        self._normalize_check = QCheckBox("Normalize to peak")
+        self._normalize_check.setChecked(False)   # default: absolute values
+        self._normalize_check.setToolTip(
+            "When checked, each profile is divided by its own peak → [0, 1].\n"
+            "When unchecked, raw array values are shown on a shared scale,\n"
+            "preserving absolute differences between the two images.")
+        prof_opts.addWidget(self._normalize_check)
+        prof_opts.addStretch()
+        root.addLayout(prof_opts)
+
         # ── Signal wiring ───────────────────────────────────────────────
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self._section_combo.currentIndexChanged.connect(self._on_section_changed)
@@ -536,6 +571,7 @@ class ReportInspector(QMainWindow):
         # Sync slider margins after every matplotlib draw so spacers stay aligned
         # with the axes bounds (which shift slightly on resize or content change).
         self._image_canvas._canvas.mpl_connect("draw_event", self._on_canvas_drawn)
+        self._normalize_check.stateChanged.connect(self._on_normalize_changed)
 
     # ------------------------------------------------------------------
     # Combo population
@@ -627,7 +663,8 @@ class ReportInspector(QMainWindow):
         if p0 is None or self._current_arr_a is None:
             self._profile_canvas.clear()
             return
-        dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1)
+        normalized = self._normalize_check.isChecked()
+        dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1, normalize=normalized)
         # Scale line coordinates to the right panel's pixel space if sizes differ.
         # p0/p1 are in the left panel's (arr_a) pixel coordinate system.
         ha, wa = self._current_arr_a.shape[:2]
@@ -637,11 +674,18 @@ class ReportInspector(QMainWindow):
             p1b = (p1[0] * wb / wa, p1[1] * hb / ha)
         else:
             p0b, p1b = p0, p1
-        dist_b, prof_b = _sample_line(self._current_arr_b, p0b, p1b)
+        dist_b, prof_b = _sample_line(self._current_arr_b, p0b, p1b, normalize=normalized)
         self._profile_canvas.update_profiles(
             dist_a, prof_a, dist_b, prof_b,
             self._left_combo.currentText(),
-            self._right_combo.currentText())
+            self._right_combo.currentText(),
+            normalized=normalized)
+
+    def _on_normalize_changed(self, _state: int) -> None:
+        if self._image_canvas._p0 is not None and self._image_canvas._p1 is not None:
+            self._on_line_updated(self._image_canvas._p0, self._image_canvas._p1)
+        else:
+            self._profile_canvas.clear()
 
     # ------------------------------------------------------------------
     # Panel loading

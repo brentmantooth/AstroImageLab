@@ -272,34 +272,39 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
             "image": ([label_a] * len(va)) + ([label_b] * len(vb)),
         })
 
+        def _draw_boxwhisker(ax, vals_list):
+            for i, vals in enumerate(vals_list):
+                ax.boxplot(
+                    [vals], positions=[i], vert=False,
+                    widths=0.45, zorder=5,
+                    patch_artist=True,
+                    manage_ticks=False,
+                    boxprops=dict(facecolor="none", edgecolor="white", linewidth=1.2, alpha=0.8),
+                    medianprops=dict(color="magenta", linewidth=2.0, alpha=0.8),
+                    whiskerprops=dict(color="lightcyan", linewidth=1.2, alpha=0.8),
+                    capprops=dict(color="lightcyan", linewidth=1.2, alpha=0.8),
+                    flierprops=dict(marker="", visible=False),
+                )
+
         if n_max < 30:
             plot_types_used.add("strip")
             sns.stripplot(data=df, x="value", y="image",
                           order=[label_a, label_b], palette=palette,
                           size=3, jitter=True, ax=ax)
-            for i, vals in enumerate([va, vb]):
-                ax.plot([np.median(vals)], [i], "|", color="magenta",
-                        markersize=12, markeredgewidth=2, zorder=5)
+            _draw_boxwhisker(ax, [va, vb])
         elif n_max <= 250:
             plot_types_used.add("swarm")
             sns.swarmplot(data=df, x="value", y="image",
                           order=[label_a, label_b], palette=palette,
                           size=3, ax=ax)
-            for i, vals in enumerate([va, vb]):
-                ax.plot([np.median(vals)], [i], "|", color="magenta",
-                        markersize=12, markeredgewidth=2, zorder=5)
+            _draw_boxwhisker(ax, [va, vb])
         else:
             plot_types_used.add("violin")
-            # inner=None so we can draw quartile lines with distinct colors
+            # inner=None; box-whisker overlay provides quartile/median markers
             sns.violinplot(data=df, x="value", y="image",
                            order=[label_a, label_b], palette=palette,
                            inner=None, linewidth=0.8, ax=ax)
-            for i, vals in enumerate([va, vb]):
-                q1, med, q3 = np.percentile(vals, [25, 50, 75])
-                y_lo, y_hi = i - 0.4, i + 0.4
-                ax.plot([q1, q1], [y_lo, y_hi], color="cyan",    lw=1.2, zorder=5)
-                ax.plot([med, med], [y_lo, y_hi], color="magenta", lw=2.0, zorder=5)
-                ax.plot([q3, q3], [y_lo, y_hi], color="cyan",    lw=1.2, zorder=5)
+            _draw_boxwhisker(ax, [va, vb])
 
         if key in _IDEAL_REF:
             ax.axvline(_IDEAL_REF[key], color="red", linestyle="--",
@@ -316,25 +321,28 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
 
     # Build an adaptive caption describing only the plot type(s) actually rendered
     type_desc: list[str] = []
+    _bw_desc = (
+        "a <span style='color:white'><b>white box</b></span> spanning Q1–Q3 (IQR), "
+        "a <span style='color:magenta'><b>magenta centre line</b></span> at the median, and "
+        "<span style='color:lightcyan'><b>light-cyan whiskers</b></span> extending to "
+        "1.5&nbsp;&times;&nbsp;IQR — all rendered at 80&nbsp;% opacity on top of the distribution"
+    )
     if "strip" in plot_types_used:
         type_desc.append(
             "<b>strip plot</b> (N&nbsp;&lt;&nbsp;30): each dot is one star with random "
-            "y-jitter to reduce overlap; the <span style='color:magenta'><b>magenta&nbsp;|</b></span> "
-            "marks the median"
+            f"y-jitter to reduce overlap; {_bw_desc}"
         )
     if "swarm" in plot_types_used:
         type_desc.append(
             "<b>beeswarm / swarm plot</b> (30&nbsp;&le;&nbsp;N&nbsp;&le;&nbsp;250): dots are placed "
             "at their exact measured value with collision-avoidance spread in y so no two dots "
-            "overlap; the <span style='color:magenta'><b>magenta&nbsp;|</b></span> marks the median"
+            f"overlap; {_bw_desc}"
         )
     if "violin" in plot_types_used:
         type_desc.append(
             "<b>violin plot</b> (N&nbsp;&gt;&nbsp;250): the filled shape is a kernel density "
             "estimate (KDE) of the distribution &mdash; wider = more stars at that value; "
-            "the <span style='color:magenta'><b>magenta</b></span> vertical line is the median; "
-            "the <span style='color:cyan; background:#555; padding:0 2px'><b>cyan</b></span> "
-            "lines are Q1 and Q3 (the interquartile range, IQR, spans the middle 50% of stars)"
+            f"{_bw_desc}"
         )
 
     type_sentences = "; ".join(type_desc) + "."
@@ -348,9 +356,9 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
         f"<b>How to read statistical differences:</b> if the distributions for A and B are "
         f"well-separated (little or no overlap), the two filters produce measurably different "
         f"values for that metric. Overlapping distributions indicate consistent measurements. "
-        f"For violin plots, a shift in the magenta median line between A and B is the clearest "
-        f"single-value indicator of a systematic difference; non-overlapping IQR boxes (cyan lines) "
-        f"provide stronger evidence of a real separation. "
+        f"A shift in the magenta median line is the clearest single-value indicator of a "
+        f"systematic difference; non-overlapping IQR boxes provide stronger evidence of a real "
+        f"separation. "
         f"A <span style='color:red'><b>red dashed line</b></span> marks the theoretically ideal "
         f"or physically expected reference value where applicable: Moffat&nbsp;&beta;&nbsp;=&nbsp;4.77 "
         f"(Kolmogorov atmospheric turbulence); Ellipticity&nbsp;=&nbsp;Eccentricity&nbsp;=&nbsp;0 "
@@ -700,19 +708,19 @@ class ReportBuilder:
                                {"Image A": "gm_display_a", "Image B": "gm_display_b"})
 
         # ── Spatial Detail subsections ────────────────────────────────────────
-        _PANEL_SECTION_NAMES = {
-            "std_5px":    "Std Dev — 5 px kernel",
-            "std_15px":   "Std Dev — 15 px kernel",
-            "std_31px":   "Std Dev — 31 px kernel",
-            "log_1.5":    "LoG — σ 1.5 px",
-            "log_3.0":    "LoG — σ 3.0 px",
-            "log_6.0":    "LoG — σ 6.0 px",
-            "wavelet_2":  "Wavelet — Level 2",
-            "wavelet_3":  "Wavelet — Level 3",
+        _PANEL_IMAGE_SETS = {
+            "std_5px":    "Std Dev 5 px",
+            "std_15px":   "Std Dev 15 px",
+            "std_31px":   "Std Dev 31 px",
+            "log_1.5":    "LoG σ 1.5 px",
+            "log_3.0":    "LoG σ 3.0 px",
+            "log_6.0":    "LoG σ 6.0 px",
+            "wavelet_2":  "Wavelet level 2",
+            "wavelet_3":  "Wavelet level 3",
         }
         panels_a = (result_a.spatial_metrics or {}).get("panels", {})
         panels_b = (result_b.spatial_metrics or {}).get("panels", {})
-        for pkey, sec_name in _PANEL_SECTION_NAMES.items():
+        for pkey, img_set_name in _PANEL_IMAGE_SETS.items():
             pa_panel = panels_a.get(pkey)
             pb_panel = panels_b.get(pkey)
             if pa_panel is None or pb_panel is None:
@@ -723,7 +731,7 @@ class ReportBuilder:
             _add(npz_a,    pa_panel["a"])
             _add(npz_b,    pb_panel["b"])
             _add(npz_diff, pa_panel["diff"])
-            _add_options_entry(sec_name, "Maps",
+            _add_options_entry("Spatial Detail", img_set_name,
                                {"Image A":     npz_a,
                                 "Image B":     npz_b,
                                 "Diff (A−B)": npz_diff})
@@ -732,6 +740,8 @@ class ReportBuilder:
         catalog = {
             "label_a": result_a.label,
             "label_b": result_b.label,
+            "filename_a": image_a.path.name,
+            "filename_b": image_b.path.name,
             "sim_label_ref": sim_ref_label,
             "sections": catalog_sections,
         }
@@ -1312,6 +1322,68 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         if warn_b:
             html += f'<p class="footnote"><em>{rb.label}: {warn_b}</em></p>\n'
 
+        html += """<div class="info-box">
+<strong>What each metric measures:</strong><br><br>
+<strong>Coma index (Pearson&nbsp;r, |e<sub>r</sub>|&nbsp;vs&nbsp;radius)</strong> &mdash;
+Pearson correlation between each star&rsquo;s absolute radial elongation and its distance
+from the field centre. Range: &minus;1 to +1. Values near&nbsp;0 indicate no radial pattern;
+values&nbsp;&ge;&nbsp;0.5 suggest elongation growing systematically with radius, consistent
+with off-axis coma. Negative values (rare) indicate tangential elongation dominates at
+larger radii.<br><br>
+<strong>Radial elongation fraction</strong> &mdash;
+For all stars with eccentricity&nbsp;&gt;&nbsp;0.05, the mean fraction of their elongation
+pointing radially (away from or toward the field centre). Range:&nbsp;0 to&nbsp;1. Values
+near&nbsp;1 mean nearly all elongation is radial (coma or collimation); values near&nbsp;0
+mean elongation is predominantly tangential or in a non-radial direction.<br><br>
+<strong>Orientation circular std (°)</strong> &mdash;
+Circular standard deviation of per-star elongation position angles across the entire field.
+A small value (&lt;&nbsp;20°) means all stars are elongated in nearly the same direction
+regardless of position &mdash; characteristic of collimation error or a tilted element.
+A large value (&gt;&nbsp;45°) indicates no dominant elongation direction.
+<em>Note: lower is not better</em> &mdash; a very low value paired with high radial
+elongation fraction points to a fixed collimation problem, not a healthy image.<br><br>
+<strong>Corner/centre FWHM ratio</strong> &mdash;
+Median star FWHM in the outer 30&nbsp;% of field radius divided by median FWHM in the
+inner 30&nbsp;%. Values near&nbsp;1.0 indicate uniform sharpness across the field. Values
+&gt;&nbsp;1.3 indicate measurably blurrier stars toward the corners, consistent with field
+curvature, defocus, or related aberration. Cannot distinguish field curvature from pure
+defocus without a through-focus sequence.<br><br>
+<strong>FWHM radial gradient</strong> &mdash;
+Coefficients of a quadratic fit FWHM(r)&nbsp;=&nbsp;a&thinsp;r&#x00B2;&nbsp;+&nbsp;b&thinsp;r&nbsp;+&nbsp;c
+on normalised radius r&nbsp;&isin;&nbsp;[0,&nbsp;1]. A large positive quadratic coefficient (a)
+indicates accelerating FWHM growth toward the corners (field curvature signature). A
+large linear coefficient (b) with small quadratic indicates more linear growth (tilt or
+coma). Read in conjunction with the FWHM radial profile plot below.
+</div>\n"""
+
+        img_h_a, img_w_a = img_a.data.shape[:2]
+        img_h_b, img_w_b = img_b.data.shape[:2]
+        stars_a = pa.get("star_data", [])
+        stars_b = pb.get("star_data", [])
+
+        rdf_fig = self._plot_fwhm_ecc_radial(
+            stars_a, stars_b, ab_a, ab_b,
+            ra.label, rb.label, img_h_a, img_w_a, img_h_b, img_w_b)
+        if rdf_fig:
+            html += _img_tag(rdf_fig, "FWHM and eccentricity radial profiles")
+            html += ('<p class="caption">Radial profiles of FWHM and eccentricity vs distance '
+                     'from the field centre. Scatter points show individual star measurements; '
+                     'curves show quadratic fits. A rising FWHM profile indicates field '
+                     'curvature or defocus; a rising eccentricity profile is consistent with '
+                     'off-axis coma. The dashed line marks the eccentricity = 0.10 threshold.</p>\n')
+
+        coma_fig = self._plot_coma_index_scatter(
+            ab_a, ab_b, ra.label, rb.label, img_h_a, img_w_a, img_h_b, img_w_b)
+        if coma_fig:
+            html += _img_tag(coma_fig, "Coma index scatter")
+            html += ('<p class="caption">Coma index scatter: absolute radial elongation '
+                     'component |e<sub>r</sub>| vs radial distance from the field centre. '
+                     'Points are coloured by eccentricity magnitude. A positive slope and '
+                     'high Pearson&nbsp;r indicate elongation growing radially outward '
+                     '(off-axis coma signature). Horizontal scatter indicates no radial '
+                     'dependence. The Pearson&nbsp;r value shown is the coma index in the '
+                     'score table above.</p>\n')
+
         def _interpret(ab: dict, label: str) -> str:
             ci = ab.get("coma_index")
             rf = ab.get("radial_frac")
@@ -1342,9 +1414,6 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         interp_b = _interpret(ab_b, rb.label)
         if interp_a or interp_b:
             html += "<h4>Interpretation</h4>\n" + interp_a + interp_b
-
-        img_h_a, img_w_a = img_a.data.shape[:2]
-        img_h_b, img_w_b = img_b.data.shape[:2]
 
         vec_fig = self._plot_aberration_vector_field(
             ab_a, ab_b, ra.label, rb.label, img_h_a, img_w_a, img_h_b, img_w_b)
@@ -1382,6 +1451,113 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
 </ul>
 </div>\n"""
         return html
+
+    @staticmethod
+    def _plot_fwhm_ecc_radial(
+            stars_a: list, stars_b: list,
+            ab_a: dict, ab_b: dict,
+            label_a: str, label_b: str,
+            img_h_a: int, img_w_a: int,
+            img_h_b: int, img_w_b: int,
+    ) -> "plt.Figure | None":
+        """FWHM and eccentricity vs radial distance from field centre (1 row × 2 cols)."""
+        def _extract(stars, img_h, img_w):
+            cx, cy = img_w / 2.0, img_h / 2.0
+            ri, fwhm, ecc = [], [], []
+            for s in stars:
+                if s.get("fwhm") is not None and s.get("eccentricity") is not None:
+                    ri.append(float(np.hypot(s["x"] - cx, s["y"] - cy)))
+                    fwhm.append(float(s["fwhm"]))
+                    ecc.append(float(s["eccentricity"]))
+            return np.array(ri), np.array(fwhm), np.array(ecc)
+
+        ri_a, fwhm_a, ecc_a = _extract(stars_a, img_h_a, img_w_a)
+        ri_b, fwhm_b, ecc_b = _extract(stars_b, img_h_b, img_w_b)
+        if ri_a.size == 0 and ri_b.size == 0:
+            return None
+
+        fig, (ax_f, ax_e) = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+        fig.suptitle("Radial profiles: FWHM and eccentricity vs distance from field centre",
+                     fontsize=11)
+
+        for ax, vals_a, vals_b, ylabel, yref in [
+            (ax_f, fwhm_a, fwhm_b, "FWHM (px)", None),
+            (ax_e, ecc_a,  ecc_b,  "Eccentricity", 0.10),
+        ]:
+            for ri, vals, col, lbl in [
+                (ri_a, vals_a, "steelblue", label_a),
+                (ri_b, vals_b, "tomato",    label_b),
+            ]:
+                if ri.size == 0:
+                    continue
+                ax.scatter(ri, vals, color=col, alpha=0.55, s=16, label=lbl)
+                if ri.size >= 3:
+                    order = np.argsort(ri)
+                    coeffs = np.polyfit(ri[order], vals[order], 2)
+                    r_fit = np.linspace(ri.min(), ri.max(), 200)
+                    ax.plot(r_fit, np.polyval(coeffs, r_fit), color=col, lw=1.8,
+                            label=f"{lbl} fit")
+            if yref is not None:
+                ax.axhline(yref, color="gray", lw=1.0, ls="--", alpha=0.7,
+                           label=f"e = {yref}")
+            ax.set_xlabel("Radial distance from centre (px)", fontsize=9)
+            ax.set_ylabel(ylabel, fontsize=9)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.25)
+        return fig
+
+    @staticmethod
+    def _plot_coma_index_scatter(
+            ab_a: dict, ab_b: dict, label_a: str, label_b: str,
+            img_h_a: int, img_w_a: int, img_h_b: int, img_w_b: int,
+    ) -> "plt.Figure | None":
+        """|er| vs radial distance scatter with linear trend; annotated with Pearson r."""
+        has_a = bool(ab_a.get("star_xs"))
+        has_b = bool(ab_b.get("star_xs"))
+        if not has_a and not has_b:
+            return None
+
+        fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+        fig.suptitle("Coma index: |eᵣ| vs radial distance from field centre", fontsize=11)
+
+        for ax, ab, img_h, img_w, lbl in [
+            (ax_a, ab_a, img_h_a, img_w_a, label_a),
+            (ax_b, ab_b, img_h_b, img_w_b, label_b),
+        ]:
+            xs    = ab.get("star_xs", [])
+            ys    = ab.get("star_ys", [])
+            er    = ab.get("star_er", [])
+            ecc   = ab.get("star_ecc", [])
+            ci    = ab.get("coma_index")
+            if not xs:
+                warn = ab.get("warning", "No data")
+                ax.text(0.5, 0.5, warn, transform=ax.transAxes,
+                        ha="center", va="center", fontsize=8, color="gray")
+                ax.set_title(lbl, fontsize=10)
+                continue
+            cx, cy = img_w / 2.0, img_h / 2.0
+            ri      = np.hypot(np.array(xs) - cx, np.array(ys) - cy)
+            abs_er  = np.abs(np.array(er))
+            ecc_arr = np.array(ecc)
+            sc = ax.scatter(ri, abs_er, c=ecc_arr, cmap="plasma",
+                            vmin=0, vmax=max(float(ecc_arr.max()), 0.01),
+                            s=18, alpha=0.75, edgecolors="none")
+            fig.colorbar(sc, ax=ax, label="Eccentricity", fraction=0.046, pad=0.04)
+            if ri.size >= 2:
+                coeffs = np.polyfit(ri, abs_er, 1)
+                r_fit = np.linspace(ri.min(), ri.max(), 200)
+                ax.plot(r_fit, np.polyval(coeffs, r_fit), color="crimson", lw=1.8,
+                        label="Linear fit")
+                ax.legend(fontsize=7)
+            if ci is not None:
+                ax.text(0.03, 0.96, f"r = {ci:.3f}",
+                        transform=ax.transAxes, va="top", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", fc="#2a2a2a", ec="#555", alpha=0.8))
+            ax.set_xlabel("Radial distance from centre (px)", fontsize=9)
+            ax.set_ylabel("|eᵣ|  (radial elongation)", fontsize=9)
+            ax.set_title(lbl, fontsize=10)
+            ax.grid(True, alpha=0.25)
+        return fig
 
     @staticmethod
     def _plot_aberration_vector_field(
@@ -1738,9 +1914,12 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             n_pts = len(d["original"])
             # x=1 = finest bars; increases toward coarser bars (data reversed).
             x = np.arange(1, n_pts + 1)
-            orig  = d["original"][::-1]
-            a_arr = d["conv_a"][::-1]
-            b_arr = d["conv_b"][::-1]
+            orig      = d["original"][::-1]
+            a_arr     = d["conv_a"][::-1]
+            b_arr     = d["conv_b"][::-1]
+            _ref_raw  = d.get("conv_ref")
+            ref_arr   = _ref_raw[::-1] if _ref_raw is not None else None
+            ref_label = sim.get("label_ref", "Reference seeing")
             strip = d.get("image_strip")
 
             # Build layout: optional image strip on top, then raw + envelope
@@ -1775,6 +1954,9 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                         label=sim["label_a"])
             ax_raw.plot(x, b_arr, color="tomato",    linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label=sim["label_b"])
+            if ref_arr is not None:
+                ax_raw.plot(x, ref_arr, color="forestgreen", linewidth=1.0,
+                            linestyle="--", alpha=XS_LINE_ALPHA, label=ref_label)
             if strip is None:
                 ax_raw.set_title(f"{title}  (y = {d['y_px']} px)", fontsize=9)
             ax_raw.set_ylabel("Intensity [0–1]", fontsize=8)
@@ -1789,6 +1971,9 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                         alpha=XS_LINE_ALPHA, label=sim["label_a"])
             ax_env.plot(x, _envelope(b_arr), color="tomato",    linewidth=1.4,
                         alpha=XS_LINE_ALPHA, label=sim["label_b"])
+            if ref_arr is not None:
+                ax_env.plot(x, _envelope(ref_arr), color="forestgreen", linewidth=1.4,
+                            linestyle="--", alpha=XS_LINE_ALPHA, label=ref_label)
             ax_env.set_ylabel("Local contrast\n(peak − valley)", fontsize=8)
             ax_env.set_xlabel(
                 "Distance from finest bars (px, √ scale)  —  fine ← | → coarse", fontsize=8)
