@@ -234,6 +234,7 @@ class AnalysisThread(QThread):
                 output_dir=s.get("output_dir", "."),
                 open_browser=True,
                 report_format=fmt,
+                ref_seeing_arcsec=s.get("ref_seeing_arcsec", 2.0),
             )
             report_path = str(out)
         except Exception as e:

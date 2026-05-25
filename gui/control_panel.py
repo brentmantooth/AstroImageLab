@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 
 from core.models import (
     STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_LEVELS, DEFAULT_PIXEL_SCALE,
-    MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS,
+    MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC,
 )
 
 
@@ -130,6 +130,18 @@ class AnalysisControlPanel(QWidget):
         self._wavelet_levels.setRange(2, 6)
         self._wavelet_levels.setValue(WAVELET_LEVELS)
         params_layout.addRow("Wavelet levels:", self._wavelet_levels)
+
+        self._ref_seeing_arcsec = QDoubleSpinBox()
+        self._ref_seeing_arcsec.setRange(0.5, 10.0)
+        self._ref_seeing_arcsec.setSingleStep(0.25)
+        self._ref_seeing_arcsec.setDecimals(2)
+        self._ref_seeing_arcsec.setValue(REF_SEEING_ARCSEC)
+        self._ref_seeing_arcsec.setSuffix(" \"")
+        self._ref_seeing_arcsec.setToolTip(
+            "FWHM of the synthetic reference PSF shown in the PSF/MTF report section.\n"
+            "2.0\" represents typical good ground-based seeing (Kolmogorov atmosphere, β = 4.77)."
+        )
+        params_layout.addRow("PSF reference seeing:", self._ref_seeing_arcsec)
 
         root.addWidget(params_box)
 
@@ -297,6 +309,7 @@ class AnalysisControlPanel(QWidget):
             "seeing_warn_arcsec": self._seeing_thresh.value(),
             "pixel_scale_override": pso if pso > 0 else None,
             "wavelet_levels": self._wavelet_levels.value(),
+            "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "roi": self._roi,
             "crosshair": self._line,
             "output_dir": self._out_dir.text().strip() or str(Path.home() / "filter_reports"),

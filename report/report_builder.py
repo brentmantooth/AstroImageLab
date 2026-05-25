@@ -16,10 +16,37 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX, PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX, LABEL_MAX_LEN
+from core.models import AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX, PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX, LABEL_MAX_LEN, REF_SEEING_ARCSEC, REF_SEEING_BETA
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
+
+
+def _make_moffat_kernel(fwhm_px: float, beta: float = REF_SEEING_BETA,
+                         size: int | None = None) -> np.ndarray:
+    """2D Moffat PSF kernel at native pixel scale, normalized to unit sum."""
+    if size is None:
+        size = max(25, int(fwhm_px * 6))
+        if size % 2 == 0:
+            size += 1
+    gamma = fwhm_px / (2.0 * np.sqrt(2.0 ** (1.0 / beta) - 1.0))
+    cy, cx = size // 2, size // 2
+    y, x = np.ogrid[:size, :size]
+    kern = 1.0 / (1.0 + ((x - cx) ** 2 + (y - cy) ** 2) / gamma ** 2) ** beta
+    return kern / kern.sum()
+
+
+def _ref_fwhm_px(pa: dict, pb: dict,
+                  ref_seeing_arcsec: float = REF_SEEING_ARCSEC) -> float | None:
+    """Derive reference PSF FWHM in pixels from the plate scale encoded in psf_metrics.
+    Returns None when plate scale is unknown (both images report 1.0 arcsec/px default)."""
+    for p in (pa, pb):
+        fwhm_px = p.get("fwhm_px") or 0.0
+        fwhm_as = p.get("fwhm_arcsec") or 0.0
+        if fwhm_px > 0 and fwhm_as > 0:
+            pixel_scale = fwhm_as / fwhm_px   # arcsec / px
+            return ref_seeing_arcsec / pixel_scale
+    return None
 
 
 # ── CSS ──────────────────────────────────────────────────────────────────────
@@ -423,8 +450,10 @@ class ReportBuilder:
                   result_a: AnalysisResult, result_b: AnalysisResult,
                   output_dir: str | Path,
                   open_browser: bool = True,
-                  report_format: str = "html") -> Path:
+                  report_format: str = "html",
+                  ref_seeing_arcsec: float = REF_SEEING_ARCSEC) -> Path:
 
+        self._ref_seeing_arcsec = ref_seeing_arcsec
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -692,9 +721,23 @@ shown in the metadata table above.</div>"""
         mtf_a  = pa.get("mtf_curve")
         freq_b = pb.get("mtf_freq")
         mtf_b  = pb.get("mtf_curve")
+
+        # Reference PSF: Moffat with Kolmogorov β at 2.0" seeing
+        ref_fwhm = _ref_fwhm_px(pa, pb, self._ref_seeing_arcsec)
+        if ref_fwhm is not None:
+            kern_ref = _make_moffat_kernel(ref_fwhm)
+            freq_ref, mtf_ref = self._compute_mtf_from_kernel(kern_ref)
+            ref_label = (f"Reference ({self._ref_seeing_arcsec:.1f}″ seeing, "
+                         f"β = {REF_SEEING_BETA})")
+            img_epsf_ref = _img_tag(self._plot_epsf(kern_ref, ref_label), ref_label)
+        else:
+            freq_ref = mtf_ref = ref_label = None
+            img_epsf_ref = ""
+
         if freq_a is not None or freq_b is not None:
             fig_mtf = self._overlay_mtf(freq_a, mtf_a, freq_b, mtf_b,
-                                        ra.label, rb.label)
+                                        ra.label, rb.label,
+                                        freq_ref, mtf_ref, ref_label)
 
         img_mtf = _img_tag(fig_mtf, "MTF comparison")
         img_epsf_a = _img_tag((pa.get("figures") or {}).get("epsf"), f"ePSF {ra.label}")
@@ -922,16 +965,29 @@ tighter stars. Points far from the line indicate individual star measurement sca
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_epsf_a}</div>
   <div style="flex:1;">{img_epsf_b}</div>
+  {f'<div style="flex:1;">{img_epsf_ref}</div>' if img_epsf_ref else ''}
 </div>
 <p class="caption">Empirical PSFs (log&#x2081;&#x208a; scale, viridis colormap). The ePSF is
 built at 2&times; oversampling from all quality-filtered stars in the field. A circular,
 compact core with rapid falloff is ideal. Asymmetric tails indicate tracking,
 guiding, or optical aberrations &mdash; compare tail direction and magnitude between the
-two images to distinguish session-specific from system-wide causes.</p>
+two images to distinguish session-specific from system-wide causes.
+{f"The third panel shows the synthetic reference PSF ({self._ref_seeing_arcsec:.1f}&Prime; seeing, Moffat &beta;&thinsp;=&thinsp;{REF_SEEING_BETA}) for comparison." if img_epsf_ref else ""}</p>
 
 {img_mtf}
 <p class="caption">MTF curves for both filters overlaid, derived from the ePSF shown above.
 Higher curve = better contrast preservation at fine scales.</p>
+{f'''<div class="info-box"><strong>About the reference PSF:</strong><br>
+The reference curve is a <em>synthetic</em> Moffat profile &mdash; not measured from data.
+A Moffat PSF has the form 1&thinsp;/&thinsp;(1&thinsp;+&thinsp;r&#x00B2;/&gamma;&#x00B2;)&#x03B2;,
+where &gamma; is derived from the specified FWHM. The shape parameter
+&beta;&thinsp;=&thinsp;{REF_SEEING_BETA} is the Kolmogorov atmospheric turbulence value,
+appropriate for diffraction-limited ground-based seeing.
+The FWHM ({self._ref_seeing_arcsec:.2f}&Prime;) converts to pixels using the plate scale
+derived from the measured ePSFs of Images A/B; if the plate scale cannot be determined
+the reference is omitted. This reference is a benchmark for typical good seeing, not a
+theoretical maximum &mdash; shorter wavelengths, larger apertures, or adaptive optics
+can all exceed it.''' if img_epsf_ref else ''}
 <div class="info-box"><strong>Reading the MTF plot — and how it is derived from the ePSF:</strong><br><br>
 <strong>From ePSF to MTF:</strong>
 The empirical PSF is first normalised to unit sum so that it represents a probability
@@ -1094,15 +1150,50 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         fig.tight_layout()
         return fig
 
+    def _plot_epsf(self, epsf: np.ndarray, label: str) -> plt.Figure:
+        fig, ax = plt.subplots(figsize=(4, 4))
+        im = ax.imshow(np.log1p(epsf - epsf.min()),
+                       origin="upper", cmap="viridis", interpolation="nearest")
+        ax.set_title(f"ePSF — {label}")
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        return fig
+
+    def _compute_mtf_from_kernel(self, kern: np.ndarray):
+        """Return (freq_axis, mtf) for a native-pixel-scale PSF kernel."""
+        kern_norm = kern / (kern.sum() or 1.0)
+        fft2d = np.fft.fftshift(np.fft.fft2(kern_norm))
+        otf = np.abs(fft2d)
+        otf /= otf.max() or 1.0
+        n = kern_norm.shape[0]
+        cy, cx = n // 2, n // 2
+        y, x = np.ogrid[:n, :n]
+        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        max_r = n / 2.0
+        n_bins = n // 2
+        freq_edges = np.linspace(0, max_r, n_bins + 1)
+        freq_centers = (freq_edges[:-1] + freq_edges[1:]) / 2.0
+        mtf = np.array([
+            otf[np.logical_and(r >= freq_edges[j], r < freq_edges[j + 1])].mean()
+            if np.any(np.logical_and(r >= freq_edges[j], r < freq_edges[j + 1])) else 0.0
+            for j in range(n_bins)
+        ])
+        return freq_centers / max_r * 0.5, mtf   # freq in cycles/native-pixel
+
     def _overlay_mtf(self,
                       freq_a: "np.ndarray | None", mtf_a: "np.ndarray | None",
                       freq_b: "np.ndarray | None", mtf_b: "np.ndarray | None",
-                      label_a: str, label_b: str) -> plt.Figure:
+                      label_a: str, label_b: str,
+                      freq_ref=None, mtf_ref=None,
+                      label_ref: str = "Reference") -> plt.Figure:
         fig, ax = plt.subplots(figsize=(7, 4))
         if freq_a is not None and mtf_a is not None:
             ax.plot(freq_a, mtf_a, color="steelblue", linewidth=2, label=label_a)
         if freq_b is not None and mtf_b is not None:
             ax.plot(freq_b, mtf_b, color="tomato", linewidth=2, label=label_b)
+        if freq_ref is not None and mtf_ref is not None:
+            ax.plot(freq_ref, mtf_ref, color="forestgreen", linewidth=1.5,
+                    linestyle="--", label=label_ref)
         ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
         ax.axvline(0.5, color="red", linestyle=":", linewidth=0.8, label="Nyquist")
         ax.set_xlabel("Spatial frequency (cycles/pixel)")
@@ -1141,9 +1232,16 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             kern_a = kern_a / kern_a.sum() if kern_a.sum() > 0 else kern_a
             kern_b = kern_b / kern_b.sum() if kern_b.sum() > 0 else kern_b
 
+            # Reference PSF kernel
+            ref_fwhm = _ref_fwhm_px(ra.psf_metrics or {}, rb.psf_metrics or {},
+                                        self._ref_seeing_arcsec)
+            kern_ref  = _make_moffat_kernel(ref_fwhm) if ref_fwhm is not None else None
+
             # Convolution at full resolution
             conv_a = np.clip(fftconvolve(test_arr, kern_a, mode="same"), 0.0, 1.0)
             conv_b = np.clip(fftconvolve(test_arr, kern_b, mode="same"), 0.0, 1.0)
+            conv_ref = (np.clip(fftconvolve(test_arr, kern_ref, mode="same"), 0.0, 1.0)
+                        if kern_ref is not None else None)
             diff = conv_a - conv_b
 
             # Cross-section extraction — must happen before downsampling
@@ -1160,6 +1258,7 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                         "original":    test_arr[y_px, _XS_X].copy(),
                         "conv_a":      conv_a[y_px, _XS_X].copy(),
                         "conv_b":      conv_b[y_px, _XS_X].copy(),
+                        "conv_ref":    conv_ref[y_px, _XS_X].copy() if conv_ref is not None else None,
                         "image_strip": test_arr[y0_strip:y1_strip, _XS_X].copy(),
                     }
 
@@ -1171,21 +1270,27 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 conv_a   = _ndimage_zoom(conv_a,   zoom_f, order=1)
                 conv_b   = _ndimage_zoom(conv_b,   zoom_f, order=1)
                 diff     = _ndimage_zoom(diff,     zoom_f, order=1)
+                if conv_ref is not None:
+                    conv_ref = _ndimage_zoom(conv_ref, zoom_f, order=1)
 
             d_max = max(float(abs(diff).max()), 1e-9)
             # Map diff to RGB using RdBu_r colormap
             diff_norm = (diff / d_max + 1.0) / 2.0          # [0, 1]
             diff_rgb = (plt.get_cmap("RdBu_r")(diff_norm)[:, :, :3] * 255).astype(np.uint8)
 
+            label_ref = (f"Reference ({self._ref_seeing_arcsec:.1f}″ seeing)"
+                         if conv_ref is not None else None)
             return {
-                "original": (test_arr * 255).astype(np.uint8),
-                "conv_a":   (conv_a   * 255).astype(np.uint8),
-                "conv_b":   (conv_b   * 255).astype(np.uint8),
-                "diff":     diff_rgb,
-                "diff_max": d_max,
-                "label_a":  ra.label,
-                "label_b":  rb.label,
-                "xs_data":  xs_data,
+                "original":  (test_arr * 255).astype(np.uint8),
+                "conv_a":    (conv_a   * 255).astype(np.uint8),
+                "conv_b":    (conv_b   * 255).astype(np.uint8),
+                "conv_ref":  (conv_ref * 255).astype(np.uint8) if conv_ref is not None else None,
+                "diff":      diff_rgb,
+                "diff_max":  d_max,
+                "label_a":   ra.label,
+                "label_b":   rb.label,
+                "label_ref": label_ref,
+                "xs_data":   xs_data,
             }
         except Exception:
             return None
@@ -1414,15 +1519,26 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         if not available:
             return None
 
+        has_ref   = sim.get("label_ref") is not None and any(
+            xs_data[k].get("conv_ref") is not None for k, _, _ in available
+        )
         n_levels  = len(available)
         n_bands   = len(bands)
-        bar_w     = 0.12
-        group_gap = n_levels * 2 * bar_w + 0.15
+        bars_per_level = 3 if has_ref else 2
+        bar_w     = 0.09 if has_ref else 0.12
+        group_gap = n_levels * bars_per_level * bar_w + 0.15
         x_centers = np.arange(n_bands) * group_gap
 
-        fig, ax = plt.subplots(figsize=(9, 5))
+        fig, ax = plt.subplots(figsize=(10 if has_ref else 9, 5))
 
-        offsets = np.linspace(-(n_levels - 1) * bar_w, (n_levels - 1) * bar_w, n_levels)
+        # Center of each level group: for 2 bars (A,B) centered at offset±bar_w/2,
+        # for 3 bars (A,B,Ref) centered at offset (B is middle bar).
+        if has_ref:
+            offsets = np.linspace(-(n_levels - 1) * 1.5 * bar_w,
+                                   (n_levels - 1) * 1.5 * bar_w, n_levels)
+        else:
+            offsets = np.linspace(-(n_levels - 1) * bar_w,
+                                   (n_levels - 1) * bar_w, n_levels)
 
         from matplotlib.patches import Patch
         legend_handles = []
@@ -1432,41 +1548,59 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             env_orig = _envelope(d["original"][::-1])
             env_a    = _envelope(d["conv_a"][::-1])
             env_b    = _envelope(d["conv_b"][::-1])
+            env_ref  = (_envelope(d["conv_ref"][::-1])
+                        if has_ref and d.get("conv_ref") is not None else None)
 
             ratios_a, errs_a = [], []
             ratios_b, errs_b = [], []
+            ratios_ref, errs_ref = [], []
             for _, sl in bands:
                 orig_b = env_orig[sl]
-                a_b    = env_a[sl]
-                b_b    = env_b[sl]
-                pw_a = a_b / np.clip(orig_b, 1e-6, None)
-                pw_b = b_b / np.clip(orig_b, 1e-6, None)
+                pw_a = env_a[sl] / np.clip(orig_b, 1e-6, None)
+                pw_b = env_b[sl] / np.clip(orig_b, 1e-6, None)
                 ratios_a.append(float(pw_a.mean()))
                 errs_a.append(float(pw_a.std()))
                 ratios_b.append(float(pw_b.mean()))
                 errs_b.append(float(pw_b.std()))
+                if env_ref is not None:
+                    pw_r = env_ref[sl] / np.clip(orig_b, 1e-6, None)
+                    ratios_ref.append(float(pw_r.mean()))
+                    errs_ref.append(float(pw_r.std()))
 
-            pos_a = x_centers + offsets[i] - bar_w / 2
-            pos_b = x_centers + offsets[i] + bar_w / 2
+            if has_ref:
+                pos_a   = x_centers + offsets[i] - bar_w
+                pos_b   = x_centers + offsets[i]
+                pos_ref = x_centers + offsets[i] + bar_w
+            else:
+                pos_a = x_centers + offsets[i] - bar_w / 2
+                pos_b = x_centers + offsets[i] + bar_w / 2
 
             ax.bar(pos_a, ratios_a, bar_w, color=color, alpha=0.85,
                    yerr=errs_a, capsize=3, error_kw={"linewidth": 0.8})
             ax.bar(pos_b, ratios_b, bar_w, color=color, alpha=0.85,
                    hatch="///", yerr=errs_b, capsize=3, error_kw={"linewidth": 0.8})
+            if has_ref and ratios_ref:
+                ax.bar(pos_ref, ratios_ref, bar_w, facecolor="none",
+                       edgecolor="forestgreen", linewidth=1.5, linestyle=":",
+                       yerr=errs_ref, capsize=3, error_kw={"linewidth": 0.8})
 
             legend_handles.append(Patch(facecolor=color, alpha=0.85, label=f"{title} — {sim['label_a']}"))
             legend_handles.append(Patch(facecolor=color, alpha=0.85, hatch="///", label=f"{title} — {sim['label_b']}"))
 
-        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Full retention (ratio = 1)")
+        extra_handles = [plt.Line2D([0], [0], color="black", linestyle="--", linewidth=1.0,
+                                    label="Full retention (ratio = 1)")]
+        if has_ref:
+            extra_handles.append(Patch(facecolor="none", edgecolor="forestgreen",
+                                       linewidth=1.5, label=sim["label_ref"]))
+
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0)
         ax.set_xticks(x_centers)
         ax.set_xticklabels([b[0] for b in bands], fontsize=8)
         ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=9)
         ax.set_ylabel("Contrast retention ratio  (convolved / original)", fontsize=9)
         ax.set_title(f"Spatial-Frequency Contrast Retention — {sim['label_a']} vs {sim['label_b']}", fontsize=10)
-        ax.legend(handles=legend_handles + [
-            plt.Line2D([0], [0], color="black", linestyle="--", linewidth=1.0,
-                       label="Full retention (ratio = 1)")
-        ], fontsize=7, ncol=2, loc="upper right")
+        ax.legend(handles=legend_handles + extra_handles, fontsize=7,
+                  ncol=2, loc="upper right")
         ax.grid(True, alpha=0.3, axis="y")
         fig.tight_layout()
         return fig
@@ -1505,13 +1639,18 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         if not available:
             return ""
 
-        label_a = sim.get("label_a", "A")
-        label_b = sim.get("label_b", "B")
+        label_a   = sim.get("label_a", "A")
+        label_b   = sim.get("label_b", "B")
+        label_ref = sim.get("label_ref")   # None when plate scale unknown
+        has_ref   = label_ref is not None and any(
+            xs_data[k].get("conv_ref") is not None for k, _ in available
+        )
 
+        ref_header = f"<th>{label_ref}</th>" if has_ref else ""
         header = (
             f"<tr><th>Band</th><th>Contrast</th>"
             f"<th>{label_a}</th><th>{label_b}</th>"
-            f"<th>Stat. test</th></tr>"
+            f"{ref_header}<th>Stat. test</th></tr>"
         )
 
         rows = []
@@ -1542,6 +1681,14 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                 else:
                     sa_style = sb_style = ""
 
+                # Reference column (neutral shading, no statistical test)
+                ref_cell = ""
+                if has_ref and d.get("conv_ref") is not None:
+                    env_ref = _envelope(d["conv_ref"][::-1])
+                    pw_ref  = env_ref[sl] / np.clip(env_orig[sl], 1e-6, None)
+                    ref_cell = (f'<td style="background:#f5f5f5">'
+                                f'{pw_ref.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_ref.std():.3f}</td>')
+
                 # Span the Band cell across all contrast-level rows in this band
                 band_cell = (
                     f'<td rowspan="{n_levels}"><b>{band_label}</b></td>'
@@ -1553,8 +1700,14 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
                     f"<td>{level_title}</td>"
                     f"<td{sa_style}>{pw_a.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_a.std():.3f}</td>"
                     f"<td{sb_style}>{pw_b.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_b.std():.3f}</td>"
-                    f"{p_cell}</tr>"
+                    f"{ref_cell}{p_cell}</tr>"
                 )
+
+        ref_footnote = (
+            f" The Reference column shows retention for a synthetic Moffat PSF at "
+            f"{self._ref_seeing_arcsec:.1f}&Prime; seeing (&beta;&thinsp;=&thinsp;{REF_SEEING_BETA}) "
+            f"— a benchmark for typical good atmospheric conditions."
+        ) if has_ref else ""
 
         return (
             "<p><strong>Contrast retention summary (mean &plusmn; std, convolved / original):"
@@ -1562,7 +1715,7 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
             f"<table>{header}{''.join(rows)}</table>"
             "<p class=\"footnote\">Paired t-test on per-pixel retention ratios (same pixel positions, "
             "different PSFs). Highlighted cells: p&lt;0.05 — the two images are statistically "
-            "distinguishable in that band/contrast combination.</p>"
+            f"distinguishable in that band/contrast combination.{ref_footnote}</p>"
         )
 
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
@@ -1680,6 +1833,7 @@ hatched bars = {sim['label_b']}.</p>
 {panel(sim['original'], 'Original test chart')}
 {panel(sim['conv_a'],   f"Convolved — {sim['label_a']}")}
 {panel(sim['conv_b'],   f"Convolved — {sim['label_b']}")}
+{panel(sim['conv_ref'], f"Convolved — {sim['label_ref']}") if sim.get('conv_ref') is not None else ''}
 {panel(sim['diff'],     'Difference (A − B)', diff_caption)}{xs_block}"""
 
     # ── Section 4: Halo ───────────────────────────────────────────────────────

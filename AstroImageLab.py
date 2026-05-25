@@ -16,10 +16,12 @@ if not getattr(sys, "frozen", False):
         if os.path.isdir(_qt_bin):
             os.environ["PATH"] = _qt_bin + os.pathsep + os.environ.get("PATH", "")
 
+import time
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QRadialGradient
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from gui.main_window import MainWindow
+from core.models import SPLASH_DURATION_MS
 
 
 def _make_splash_pixmap() -> QPixmap:
@@ -106,7 +108,9 @@ if __name__ == "__main__":
             font-size: 9pt;
         }
     """)
+    t_start = time.monotonic()
     window = MainWindow()
     window.show()
-    splash.finish(window)
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+    QTimer.singleShot(max(0, SPLASH_DURATION_MS - elapsed_ms), splash.close)
     sys.exit(app.exec())
