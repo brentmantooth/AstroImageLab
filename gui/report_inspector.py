@@ -182,6 +182,12 @@ class InspectorImageCanvas(QWidget):
         self._p1: tuple | None = None
         self._drag_divider = False
 
+        # Pan state (right-click drag)
+        self._pan_drag   = False
+        self._pan_last_x = 0.0   # display-coord x at last pan motion event
+        self._pan_last_y = 0.0
+        self._pan_ax     = None  # axes being panned
+
         self._fig = plt.figure(figsize=(10, 6), constrained_layout=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -196,6 +202,7 @@ class InspectorImageCanvas(QWidget):
         self._cid_press   = self._canvas.mpl_connect("button_press_event",   self._on_press)
         self._cid_motion  = self._canvas.mpl_connect("motion_notify_event",  self._on_motion)
         self._cid_release = self._canvas.mpl_connect("button_release_event", self._on_release)
+        self._cid_scroll  = self._canvas.mpl_connect("scroll_event",         self._on_scroll)
 
     # ------------------------------------------------------------------
     # Public API
@@ -325,6 +332,12 @@ class InspectorImageCanvas(QWidget):
         return int(self._arr_a.shape[1] * self._reveal)
 
     def _on_press(self, event) -> None:
+        if event.button == 3 and event.inaxes in (self._ax_a, self._ax_b):
+            self._pan_drag   = True
+            self._pan_last_x = event.x
+            self._pan_last_y = event.y
+            self._pan_ax     = event.inaxes
+            return
         if event.button != 1 or event.xdata is None or event.ydata is None:
             return
         if self._arr_a is None:
@@ -369,6 +382,23 @@ class InspectorImageCanvas(QWidget):
     def _on_motion(self, event) -> None:
         if self._arr_a is None:
             return
+        if self._pan_drag and self._pan_ax is not None:
+            try:
+                inv       = self._pan_ax.transData.inverted()
+                last_data = inv.transform((self._pan_last_x, self._pan_last_y))
+                curr_data = inv.transform((event.x,          event.y))
+                dx = last_data[0] - curr_data[0]
+                dy = last_data[1] - curr_data[1]
+                xl = self._pan_ax.get_xlim()
+                yl = self._pan_ax.get_ylim()
+                self._pan_ax.set_xlim(xl[0] + dx, xl[1] + dx)
+                self._pan_ax.set_ylim(yl[0] + dy, yl[1] + dy)
+                self._pan_last_x = event.x
+                self._pan_last_y = event.y
+                self._canvas.draw_idle()
+            except Exception:
+                pass
+            return
         if self._drag_divider and self._mode == "slider" and event.xdata is not None:
             W = self._arr_a.shape[1]
             self._reveal = max(0.01, min(0.99, event.xdata / W))
@@ -382,7 +412,35 @@ class InspectorImageCanvas(QWidget):
                 self.line_updated.emit(self._p0, self._p1)
 
     def _on_release(self, event) -> None:
+        if event.button == 3:
+            self._pan_drag = False
+            self._pan_ax   = None
+            return
         self._drag_divider = False
+
+    def _on_scroll(self, event) -> None:
+        if event.xdata is None or event.ydata is None:
+            return
+        active = [ax for ax in (self._ax_a, self._ax_b) if ax is not None]
+        if event.inaxes not in active:
+            return
+        factor = 0.8 if event.button == "up" else (1.0 / 0.8)
+        ax = event.inaxes
+        xc, yc = event.xdata, event.ydata
+        xl, yl = ax.get_xlim(), ax.get_ylim()
+        ax.set_xlim(xc + (xl[0] - xc) * factor, xc + (xl[1] - xc) * factor)
+        ax.set_ylim(yc + (yl[0] - yc) * factor, yc + (yl[1] - yc) * factor)
+        self._canvas.draw_idle()
+
+    def reset_zoom(self) -> None:
+        """Restore axes to the full-image view."""
+        for ax, arr in [(self._ax_a, self._arr_a), (self._ax_b, self._arr_b)]:
+            if ax is None or arr is None:
+                continue
+            H, W = arr.shape[:2]
+            ax.set_xlim(-0.5, W - 0.5)
+            ax.set_ylim(H - 0.5, -0.5)   # upper origin (y axis flipped for imshow)
+        self._canvas.draw_idle()
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +557,11 @@ class ReportInspector(QMainWindow):
         self._right_combo.setMinimumWidth(130)
         top_row.addWidget(self._right_combo)
 
+        from PyQt6.QtWidgets import QPushButton
+        self._reset_zoom_btn = QPushButton("Reset Zoom")
+        self._reset_zoom_btn.setFixedWidth(90)
+        top_row.addWidget(self._reset_zoom_btn)
+
         top_row.addStretch()
         root.addLayout(top_row)
 
@@ -572,6 +635,7 @@ class ReportInspector(QMainWindow):
         # with the axes bounds (which shift slightly on resize or content change).
         self._image_canvas._canvas.mpl_connect("draw_event", self._on_canvas_drawn)
         self._normalize_check.stateChanged.connect(self._on_normalize_changed)
+        self._reset_zoom_btn.clicked.connect(self._image_canvas.reset_zoom)
 
     # ------------------------------------------------------------------
     # Combo population
@@ -602,14 +666,37 @@ class ReportInspector(QMainWindow):
             self._sync_slider_margins()
 
     def _sync_slider_margins(self) -> None:
-        """Resize the slider's left/right spacers to align its track with the image axes."""
-        ax = self._image_canvas._ax_a
-        if ax is None:
+        """Resize the slider's left/right spacers to align its track with the image edges.
+
+        Uses transData transforms to find the actual on-screen pixel positions of the image
+        left/right edges (accounting for aspect="equal" pillarboxing inside the axes), then
+        offsets for the slider layout's inter-widget spacings and the percentage label.
+        """
+        ax  = self._image_canvas._ax_a
+        arr = self._image_canvas._arr_a
+        if ax is None or arr is None:
             return
-        pos = ax.get_position()   # axes bbox as fractions of the figure [0, 1]
-        w = self._image_canvas._canvas.width()
-        new_left  = max(0, int(pos.x0 * w))
-        new_right = max(0, int((1.0 - pos.x1) * w))
+        W = arr.shape[1]
+        try:
+            # Image spans [-0.5, W-0.5] in data coords (imshow default pixel-centre convention)
+            disp_left  = ax.transData.transform((-0.5,    0))[0]
+            disp_right = ax.transData.transform((W - 0.5, 0))[0]
+            # Scale renderer pixels → canvas logical pixels
+            fig_w_disp = self._image_canvas._fig.get_window_extent().width
+            canvas_w   = self._image_canvas._canvas.width()
+            if fig_w_disp <= 0:
+                return
+            scale     = canvas_w / fig_w_disp
+            img_left  = disp_left  * scale
+            img_right = disp_right * scale
+        except Exception:
+            return
+        # Slider layout (spacing=4 between every adjacent pair):
+        #   [left_spacer] [4] [slider_track] [4] [right_spacer] [4] [pct_label(40)]
+        # For track-left  == img_left:  left_spacer  = img_left - 4
+        # For track-right == img_right: right_spacer = canvas_w - img_right - 48
+        new_left  = max(0, int(img_left)  - 4)
+        new_right = max(0, int(canvas_w - img_right) - 48)
         if (self._slider_left_spacer.width()  != new_left or
                 self._slider_right_spacer.width() != new_right):
             self._slider_left_spacer.setFixedWidth(new_left)

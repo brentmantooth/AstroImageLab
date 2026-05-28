@@ -839,7 +839,7 @@ class ReportBuilder:
 </div>
 <h3>Pixel Histograms</h3>
 {hist_tag}
-<p class="caption">Log-scale pixel value distributions. Dotted vertical lines mark the median of each image.</p>"""
+<p class="caption">Log-scale pixel value distributions. Dotted vertical lines mark the median of each image. Dashed lower-opacity lines show the starless version where available.</p>"""
 
     def _plot_image_histograms(self, img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
         """Combined log-scale histogram of both images with median markers."""
@@ -848,6 +848,8 @@ class ReportBuilder:
             colors = {"a": "steelblue", "b": "tomato"}
 
             for img, key, label in [(img_a, "a", img_a.label), (img_b, "b", img_b.label)]:
+                color = colors[key]
+
                 pixels = img.data.ravel().astype(float)
                 positive = pixels[pixels > 0]
                 if len(positive) == 0:
@@ -860,11 +862,26 @@ class ReportBuilder:
                 bins = np.geomspace(lo, hi, 256)
                 counts, edges = np.histogram(positive, bins=bins)
                 centers = np.sqrt(edges[:-1] * edges[1:])
-                color = colors[key]
                 ax.step(centers, counts, where="mid", color=color,
                         alpha=0.85, linewidth=1.4, label=label)
-                median_val = float(np.median(positive))
-                ax.axvline(median_val, color=color, linestyle=":", linewidth=1.5)
+                ax.axvline(float(np.median(positive)), color=color, linestyle=":", linewidth=1.5)
+
+                sl = getattr(img, "starless_image", None)
+                if sl is not None and getattr(sl, "data", None) is not None:
+                    sl_pix = sl.data.ravel().astype(float)
+                    sl_pos = sl_pix[sl_pix > 0]
+                    if len(sl_pos) > 0:
+                        lo2, hi2 = np.percentile(sl_pos, [0.01, 99.99])
+                        if lo2 <= 0:
+                            lo2 = sl_pos.min()
+                        if hi2 <= lo2:
+                            hi2 = lo2 * 10
+                        bins2 = np.geomspace(lo2, hi2, 256)
+                        counts2, edges2 = np.histogram(sl_pos, bins=bins2)
+                        centers2 = np.sqrt(edges2[:-1] * edges2[1:])
+                        ax.step(centers2, counts2, where="mid", color=color,
+                                alpha=0.35, linewidth=1.0, linestyle="--",
+                                label=f"{label} (starless)")
 
             ax.set_xscale("log")
             ax.set_yscale("log")
