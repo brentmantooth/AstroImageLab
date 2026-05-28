@@ -3,6 +3,7 @@
 import base64 as _base64
 import concurrent.futures
 from datetime import datetime as _dt
+import time
 from pathlib import Path as _Path
 from typing import Callable
 
@@ -22,9 +23,11 @@ from report.report_builder import ReportBuilder
 class AnalysisThread(QThread):
     """Runs all selected analysis engines off the main thread."""
 
-    progress = pyqtSignal(int, str)               # (percent, status_text)
-    finished = pyqtSignal(object, object, str)    # (result_a, result_b, report_path)
-    error = pyqtSignal(str)
+    progress       = pyqtSignal(int, str)               # (percent, status_text)
+    finished       = pyqtSignal(object, object, str)    # (result_a, result_b, report_path)
+    error          = pyqtSignal(str)
+    metric_started = pyqtSignal(str)                    # metric key
+    metric_done    = pyqtSignal(str, float, bool)       # key, elapsed_s, success
 
     def __init__(self, image_a: AstroImage, image_b: AstroImage,
                  settings: dict, *,
@@ -276,12 +279,17 @@ class AnalysisThread(QThread):
         for i, (key, label, func) in enumerate(tasks):
             pct = int((i + 1) / (total + 1) * 90) + 5
             self.progress.emit(pct, f"{label}…")
+            self.metric_started.emit(key)
+            t0 = time.monotonic()
+            ok = True
             try:
                 func()
             except Exception as exc:
+                ok = False
                 msg = f"{label} failed: {exc}"
                 result_a.errors[key] = msg
                 result_b.errors[key] = msg
+            self.metric_done.emit(key, time.monotonic() - t0, ok)
 
     # ------------------------------------------------------------------
     # Parallel runner
@@ -294,22 +302,28 @@ class AnalysisThread(QThread):
         self.progress.emit(5, f"Running {total} analyses in parallel…")
 
         future_to_key: dict[concurrent.futures.Future, str] = {}
+        t_start: dict[str, float] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=total) as executor:
             for key, _label, func in tasks:
+                self.metric_started.emit(key)
+                t_start[key] = time.monotonic()
                 future_to_key[executor.submit(func)] = key
 
             completed = 0
             for future in concurrent.futures.as_completed(future_to_key):
                 key = future_to_key[future]
+                elapsed = time.monotonic() - t_start[key]
                 completed += 1
                 pct = int(completed / total * 85) + 5
                 try:
                     future.result()
+                    self.metric_done.emit(key, elapsed, True)
                     self.progress.emit(pct, f"✓ {labels[key]}")
                 except Exception as exc:
                     msg = f"{labels[key]} failed: {exc}"
                     result_a.errors[key] = msg
                     result_b.errors[key] = msg
+                    self.metric_done.emit(key, elapsed, False)
                     self.progress.emit(pct, f"✗ {labels[key]} failed")
 
     # ------------------------------------------------------------------

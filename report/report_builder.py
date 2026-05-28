@@ -279,10 +279,10 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
                     widths=0.45, zorder=5,
                     patch_artist=True,
                     manage_ticks=False,
-                    boxprops=dict(facecolor="none", edgecolor="white", linewidth=1.2, alpha=0.8),
-                    medianprops=dict(color="magenta", linewidth=2.0, alpha=0.8),
-                    whiskerprops=dict(color="lightcyan", linewidth=1.2, alpha=0.8),
-                    capprops=dict(color="lightcyan", linewidth=1.2, alpha=0.8),
+                    boxprops=dict(facecolor="none", edgecolor="#00e5ff", linewidth=1.5, alpha=0.9),
+                    medianprops=dict(color="magenta", linewidth=2.0, alpha=0.9),
+                    whiskerprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                    capprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
                     flierprops=dict(marker="", visible=False),
                 )
 
@@ -322,10 +322,10 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
     # Build an adaptive caption describing only the plot type(s) actually rendered
     type_desc: list[str] = []
     _bw_desc = (
-        "a <span style='color:white'><b>white box</b></span> spanning Q1–Q3 (IQR), "
+        "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1–Q3 (IQR), "
         "a <span style='color:magenta'><b>magenta centre line</b></span> at the median, and "
-        "<span style='color:lightcyan'><b>light-cyan whiskers</b></span> extending to "
-        "1.5&nbsp;&times;&nbsp;IQR — all rendered at 80&nbsp;% opacity on top of the distribution"
+        "<span style='color:#00e5ff'><b>cyan whiskers</b></span> extending to "
+        "1.5&nbsp;&times;&nbsp;IQR — all rendered at 90&nbsp;% opacity on top of the distribution"
     )
     if "strip" in plot_types_used:
         type_desc.append(

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSignal
@@ -53,6 +54,7 @@ class AnalysisControlPanel(QWidget):
         metrics_layout.setColumnMinimumWidth(1, 46)   # Export column
         metrics_layout.setColumnMinimumWidth(2, 36)   # ROI column
         metrics_layout.setColumnMinimumWidth(3, 36)   # XS (cross-section) column
+        metrics_layout.setColumnMinimumWidth(4, 52)   # Time column
 
         _hdr_style = "color: #444; font-size: 9pt;"
         hdr_export = QLabel("Export")
@@ -70,8 +72,16 @@ class AnalysisControlPanel(QWidget):
         hdr_xs.setToolTip("Uses the cross-section line when one is drawn")
         metrics_layout.addWidget(hdr_xs, 0, 3, Qt.AlignmentFlag.AlignHCenter)
 
+        hdr_time = QLabel("Time")
+        hdr_time.setStyleSheet(_hdr_style)
+        hdr_time.setToolTip("Elapsed computation time for each metric")
+        metrics_layout.addWidget(hdr_time, 0, 4, Qt.AlignmentFlag.AlignHCenter)
+
         self._checks: dict[str, QCheckBox] = {}
         self._export_checks: dict[str, QCheckBox] = {}
+        self._time_labels: dict[str, QLabel] = {}
+        self._metric_timers: dict[str, QTimer] = {}
+        self._metric_t0: dict[str, float] = {}
         for row, (key, label, uses_roi, uses_xs) in enumerate([
             #                                                      ROI    XS
             ("snr",     "Signal / Noise (SNR)",                   False, False),
@@ -99,6 +109,18 @@ class AnalysisControlPanel(QWidget):
                     else "color: #aaa; font-size: 10pt;"
                 )
                 metrics_layout.addWidget(ind, row, col, Qt.AlignmentFlag.AlignHCenter)
+
+            tlbl = QLabel("—")
+            tlbl.setStyleSheet("color: #888; font-size: 9pt;")
+            tlbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            tlbl.setFixedWidth(52)
+            metrics_layout.addWidget(tlbl, row, 4, Qt.AlignmentFlag.AlignRight)
+            self._time_labels[key] = tlbl
+
+            timer = QTimer(self)
+            timer.setInterval(250)
+            timer.timeout.connect(lambda k=key: self._tick_metric_timer(k))
+            self._metric_timers[key] = timer
 
         root.addWidget(metrics_box)
 
@@ -298,6 +320,35 @@ class AnalysisControlPanel(QWidget):
         self._progress.setValue(0)
         self._status_label.setText("Ready")
 
+    def reset_metric_timers(self) -> None:
+        for key in self._time_labels:
+            self._metric_timers[key].stop()
+            self._time_labels[key].setText("—")
+            self._time_labels[key].setStyleSheet("color: #888; font-size: 9pt;")
+        self._metric_t0.clear()
+
+    def on_metric_started(self, key: str) -> None:
+        if key not in self._time_labels:
+            return
+        self._metric_t0[key] = time.monotonic()
+        self._time_labels[key].setText("0.0s")
+        self._time_labels[key].setStyleSheet("color: #aac8ff; font-size: 9pt;")
+        self._metric_timers[key].start()
+
+    def _tick_metric_timer(self, key: str) -> None:
+        if key not in self._metric_t0:
+            return
+        elapsed = time.monotonic() - self._metric_t0[key]
+        self._time_labels[key].setText(f"{elapsed:.1f}s")
+
+    def on_metric_done(self, key: str, elapsed: float, success: bool) -> None:
+        if key not in self._time_labels:
+            return
+        self._metric_timers[key].stop()
+        self._time_labels[key].setText(f"{elapsed:.1f}s")
+        color = "#88dd88" if success else "#ff8888"
+        self._time_labels[key].setStyleSheet(f"color: {color}; font-size: 9pt;")
+
     def settings(self) -> dict:
         """Return all current settings as a dict for the analysis thread."""
         pso = self._pixel_scale_override.value()
@@ -342,6 +393,7 @@ class AnalysisControlPanel(QWidget):
         self._timer_label.setText("0:00")
         self._run_timer.start()
         self._status_label.setText("Running…")
+        self.reset_metric_timers()
         out = self._out_dir.text().strip()
         if out:
             QSettings("FilterImageComparator", "FilterImageComparator").setValue(

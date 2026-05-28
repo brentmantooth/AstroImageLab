@@ -393,6 +393,7 @@ class InspectorImageCanvas(QWidget):
                 yl = self._pan_ax.get_ylim()
                 self._pan_ax.set_xlim(xl[0] + dx, xl[1] + dx)
                 self._pan_ax.set_ylim(yl[0] + dy, yl[1] + dy)
+                self._sync_view(self._pan_ax)
                 self._pan_last_x = event.x
                 self._pan_last_y = event.y
                 self._canvas.draw_idle()
@@ -418,6 +419,30 @@ class InspectorImageCanvas(QWidget):
             return
         self._drag_divider = False
 
+    def _sync_view(self, source_ax) -> None:
+        """Copy the current normalized view of source_ax to the other axis.
+
+        Uses fractional image coordinates so images with different pixel dimensions
+        stay aligned to the same relative region.
+        """
+        if self._mode != "side_by_side":
+            return
+        if source_ax is self._ax_a:
+            other_ax, source_arr, other_arr = self._ax_b, self._arr_a, self._arr_b
+        else:
+            other_ax, source_arr, other_arr = self._ax_a, self._arr_b, self._arr_a
+        if other_ax is None or source_arr is None or other_arr is None:
+            return
+        H_s, W_s = source_arr.shape[:2]
+        H_o, W_o = other_arr.shape[:2]
+        xl = source_ax.get_xlim()
+        yl = source_ax.get_ylim()
+        # Normalise to [0, 1] fractions of the source image, then scale to other image
+        other_ax.set_xlim((xl[0] + 0.5) / W_s * W_o - 0.5,
+                           (xl[1] + 0.5) / W_s * W_o - 0.5)
+        other_ax.set_ylim((yl[0] + 0.5) / H_s * H_o - 0.5,
+                           (yl[1] + 0.5) / H_s * H_o - 0.5)
+
     def _on_scroll(self, event) -> None:
         if event.xdata is None or event.ydata is None:
             return
@@ -430,6 +455,7 @@ class InspectorImageCanvas(QWidget):
         xl, yl = ax.get_xlim(), ax.get_ylim()
         ax.set_xlim(xc + (xl[0] - xc) * factor, xc + (xl[1] - xc) * factor)
         ax.set_ylim(yc + (yl[0] - yc) * factor, yc + (yl[1] - yc) * factor)
+        self._sync_view(ax)
         self._canvas.draw_idle()
 
     def reset_zoom(self) -> None:

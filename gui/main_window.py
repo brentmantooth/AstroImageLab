@@ -211,6 +211,8 @@ class MainWindow(QMainWindow):
         self._thread.progress.connect(self._on_progress)
         self._thread.finished.connect(self._on_finished)
         self._thread.error.connect(self._on_error)
+        self._thread.metric_started.connect(self._control.on_metric_started)
+        self._thread.metric_done.connect(self._control.on_metric_done)
         self._thread.start()
 
     def _on_progress(self, pct: int, msg: str) -> None:
