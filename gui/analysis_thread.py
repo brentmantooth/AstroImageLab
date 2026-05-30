@@ -196,11 +196,13 @@ class AnalysisThread(QThread):
         if metrics.get("spatial"):
             wavelet_levels = s.get("wavelet_levels", 4)
             crosshair = s.get("crosshair")
+            xs_snr_width = s.get("xs_snr_width")
 
             def _spatial(sd_a=self._starless_a or img_a, sd_b=self._starless_b or img_b,
-                          _ch=crosshair, _roi=roi):
+                          _ch=crosshair, _roi=roi, _xs_snr_width=xs_snr_width):
                 sda = SpatialDetailAnalyzer()
-                spatial = sda.analyze(sd_a, sd_b, levels=wavelet_levels, crosshair=_ch, roi=_roi)
+                spatial = sda.analyze(sd_a, sd_b, levels=wavelet_levels, crosshair=_ch, roi=_roi,
+                                      xs_snr_width=_xs_snr_width)
                 spatial["used_starless_a"] = self._starless_a is not None
                 spatial["used_starless_b"] = self._starless_b is not None
                 result_a.spatial_metrics = spatial

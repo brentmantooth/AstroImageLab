@@ -188,6 +188,9 @@ class InspectorImageCanvas(QWidget):
         self._pan_last_y = 0.0
         self._pan_ax     = None  # axes being panned
 
+        # Saved zoom/pan: keyed "a"/"b" → (xlim, ylim). Empty = full-image view.
+        self._view_state: dict = {}
+
         self._fig = plt.figure(figsize=(10, 6), constrained_layout=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -249,8 +252,18 @@ class InspectorImageCanvas(QWidget):
     # Internal
     # ------------------------------------------------------------------
 
+    def _save_view_state(self) -> None:
+        """Snapshot the current xlim/ylim of active axes for restore after _redraw."""
+        state: dict = {}
+        if self._ax_a is not None:
+            state["a"] = (self._ax_a.get_xlim(), self._ax_a.get_ylim())
+        if self._ax_b is not None:
+            state["b"] = (self._ax_b.get_xlim(), self._ax_b.get_ylim())
+        self._view_state = state
+
     def _rebuild_axes(self) -> None:
         self._fig.clear()
+        self._view_state = {}
         if self._mode == "side_by_side":
             axes = self._fig.subplots(1, 2)
             self._ax_a, self._ax_b = axes[0], axes[1]
@@ -312,6 +325,16 @@ class InspectorImageCanvas(QWidget):
                                 color="yellow", lw=1.5, solid_capstyle="round")
                 self._ax_a.plot(*self._p0, "+", color="yellow", ms=10, mew=1.5)
                 self._ax_a.plot(*self._p1, "+", color="yellow", ms=10, mew=1.5)
+
+        # Restore zoom/pan state saved before this redraw so that cross-section
+        # clicks and other _redraw() triggers don't reset the view.
+        if self._view_state:
+            if "a" in self._view_state and self._ax_a is not None:
+                self._ax_a.set_xlim(self._view_state["a"][0])
+                self._ax_a.set_ylim(self._view_state["a"][1])
+            if "b" in self._view_state and self._ax_b is not None:
+                self._ax_b.set_xlim(self._view_state["b"][0])
+                self._ax_b.set_ylim(self._view_state["b"][1])
 
         self._canvas.draw_idle()
 
@@ -396,6 +419,7 @@ class InspectorImageCanvas(QWidget):
                 self._sync_view(self._pan_ax)
                 self._pan_last_x = event.x
                 self._pan_last_y = event.y
+                self._save_view_state()
                 self._canvas.draw_idle()
             except Exception:
                 pass
@@ -456,10 +480,12 @@ class InspectorImageCanvas(QWidget):
         ax.set_xlim(xc + (xl[0] - xc) * factor, xc + (xl[1] - xc) * factor)
         ax.set_ylim(yc + (yl[0] - yc) * factor, yc + (yl[1] - yc) * factor)
         self._sync_view(ax)
+        self._save_view_state()
         self._canvas.draw_idle()
 
     def reset_zoom(self) -> None:
         """Restore axes to the full-image view."""
+        self._view_state = {}
         for ax, arr in [(self._ax_a, self._arr_a), (self._ax_b, self._arr_b)]:
             if ax is None or arr is None:
                 continue

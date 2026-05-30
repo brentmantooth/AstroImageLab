@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 
 from core.models import (
     STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_LEVELS, DEFAULT_PIXEL_SCALE,
-    MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC,
+    MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC, XS_SNR_REGION_WIDTH,
 )
 
 
@@ -152,6 +152,15 @@ class AnalysisControlPanel(QWidget):
         self._wavelet_levels.setRange(2, 6)
         self._wavelet_levels.setValue(WAVELET_LEVELS)
         params_layout.addRow("Wavelet levels:", self._wavelet_levels)
+
+        self._xs_snr_width = QSpinBox()
+        self._xs_snr_width.setRange(3, 100)
+        self._xs_snr_width.setValue(XS_SNR_REGION_WIDTH)
+        self._xs_snr_width.setToolTip(
+            "Width (px) of the bright/dark sample windows used to compute\n"
+            "cross-section SNR in the Spatial Detail section."
+        )
+        params_layout.addRow("XS SNR region width:", self._xs_snr_width)
 
         self._ref_seeing_arcsec = QDoubleSpinBox()
         self._ref_seeing_arcsec.setRange(0.5, 10.0)
@@ -360,6 +369,7 @@ class AnalysisControlPanel(QWidget):
             "seeing_warn_arcsec": self._seeing_thresh.value(),
             "pixel_scale_override": pso if pso > 0 else None,
             "wavelet_levels": self._wavelet_levels.value(),
+            "xs_snr_width": self._xs_snr_width.value(),
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "roi": self._roi,
             "crosshair": self._line,

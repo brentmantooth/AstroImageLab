@@ -10,7 +10,9 @@ import pywt
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64, figs_to_b64
-from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS, XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP
+from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
+                         XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
+                         XS_SNR_REGION_WIDTH)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -29,7 +31,8 @@ class SpatialDetailAnalyzer:
                 wavelet: str = WAVELET_NAME,
                 levels: int = WAVELET_LEVELS,
                 crosshair: dict | None = None,
-                roi: tuple | None = None) -> dict:
+                roi: tuple | None = None,
+                xs_snr_width: int | None = None) -> dict:
 
         image_a.estimate_background()
         image_b.estimate_background()
@@ -141,6 +144,15 @@ class SpatialDetailAnalyzer:
                 title="Cross-section brightness profile (raw counts)",
                 ylabel="Pixel value (raw ADU)",
             ), dpi=150)
+
+            _width = xs_snr_width if xs_snr_width is not None else XS_SNR_REGION_WIDTH
+            xs_snr = self._compute_xs_snr(
+                pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
+                image_a.label, image_b.label, _width)
+            if xs_snr:
+                result["xs_snr"] = {k: v for k, v in xs_snr.items() if k != "fig"}
+                figures["xs_snr_profile"] = fig_to_b64(xs_snr["fig"], dpi=150)
+                plt.close(xs_snr["fig"])
 
         result["crosshair"] = crosshair
         result["figures"] = figures
@@ -625,3 +637,92 @@ class SpatialDetailAnalyzer:
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         return fig
+
+    @staticmethod
+    def _compute_xs_snr(pos_a: np.ndarray, prof_a: np.ndarray,
+                         pos_b: np.ndarray, prof_b: np.ndarray,
+                         label_a: str, label_b: str,
+                         width: int) -> dict | None:
+        """Compute std-based SNR for both profiles and produce a shaded profile figure.
+
+        Bright region centred on prof_a argmax; dark region on prof_a argmin.
+        Both images sample the same profile positions for a fair comparison.
+        Returns a dict with scalar metrics and a 'fig' key, or None if arrays are too short.
+        """
+        n = min(len(prof_a), len(prof_b))
+        if n < width * 2:
+            return None
+        prof_a = prof_a[:n].astype(float)
+        prof_b = prof_b[:n].astype(float)
+        pos    = pos_a[:n]
+
+        def _bounds(idx: int, w: int, length: int) -> tuple[int, int]:
+            half  = w // 2
+            start = max(0, idx - half)
+            end   = min(length, start + w)
+            start = max(0, end - w)
+            return start, end
+
+        bright_idx = int(np.argmax(prof_a))
+        dark_idx   = int(np.argmin(prof_a))
+        bs, be = _bounds(bright_idx, width, n)
+        ds, de = _bounds(dark_idx,   width, n)
+
+        def _snr(prof: np.ndarray) -> float:
+            b_mean, b_std = float(np.mean(prof[bs:be])), float(np.std(prof[bs:be]))
+            d_mean, d_std = float(np.mean(prof[ds:de])), float(np.std(prof[ds:de]))
+            denom = (b_std ** 2 + d_std ** 2) / width
+            if denom <= 0:
+                return float("nan")
+            return (b_mean - d_mean) / float(np.sqrt(denom))
+
+        snr_a = _snr(prof_a)
+        snr_b = _snr(prof_b)
+
+        abs_a = abs(snr_a) if not np.isnan(snr_a) else 0.0
+        abs_b = abs(snr_b) if not np.isnan(snr_b) else 0.0
+        if abs_a > 0 and abs_b > 0:
+            hi, lo = max(abs_a, abs_b), min(abs_a, abs_b)
+            exposure_factor = (hi / lo) ** 2
+            higher_label = label_a if abs_a >= abs_b else label_b
+            lower_label  = label_b if abs_a >= abs_b else label_a
+        else:
+            exposure_factor = float("nan")
+            higher_label = label_a
+            lower_label  = label_b
+
+        # ── Figure ────────────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(9, 4), constrained_layout=True)
+        ax.plot(pos, prof_a, color="steelblue", linewidth=1.5,
+                alpha=XS_LINE_ALPHA, label=label_a)
+        ax.plot(pos, prof_b, color="tomato", linewidth=1.5,
+                alpha=XS_LINE_ALPHA, label=label_b)
+
+        bright_pos_lo = float(pos[bs]) if bs < len(pos) else 0.0
+        bright_pos_hi = float(pos[be - 1]) if be - 1 < len(pos) else float(pos[-1])
+        dark_pos_lo   = float(pos[ds]) if ds < len(pos) else 0.0
+        dark_pos_hi   = float(pos[de - 1]) if de - 1 < len(pos) else float(pos[-1])
+
+        ax.axvspan(bright_pos_lo, bright_pos_hi, alpha=0.25, color="gold",
+                   label=f"Bright region ({width} px)")
+        ax.axvspan(dark_pos_lo,   dark_pos_hi,   alpha=0.20, color="gray",
+                   label=f"Dark region ({width} px)")
+        ax.set_xlabel("Distance (px)")
+        ax.set_ylabel("Pixel value (ADU)")
+        ax.set_title("Cross-section SNR — bright/dark sample regions")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        return {
+            "snr_a":           snr_a,
+            "snr_b":           snr_b,
+            "exposure_factor": exposure_factor,
+            "higher_label":    higher_label,
+            "lower_label":     lower_label,
+            "width":           width,
+            "bright_start":    bs,
+            "bright_end":      be,
+            "dark_start":      ds,
+            "dark_end":        de,
+            "fig":             fig,
+        }

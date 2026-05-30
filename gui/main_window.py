@@ -4,7 +4,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QMessageBox, QFileDialog,
+    QSplitter, QMessageBox, QFileDialog, QPushButton,
 )
 
 from gui.image_panel import ImagePanel
@@ -46,6 +46,15 @@ class MainWindow(QMainWindow):
         splitter.setSizes([600, 600])
         main_layout.addWidget(splitter, stretch=1)
 
+        # Toolbar between image panels and control panel
+        toolbar = QHBoxLayout()
+        self._reset_zoom_btn = QPushButton("Reset Zoom")
+        self._reset_zoom_btn.setFixedWidth(90)
+        self._reset_zoom_btn.clicked.connect(self._reset_zoom)
+        toolbar.addWidget(self._reset_zoom_btn)
+        toolbar.addStretch()
+        main_layout.addLayout(toolbar)
+
         # Control panel below images
         self._control = AnalysisControlPanel()
         self._control.setMaximumHeight(240)
@@ -58,6 +67,10 @@ class MainWindow(QMainWindow):
         self._panel_b.roi_selected.connect(self._on_roi_selected)
         self._panel_a.line_selected.connect(self._on_line_selected)
         self._panel_b.line_selected.connect(self._on_line_selected)
+
+        # Synchronized zoom/pan between panels
+        self._panel_a._img_label.view_changed.connect(self._panel_b._img_label.apply_view)
+        self._panel_b._img_label.view_changed.connect(self._panel_a._img_label.apply_view)
 
         self._control.run_requested.connect(self._on_run)
         self._control.roi_mode_toggled.connect(self._on_roi_mode_toggled)
@@ -269,6 +282,10 @@ class MainWindow(QMainWindow):
             return
         self._inspector = ReportInspector(npz_path, parent=self)
         self._inspector.show()
+
+    def _reset_zoom(self) -> None:
+        self._panel_a._img_label.reset_zoom()
+        self._panel_b._img_label.reset_zoom()
 
     def _on_error(self, msg: str) -> None:
         self._control.reset_progress()

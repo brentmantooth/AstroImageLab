@@ -3757,6 +3757,68 @@ Use this to assess absolute signal levels and dynamic range between filters.</p>
         else:
             xs_crosshair_html = ""
 
+        # --- Cross-section SNR sub-section ---
+        xs_snr_html = ""
+        xs_snr = _sm.get("xs_snr")
+        if _has_xs and xs_snr and "xs_snr_profile" in _figs:
+            snr_a_val     = xs_snr.get("snr_a")
+            snr_b_val     = xs_snr.get("snr_b")
+            factor_val    = xs_snr.get("exposure_factor")
+            higher_label  = xs_snr.get("higher_label", ra.label)
+            lower_label   = xs_snr.get("lower_label", rb.label)
+            xs_width      = xs_snr.get("width", 15)
+
+            ca_snr, cb_snr = _better_worse_class(snr_a_val, snr_b_val, higher_is_better=True)
+            exp_a = 1.0 if higher_label == ra.label else (factor_val if factor_val else float("nan"))
+            exp_b = 1.0 if higher_label == rb.label else (factor_val if factor_val else float("nan"))
+            ca_exp, cb_exp = _better_worse_class(exp_a, exp_b, higher_is_better=False)
+
+            if factor_val and not (isinstance(factor_val, float) and factor_val != factor_val):
+                exp_sentence = (
+                    f"<em>{lower_label}</em> requires <strong>{factor_val:.2f}&times;</strong> "
+                    f"more exposure time than <em>{higher_label}</em> to achieve the same "
+                    f"cross-section SNR."
+                )
+            else:
+                exp_sentence = "Relative exposure factor could not be computed (one or both SNR values invalid)."
+
+            xs_snr_html = f"""
+<h3>3c. Cross-Section SNR</h3>
+<div class="info-box">
+  <p><strong>Methodology:</strong> A {xs_width}-px sample window centred on the profile
+  peak (bright region, gold band) and profile trough (dark region, grey band) is used
+  to estimate signal-to-noise ratio from the raw ADU cross-section. Both images sample
+  the same physical positions (determined from Image A's peak/trough) for a direct
+  comparison.</p>
+  <p><strong>SNR formula (std-based):</strong>
+  SNR&nbsp;=&nbsp;(&mu;<sub>bright</sub>&nbsp;&minus;&nbsp;&mu;<sub>dark</sub>)&nbsp;/&nbsp;
+  &radic;((&sigma;<sub>bright</sub>&sup2;&nbsp;+&nbsp;&sigma;<sub>dark</sub>&sup2;)&nbsp;/&nbsp;width),
+  where &mu; and &sigma; are the mean and standard deviation within each sample window.</p>
+  <p><strong>Assumptions:</strong> The cross-section line passes through a representative
+  bright nebula or signal feature (peak) and a dark background region (trough). Both images
+  are assumed to share the same sky coordinates. Region width is adjustable via the
+  &ldquo;XS SNR region width&rdquo; parameter.</p>
+  <p><strong>Relative exposure:</strong> Because SNR &prop; &radic;t, achieving equal SNR
+  requires (SNR<sub>higher</sub>&nbsp;/&nbsp;SNR<sub>lower</sub>)&sup2; more exposure
+  time on the lower-SNR image. Assumes identical sky conditions and read noise.</p>
+</div>
+{_hires_img_tag(_figs["xs_snr_profile"], "xs_snr_profile")}
+<p class="caption">Raw ADU cross-section with gold (bright) and grey (dark) shaded
+sample regions ({xs_width}&nbsp;px wide). Higher signal in the bright region and lower
+signal in the dark region produce a higher SNR.</p>
+<table>
+  <thead><tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr></thead>
+  <tbody>
+    <tr><td>Cross-section SNR</td>
+        <td class="{ca_snr}">{_val(snr_a_val, ".1f")}</td>
+        <td class="{cb_snr}">{_val(snr_b_val, ".1f")}</td></tr>
+    <tr><td>Relative exposure to match SNR</td>
+        <td class="{ca_exp}">{_val(exp_a, ".2f")}&times;</td>
+        <td class="{cb_exp}">{_val(exp_b, ".2f")}&times;</td></tr>
+  </tbody>
+</table>
+<p>{exp_sentence}</p>"""
+
         return f"""
 <h2>3. Signal-to-Noise Ratio (SNR)</h2>
 {err}
@@ -3872,6 +3934,7 @@ Both images share the same color scale (P2&ndash;P98 of the higher-SNR image) fo
 comparison. Bright regions have high SNR; blank sky clusters near zero.
 A uniformly brighter map indicates deeper, more signal-rich data.</p>
 {xs_crosshair_html}
+{xs_snr_html}
 {starless_html}"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
@@ -3914,6 +3977,21 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                     f"<td class='{ca}'>{_val_pm(val_a, spread_a, fmt)}</td>"
                     f"<td class='{cb}'>{_val_pm(val_b, spread_b, fmt)}</td></tr>")
 
+        xs_snr_data = (ra.spatial_metrics or {}).get("xs_snr") if ra.spatial_metrics else None
+        xs_snr_rows = ""
+        if xs_snr_data:
+            xs_snr_a_val = xs_snr_data.get("snr_a")
+            xs_snr_b_val = xs_snr_data.get("snr_b")
+            xs_factor    = xs_snr_data.get("exposure_factor")
+            xs_higher    = xs_snr_data.get("higher_label", ra.label)
+            xs_exp_a = 1.0 if xs_higher == ra.label else (xs_factor if xs_factor else float("nan"))
+            xs_exp_b = 1.0 if xs_higher == rb.label else (xs_factor if xs_factor else float("nan"))
+            xs_snr_rows = (
+                row("XS SNR (cross-section)", xs_snr_a_val, xs_snr_b_val, fmt=".1f")
+                + row("XS exposure factor (&times;)", xs_exp_a, xs_exp_b,
+                      fmt=".2f", higher_is_better=False)
+            )
+
         rows = "".join([
             row_pm("FWHM (px)", psf_a.get("fwhm_px"), psf_b.get("fwhm_px"),
                    psf_a.get("fwhm_px_mad"), psf_b.get("fwhm_px_mad"),
@@ -3954,7 +4032,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                 snr_mb.get("snr_global"),
                 fmt=".4f",
             )]),
-        ])
+        ]) + xs_snr_rows
 
         legend = ('<p><span class="metric-label-ok">✓</span> = bandwidth-independent '
                   'comparison &nbsp;&nbsp; '
