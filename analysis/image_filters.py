@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import concurrent.futures
 import numpy as np
 import matplotlib
 import matplotlib.colors as mcolors
@@ -96,38 +97,46 @@ class SpatialDetailAnalyzer:
 
         result["display_roi"] = display_roi
 
-        # 1. Local standard deviation maps
-        std_figs = self._std_analysis(
-            analysis_a, analysis_b,
-            mask_neb_a, mask_bg_a,
-            mask_neb_b, mask_bg_b,
-            kernel_sizes,
-            image_a.label, image_b.label,
-            result,
-            display_roi=display_roi,
-            crosshair=crosshair_roi,
-        )
-        figures.update(figs_to_b64(std_figs, dpi=150))
+        # 1-3. Local std, LoG, wavelet — all read norm_a/norm_b with no shared mutable state,
+        # so they run concurrently. Each method returns (b64_figs, partial_result).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as _ex:
+            _f_std = _ex.submit(self._std_analysis,
+                analysis_a, analysis_b,
+                mask_neb_a, mask_bg_a,
+                mask_neb_b, mask_bg_b,
+                kernel_sizes,
+                image_a.label, image_b.label,
+                display_roi=display_roi,
+                crosshair=crosshair_roi,
+            )
+            _f_log = _ex.submit(self._log_analysis,
+                analysis_a, analysis_b, log_sigmas,
+                image_a.label, image_b.label,
+                display_roi=display_roi,
+                crosshair=crosshair_roi,
+            )
+            _f_wav = _ex.submit(self._wavelet_analysis,
+                analysis_a, analysis_b, wavelet, levels,
+                image_a.label, image_b.label,
+                display_roi=display_roi,
+                crosshair=crosshair_roi,
+            )
+            std_b64, std_partial = _f_std.result()
+            log_b64, log_partial = _f_log.result()
+            wav_b64, wav_partial = _f_wav.result()
 
-        # 2. Laplacian of Gaussian maps
-        log_figs = self._log_analysis(
-            analysis_a, analysis_b, log_sigmas,
-            image_a.label, image_b.label,
-            result,
-            display_roi=display_roi,
-            crosshair=crosshair_roi,
-        )
-        figures.update(figs_to_b64(log_figs, dpi=150))
-
-        # 3. Wavelet decomposition
-        wav_figs = self._wavelet_analysis(
-            analysis_a, analysis_b, wavelet, levels,
-            image_a.label, image_b.label,
-            result,
-            display_roi=display_roi,
-            crosshair=crosshair_roi,
-        )
-        figures.update(figs_to_b64(wav_figs, dpi=150))
+        figures.update(std_b64)
+        figures.update(log_b64)
+        figures.update(wav_b64)
+        result["contrast_ratios_a"].update(std_partial["contrast_ratios_a"])
+        result["contrast_ratios_b"].update(std_partial["contrast_ratios_b"])
+        result["sigma_noise_a"] = wav_partial["sigma_noise_a"]
+        result["sigma_noise_b"] = wav_partial["sigma_noise_b"]
+        result["wavelet_snr_a"].update(wav_partial["wavelet_snr_a"])
+        result["wavelet_snr_b"].update(wav_partial["wavelet_snr_b"])
+        result["panels"].update(std_partial["panels"])
+        result["panels"].update(log_partial["panels"])
+        result["panels"].update(wav_partial["panels"])
 
         if crosshair is not None:
             figures["xs_context"] = fig_to_b64(self._plot_context_figure(
@@ -225,10 +234,10 @@ class SpatialDetailAnalyzer:
                        mask_neb_a, mask_bg_a,
                        mask_neb_b, mask_bg_b,
                        kernel_sizes, label_a, label_b,
-                       result: dict,
                        display_roi=None,
-                       crosshair=None) -> dict:
+                       crosshair=None) -> tuple[dict, dict]:
         figures = {}
+        partial: dict = {"contrast_ratios_a": {}, "contrast_ratios_b": {}, "panels": {}}
         for ks in kernel_sizes:
             std_a = self._compute_std_map(norm_a, ks)
             std_b = self._compute_std_map(norm_b, ks)
@@ -236,10 +245,10 @@ class SpatialDetailAnalyzer:
             # Contrast ratios (computed on unsmoothed maps)
             cr_a = self._contrast_ratio(std_a, mask_neb_a, mask_bg_a)
             cr_b = self._contrast_ratio(std_b, mask_neb_b, mask_bg_b)
-            result["contrast_ratios_a"][ks] = cr_a
-            result["contrast_ratios_b"][ks] = cr_b
+            partial["contrast_ratios_a"][ks] = cr_a
+            partial["contrast_ratios_b"][ks] = cr_b
 
-            result["panels"][f"std_{ks}px"] = {
+            partial["panels"][f"std_{ks}px"] = {
                 "a":    std_a.astype(np.float32),
                 "b":    std_b.astype(np.float32),
                 "diff": (std_a - std_b).astype(np.float32),
@@ -263,7 +272,7 @@ class SpatialDetailAnalyzer:
                     pos, pa, pb, label_a, label_b,
                     f"Cross-section — Local σ, kernel {ks}px")
 
-        return figures
+        return figs_to_b64(figures, dpi=150), partial
 
     def _compute_std_map(self, norm: np.ndarray, kernel_size: int) -> np.ndarray:
         # Downsample for performance if image is large
@@ -303,14 +312,14 @@ class SpatialDetailAnalyzer:
 
     def _log_analysis(self, norm_a, norm_b, sigmas,
                        label_a, label_b,
-                       result: dict,
                        display_roi=None,
-                       crosshair=None) -> dict:
+                       crosshair=None) -> tuple[dict, dict]:
         figures = {}
+        partial: dict = {"panels": {}}
         for sigma in sigmas:
             log_a = np.abs(gaussian_laplace(norm_a, sigma=sigma))
             log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma))
-            result["panels"][f"log_{sigma}"] = {
+            partial["panels"][f"log_{sigma}"] = {
                 "a":    log_a.astype(np.float32),
                 "b":    log_b.astype(np.float32),
                 "diff": (log_a - log_b).astype(np.float32),
@@ -332,17 +341,22 @@ class SpatialDetailAnalyzer:
                 figures[f"xs_log_sigma{sigma}"] = self._plot_cross_section(
                     pos, pa, pb, label_a, label_b,
                     f"Cross-section — |LoG|, σ={sigma}px")
-        return figures
+        return figs_to_b64(figures, dpi=150), partial
 
     # ------------------------------------------------------------------
     # Wavelet decomposition
     # ------------------------------------------------------------------
 
     def _wavelet_analysis(self, norm_a, norm_b, wavelet, levels,
-                           label_a, label_b, result: dict,
+                           label_a, label_b,
                            display_roi=None,
-                           crosshair=None) -> dict:
+                           crosshair=None) -> tuple[dict, dict]:
         figures = {}
+        partial: dict = {
+            "sigma_noise_a": None, "sigma_noise_b": None,
+            "wavelet_snr_a": {}, "wavelet_snr_b": {},
+            "panels": {},
+        }
 
         coeffs_a = pywt.wavedec2(norm_a, wavelet, level=levels,
                                    mode="periodization")
@@ -351,8 +365,8 @@ class SpatialDetailAnalyzer:
 
         sigma_a = self._estimate_noise(coeffs_a)
         sigma_b = self._estimate_noise(coeffs_b)
-        result["sigma_noise_a"] = sigma_a
-        result["sigma_noise_b"] = sigma_b
+        partial["sigma_noise_a"] = sigma_a
+        partial["sigma_noise_b"] = sigma_b
 
         # Per-level SNR (index 1 = coarsest detail, -1 = finest detail)
         for lvl_idx in range(1, levels + 1):
@@ -361,12 +375,12 @@ class SpatialDetailAnalyzer:
             coeff_idx = levels + 1 - lvl_idx  # map human level to list index
             snr_a = self._level_snr(coeffs_a, coeff_idx, sigma_a, lvl_idx)
             snr_b = self._level_snr(coeffs_b, coeff_idx, sigma_b, lvl_idx)
-            result["wavelet_snr_a"][lvl_idx] = snr_a
-            result["wavelet_snr_b"][lvl_idx] = snr_b
+            partial["wavelet_snr_a"][lvl_idx] = snr_a
+            partial["wavelet_snr_b"][lvl_idx] = snr_b
 
         # SNR bar chart
         figures["wavelet_snr"] = self._plot_snr_bars(
-            result["wavelet_snr_a"], result["wavelet_snr_b"], label_a, label_b, levels)
+            partial["wavelet_snr_a"], partial["wavelet_snr_b"], label_a, label_b, levels)
 
         # Reconstruct and display levels 2 and 3 (best signal content)
         for display_level in [2, 3]:
@@ -375,7 +389,7 @@ class SpatialDetailAnalyzer:
             coeff_idx = levels + 1 - display_level
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
             rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels)
-            result["panels"][f"wavelet_{display_level}"] = {
+            partial["panels"][f"wavelet_{display_level}"] = {
                 "a":    rec_a.astype(np.float32),
                 "b":    rec_b.astype(np.float32),
                 "diff": (rec_a - rec_b).astype(np.float32),
@@ -397,7 +411,7 @@ class SpatialDetailAnalyzer:
                     pos, pa, pb, label_a, label_b,
                     f"Cross-section — Wavelet level {display_level}")
 
-        return figures
+        return figs_to_b64(figures, dpi=150), partial
 
     def _estimate_noise(self, coeffs) -> float:
         # Finest-level horizontal detail (last element, first sub-band)

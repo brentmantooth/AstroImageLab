@@ -104,16 +104,20 @@ class AnalysisThread(QThread):
         if metrics.get("psf"):
             _epsf_max = s.get("epsf_max_stars", 500)
             def _psf(img_a=img_a, img_b=img_b, _max=_epsf_max):
-                a = PSFAnalyzer(epsf_max_stars=_max)
-                result_a.psf_metrics = a.analyze(img_a)
-                result_b.psf_metrics = a.analyze(img_b)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    fa = ex.submit(PSFAnalyzer(epsf_max_stars=_max).analyze, img_a)
+                    fb = ex.submit(PSFAnalyzer(epsf_max_stars=_max).analyze, img_b)
+                    result_a.psf_metrics = fa.result()
+                    result_b.psf_metrics = fb.result()
             tasks.append(("psf", "Computing PSF / MTF", _psf))
 
         if metrics.get("halo"):
             def _halo(img_a=img_a, img_b=img_b):
-                a = HaloAnalyzer()
-                result_a.halo_metrics = a.analyze(img_a)
-                result_b.halo_metrics = a.analyze(img_b)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    fa = ex.submit(HaloAnalyzer().analyze, img_a)
+                    fb = ex.submit(HaloAnalyzer().analyze, img_b)
+                    result_a.halo_metrics = fa.result()
+                    result_b.halo_metrics = fb.result()
             tasks.append(("halo", "Analysing halos", _halo))
 
 
@@ -169,15 +173,17 @@ class AnalysisThread(QThread):
 
         if metrics.get("power"):
             def _power(ps_a=self._starless_a or img_a, ps_b=self._starless_b or img_b):
-                pa = PowerSpectrumAnalyzer()
-                result_a.power_metrics = pa.analyze(ps_a, roi=roi)
-                result_b.power_metrics = pa.analyze(ps_b, roi=roi)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    fa = ex.submit(PowerSpectrumAnalyzer().analyze, ps_a, roi)
+                    fb = ex.submit(PowerSpectrumAnalyzer().analyze, ps_b, roi)
+                    result_a.power_metrics = fa.result()
+                    result_b.power_metrics = fb.result()
                 result_a.power_metrics["used_starless"] = self._starless_a is not None
                 result_b.power_metrics["used_starless"] = self._starless_b is not None
                 # When a starless image was the primary input, also run on the star
                 # image so the report can show the effect of stars on the spectrum.
                 if self._starless_a is not None:
-                    sm = pa.analyze(img_a, roi=roi)
+                    sm = PowerSpectrumAnalyzer().analyze(img_a, roi=roi)
                     result_a.power_metrics["star_power"] = {
                         "figures":        sm.get("figures"),
                         "radial_power":   sm.get("radial_power"),
@@ -185,7 +191,7 @@ class AnalysisThread(QThread):
                         "mid_high_ratio": sm.get("mid_high_ratio"),
                     }
                 if self._starless_b is not None:
-                    sm = pa.analyze(img_b, roi=roi)
+                    sm = PowerSpectrumAnalyzer().analyze(img_b, roi=roi)
                     result_b.power_metrics["star_power"] = {
                         "figures":        sm.get("figures"),
                         "radial_power":   sm.get("radial_power"),
@@ -215,13 +221,15 @@ class AnalysisThread(QThread):
             sl_b = self._starless_b
             def _snr(sl_a=sl_a, sl_b=sl_b):
                 from analysis.snr_analyzer import SNRAnalyzer
-                sa = SNRAnalyzer()
-                result_a.snr_metrics = sa.analyze(img_a)
-                result_b.snr_metrics = sa.analyze(img_b)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                    fa = ex.submit(SNRAnalyzer().analyze, img_a)
+                    fb = ex.submit(SNRAnalyzer().analyze, img_b)
+                    result_a.snr_metrics = fa.result()
+                    result_b.snr_metrics = fb.result()
                 if sl_a is not None:
-                    result_a.snr_metrics["starless"] = sa.analyze(sl_a)
+                    result_a.snr_metrics["starless"] = SNRAnalyzer().analyze(sl_a)
                 if sl_b is not None:
-                    result_b.snr_metrics["starless"] = sa.analyze(sl_b)
+                    result_b.snr_metrics["starless"] = SNRAnalyzer().analyze(sl_b)
             tasks.append(("snr", "Computing SNR maps", _snr))
 
         if parallel and len(tasks) > 1:
