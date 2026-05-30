@@ -32,6 +32,7 @@ WAVELET_LEVELS = 4
 
 XS_LINE_ALPHA = 0.8   # alpha for all cross-section profile lines in reports
 XS_SNR_REGION_WIDTH = 15   # px; width of bright/dark sample region for cross-section SNR
+EPSF_MAX_STARS = 500   # maximum candidate stars passed to EPSFBuilder; limits computation time
 SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension cropped from perimeter in Section 8 display maps
 SECTION8_ANALYSIS_CMAP = "viridis"     # colormap for Section 8 A/B analysis map panels (std, LoG, wavelet)
 

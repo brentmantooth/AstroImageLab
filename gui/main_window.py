@@ -46,15 +46,6 @@ class MainWindow(QMainWindow):
         splitter.setSizes([600, 600])
         main_layout.addWidget(splitter, stretch=1)
 
-        # Toolbar between image panels and control panel
-        toolbar = QHBoxLayout()
-        self._reset_zoom_btn = QPushButton("Reset Zoom")
-        self._reset_zoom_btn.setFixedWidth(90)
-        self._reset_zoom_btn.clicked.connect(self._reset_zoom)
-        toolbar.addWidget(self._reset_zoom_btn)
-        toolbar.addStretch()
-        main_layout.addLayout(toolbar)
-
         # Control panel below images
         self._control = AnalysisControlPanel()
         self._control.setMaximumHeight(240)
@@ -67,6 +58,14 @@ class MainWindow(QMainWindow):
         self._panel_b.roi_selected.connect(self._on_roi_selected)
         self._panel_a.line_selected.connect(self._on_line_selected)
         self._panel_b.line_selected.connect(self._on_line_selected)
+
+        # Reset Zoom button centred in Image A's header row
+        self._reset_zoom_btn = QPushButton("Reset Zoom")
+        self._reset_zoom_btn.setFixedWidth(90)
+        self._reset_zoom_btn.clicked.connect(self._reset_zoom)
+        hdr = self._panel_a._header_layout
+        hdr.insertWidget(2, self._reset_zoom_btn)
+        hdr.insertStretch(3)
 
         # Synchronized zoom/pan between panels
         self._panel_a._img_label.view_changed.connect(self._panel_b._img_label.apply_view)

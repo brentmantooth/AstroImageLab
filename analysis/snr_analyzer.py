@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -81,6 +82,33 @@ class SNRAnalyzer:
         background_median = (float(np.median(image.background.background))
                              if image.background is not None else None)
 
+        # --- Camera gain from FITS header --------------------------------
+        # Try common keyword variants used by capture software (NINA, SGP, etc.)
+        gain_e_per_adu: float | None = None
+        hdr = getattr(image, 'header', None)
+        if hdr is not None:
+            for kw in ("GAIN", "EGAIN", "CCDGAIN", "GAINDB"):
+                v = hdr.get(kw)
+                if v is not None:
+                    try:
+                        gain_e_per_adu = float(v); break
+                    except (TypeError, ValueError):
+                        pass
+
+        # --- Noise factor: σ_sky / √μ_sky --------------------------------
+        # 1.0 = pure sky shot noise (Poisson); >1.0 = read noise / thermal contributions.
+        # Narrowband images through narrow filters are commonly read-noise dominated (factor 2–10).
+        noise_factor: float | None = None
+        if background_median is not None and background_median > 0:
+            noise_factor = noise / math.sqrt(background_median)
+
+        # --- Sky in electrons (requires gain from FITS header) -----------
+        sky_bg_electrons: float | None = (
+            background_median * gain_e_per_adu
+            if (background_median is not None and gain_e_per_adu is not None) else None)
+        sky_noise_electrons: float | None = (
+            noise * gain_e_per_adu if gain_e_per_adu is not None else None)
+
         # --- Figure (per-image, for PNG export) ---------------------------
         snr_map_fig = self._plot_snr_map(snr_map, image.label)
 
@@ -95,10 +123,14 @@ class SNRAnalyzer:
             "pct_above_5":     pcts[5],
             "pct_above_10":    pcts[10],
             "pct_above_20":    pcts[20],
-            "snr_display":     snr_display,
-            "snr_p2":          snr_p2,
-            "snr_p98":         snr_p98,
-            "figures":         {"snr_map": snr_map_fig},
+            "snr_display":       snr_display,
+            "snr_p2":            snr_p2,
+            "snr_p98":           snr_p98,
+            "gain_e_per_adu":    gain_e_per_adu,      # e⁻/ADU from FITS header, or None
+            "noise_factor":      noise_factor,          # σ_sky / √μ_sky
+            "sky_bg_electrons":  sky_bg_electrons,      # μ_sky × gain, or None
+            "sky_noise_electrons": sky_noise_electrons, # σ_sky × gain, or None
+            "figures":           {"snr_map": snr_map_fig},
         }
 
     def _plot_snr_map(self, snr_map: np.ndarray, label: str) -> str:

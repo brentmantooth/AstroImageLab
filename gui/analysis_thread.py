@@ -102,8 +102,9 @@ class AnalysisThread(QThread):
         tasks: list[tuple[str, str, Callable[[], None]]] = []
 
         if metrics.get("psf"):
-            def _psf(img_a=img_a, img_b=img_b):
-                a = PSFAnalyzer()
+            _epsf_max = s.get("epsf_max_stars", 500)
+            def _psf(img_a=img_a, img_b=img_b, _max=_epsf_max):
+                a = PSFAnalyzer(epsf_max_stars=_max)
                 result_a.psf_metrics = a.analyze(img_a)
                 result_b.psf_metrics = a.analyze(img_b)
             tasks.append(("psf", "Computing PSF / MTF", _psf))

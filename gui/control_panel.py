@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 from core.models import (
     STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_LEVELS, DEFAULT_PIXEL_SCALE,
     MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC, XS_SNR_REGION_WIDTH,
+    EPSF_MAX_STARS,
 )
 
 
@@ -131,14 +132,47 @@ class AnalysisControlPanel(QWidget):
         self._min_snr = QDoubleSpinBox()
         self._min_snr.setRange(5.0, 500.0)
         self._min_snr.setValue(MIN_STAR_SNR)
+        self._min_snr.setToolTip("Threshold signal-to-noise ratio for star inclusion in ePSF calculations.")
         params_layout.addRow("Min star S/N:", self._min_snr)
+
+        self._epsf_max_stars = QSpinBox()
+        self._epsf_max_stars.setRange(10, 2000)
+        self._epsf_max_stars.setValue(EPSF_MAX_STARS)
+        self._epsf_max_stars.setToolTip("Maximum number of stars used for ePSF estimation.\n"
+                                        "Stars are ranked by peak flux; brightest N are used.")
+        params_layout.addRow("ePSF max stars:", self._epsf_max_stars)
+
+        self._ref_seeing_arcsec = QDoubleSpinBox()
+        self._ref_seeing_arcsec.setRange(0.5, 10.0)
+        self._ref_seeing_arcsec.setSingleStep(0.25)
+        self._ref_seeing_arcsec.setDecimals(2)
+        self._ref_seeing_arcsec.setValue(REF_SEEING_ARCSEC)
+        self._ref_seeing_arcsec.setSuffix(" \"")
+        self._ref_seeing_arcsec.setToolTip("Seeing distortion reference FWHM for ePSF analysis.\n"
+                                           "Sets the benchmark Moffat PSF shown in PSF/MTF reports.")
+        params_layout.addRow("PSF reference seeing (arcsec):", self._ref_seeing_arcsec)
 
         self._seeing_thresh = QDoubleSpinBox()
         self._seeing_thresh.setRange(0.5, 10.0)
         self._seeing_thresh.setSingleStep(0.5)
         self._seeing_thresh.setValue(SEEING_WARN_FWHM_ARCS)
         self._seeing_thresh.setSuffix(" \"")
+        self._seeing_thresh.setToolTip("Warning indicator threshold based on measured FWHM of stars.\n"
+                                       "Analysis flags sessions exceeding this seeing limit.")
         params_layout.addRow("Seeing warn threshold:", self._seeing_thresh)
+
+        self._xs_snr_width = QSpinBox()
+        self._xs_snr_width.setRange(3, 100)
+        self._xs_snr_width.setValue(XS_SNR_REGION_WIDTH)
+        self._xs_snr_width.setToolTip("Number of pixels to sample for cross-section SNR calculation.\n"
+                                      "Defines the bright and dark region window widths along the profile.")
+        params_layout.addRow("XS SNR region width (px):", self._xs_snr_width)
+
+        self._wavelet_levels = QSpinBox()
+        self._wavelet_levels.setRange(2, 6)
+        self._wavelet_levels.setValue(WAVELET_LEVELS)
+        self._wavelet_levels.setToolTip("Number of wavelet layers used in spatial detail analysis.")
+        params_layout.addRow("Wavelet levels:", self._wavelet_levels)
 
         self._pixel_scale_override = QDoubleSpinBox()
         self._pixel_scale_override.setRange(0.0, 20.0)
@@ -147,32 +181,6 @@ class AnalysisControlPanel(QWidget):
         self._pixel_scale_override.setSuffix(" \"/px")
         self._pixel_scale_override.setSpecialValueText("(from header)")
         params_layout.addRow("Pixel scale override:", self._pixel_scale_override)
-
-        self._wavelet_levels = QSpinBox()
-        self._wavelet_levels.setRange(2, 6)
-        self._wavelet_levels.setValue(WAVELET_LEVELS)
-        params_layout.addRow("Wavelet levels:", self._wavelet_levels)
-
-        self._xs_snr_width = QSpinBox()
-        self._xs_snr_width.setRange(3, 100)
-        self._xs_snr_width.setValue(XS_SNR_REGION_WIDTH)
-        self._xs_snr_width.setToolTip(
-            "Width (px) of the bright/dark sample windows used to compute\n"
-            "cross-section SNR in the Spatial Detail section."
-        )
-        params_layout.addRow("XS SNR region width:", self._xs_snr_width)
-
-        self._ref_seeing_arcsec = QDoubleSpinBox()
-        self._ref_seeing_arcsec.setRange(0.5, 10.0)
-        self._ref_seeing_arcsec.setSingleStep(0.25)
-        self._ref_seeing_arcsec.setDecimals(2)
-        self._ref_seeing_arcsec.setValue(REF_SEEING_ARCSEC)
-        self._ref_seeing_arcsec.setSuffix(" \"")
-        self._ref_seeing_arcsec.setToolTip(
-            "FWHM of the synthetic reference PSF shown in the PSF/MTF report section.\n"
-            "2.0\" represents typical good ground-based seeing (Kolmogorov atmosphere, β = 4.77)."
-        )
-        params_layout.addRow("PSF reference seeing:", self._ref_seeing_arcsec)
 
         root.addWidget(params_box)
 
@@ -371,6 +379,7 @@ class AnalysisControlPanel(QWidget):
             "wavelet_levels": self._wavelet_levels.value(),
             "xs_snr_width": self._xs_snr_width.value(),
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
+            "epsf_max_stars": self._epsf_max_stars.value(),
             "roi": self._roi,
             "crosshair": self._line,
             "output_dir": self._out_dir.text().strip() or str(Path.home() / "filter_reports"),

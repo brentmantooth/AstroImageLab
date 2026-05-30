@@ -3652,6 +3652,20 @@ The difference panel (right) shows where fine structure differs between the two 
                                            higher_is_better=True)
         cn_a, cn_b = _better_worse_class(pa.get("noise_median"), pb.get("noise_median"),
                                          higher_is_better=False)
+        cn_bg_a, cn_bg_b = _better_worse_class(pa.get("background_median"),
+                                               pb.get("background_median"),
+                                               higher_is_better=False)
+        nf_a, nf_b = pa.get("noise_factor"), pb.get("noise_factor")
+        cn_nf_a, cn_nf_b = _better_worse_class(nf_a, nf_b, higher_is_better=False)
+        gain_a = pa.get("gain_e_per_adu")
+        gain_b = pb.get("gain_e_per_adu")
+        sky_e_a = pa.get("sky_bg_electrons")
+        sky_e_b = pb.get("sky_bg_electrons")
+        sky_ne_a = pa.get("sky_noise_electrons")
+        sky_ne_b = pb.get("sky_noise_electrons")
+        cn_sky_e_a, cn_sky_e_b = _better_worse_class(sky_e_a, sky_e_b, higher_is_better=False)
+        cn_sky_ne_a, cn_sky_ne_b = _better_worse_class(sky_ne_a, sky_ne_b, higher_is_better=False)
+        either_gain = (gain_a is not None or gain_b is not None)
 
         # Shared-scale SNR map pair
         pa_disp = pa.get("snr_display")
@@ -3897,7 +3911,28 @@ signal in the dark region produce a higher SNR.</p>
   images, the integration depth or sky conditions were meaningfully different. &mu;<sub>sky</sub>
   is useful context &mdash; a high background paired with low &sigma; means the sky was bright
   but well-sampled; a high background paired with high &sigma; suggests insufficient exposure
-  time.
+  time.<br><br>
+  <em>Noise factor (&sigma;<sub>sky</sub>&thinsp;/&thinsp;&radic;&mu;<sub>sky</sub>)</em>
+  &mdash; Compares the measured sky noise to the theoretical Poisson (shot-noise) floor.
+  For a purely sky-shot-noise-limited image the pixel variance equals the mean background,
+  so &sigma;&thinsp;=&thinsp;&radic;&mu; and the factor equals 1.0. Values above 1.0 indicate
+  additional noise contributions &mdash; read noise, dark current, or residual fixed-pattern
+  noise. <strong>Narrowband images in suppressed-sky conditions are commonly read-noise
+  dominated</strong> (factor 2&ndash;10 is normal for short subs through a 3&thinsp;nm filter),
+  because the filter reduces sky glow far more than it reduces the camera&rsquo;s read noise floor.
+  A noise factor close to 1.0 therefore indicates the sky is bright enough &mdash; long exposures,
+  or a broadband filter &mdash; that shot noise from sky glow dominates. <strong>When comparing two
+  images: the lower factor is closer to the Poisson ideal, but absolute values below 3 are
+  generally acceptable for narrowband work.</strong> A substantially higher factor in one image
+  can indicate shorter individual sub-exposures or higher read noise from a different gain
+  setting.<br><br>
+  <em>Sky background in electrons</em> &mdash; When the camera gain (e&sup2;/ADU) is recorded
+  in the FITS header (keyword <code>GAIN</code>, <code>EGAIN</code>, <code>CCDGAIN</code>, or
+  <code>GAINDB</code>), &mu;<sub>sky</sub> and &sigma;<sub>sky</sub> are converted to electrons.
+  This removes the camera-specific ADU offset and quantisation, placing both images on a
+  physical scale that is directly comparable even when captured with different gain settings or
+  cameras. A sky background of, say, 500&thinsp;e&sup2; per pixel indicates that 500 sky photons
+  (plus dark current) accumulated per pixel during the total exposure, regardless of camera model.
 </div>
 
 <table>
@@ -3905,9 +3940,21 @@ signal in the dark region produce a higher SNR.</p>
   <tr><td>Sky RMS noise &sigma;<sub>sky</sub> (ADU) &mdash; lower is better</td>
       <td class="{cn_a}">{_val(pa.get("noise_median"), ".4f")}</td>
       <td class="{cn_b}">{_val(pb.get("noise_median"), ".4f")}</td></tr>
-  <tr><td>Sky background &mu;<sub>sky</sub> (ADU)</td>
-      <td>{_val(pa.get("background_median"), ".3f")}</td>
-      <td>{_val(pb.get("background_median"), ".3f")}</td></tr>
+  <tr><td>Sky background &mu;<sub>sky</sub> (ADU) &mdash; lower is better</td>
+      <td class="{cn_bg_a}">{_val(pa.get("background_median"), ".3f")}</td>
+      <td class="{cn_bg_b}">{_val(pb.get("background_median"), ".3f")}</td></tr>
+  <tr><td>Noise factor &sigma;/&radic;&mu; &mdash; lower = sky-limited (ideal &asymp;1.0)</td>
+      <td class="{cn_nf_a}">{_val(nf_a, ".3f")}</td>
+      <td class="{cn_nf_b}">{_val(nf_b, ".3f")}</td></tr>
+{"" if not either_gain else f"""  <tr><td>Gain (e&sup2;/ADU, from FITS header)</td>
+      <td>{"—" if gain_a is None else _val(gain_a, ".2f")}</td>
+      <td>{"—" if gain_b is None else _val(gain_b, ".2f")}</td></tr>
+  <tr><td>Sky background &mu;<sub>sky</sub> (e&sup2;) &mdash; lower is better</td>
+      <td class="{cn_sky_e_a}">{"—" if sky_e_a is None else _val(sky_e_a, ".1f")}</td>
+      <td class="{cn_sky_e_b}">{"—" if sky_e_b is None else _val(sky_e_b, ".1f")}</td></tr>
+  <tr><td>Sky noise &sigma;<sub>sky</sub> (e&sup2;) &mdash; lower is better</td>
+      <td class="{cn_sky_ne_a}">{"—" if sky_ne_a is None else _val(sky_ne_a, ".2f")}</td>
+      <td class="{cn_sky_ne_b}">{"—" if sky_ne_b is None else _val(sky_ne_b, ".2f")}</td></tr>"""}
 </table>
 
 <table>
@@ -4033,6 +4080,23 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                 fmt=".4f",
             )]),
         ]) + xs_snr_rows
+
+        snr_sky_rows = (
+            row("Sky noise &sigma;<sub>sky</sub> (ADU)", snr_ma.get("noise_median"),
+                snr_mb.get("noise_median"), fmt=".4f", higher_is_better=False)
+            + row("Noise factor (&sigma;/&radic;&mu;)", snr_ma.get("noise_factor"),
+                  snr_mb.get("noise_factor"), fmt=".3f", higher_is_better=False)
+        )
+        if (snr_ma.get("sky_bg_electrons") is not None
+                or snr_mb.get("sky_bg_electrons") is not None):
+            snr_sky_rows += row(
+                "Sky background (e&sup2;)", snr_ma.get("sky_bg_electrons"),
+                snr_mb.get("sky_bg_electrons"), fmt=".1f", higher_is_better=False)
+            snr_sky_rows += row(
+                "Sky noise &sigma;<sub>sky</sub> (e&sup2;)",
+                snr_ma.get("sky_noise_electrons"), snr_mb.get("sky_noise_electrons"),
+                fmt=".2f", higher_is_better=False)
+        rows += snr_sky_rows
 
         legend = ('<p><span class="metric-label-ok">✓</span> = bandwidth-independent '
                   'comparison &nbsp;&nbsp; '

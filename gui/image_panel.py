@@ -367,6 +367,7 @@ class ImagePanel(QWidget):
 
         # Title + stretch checkbox + open button
         top = QHBoxLayout()
+        self._header_layout = top   # exposed for external widget insertion
         top.addWidget(QLabel(f"<b>{title}</b>"))
         top.addStretch()
         self._stretch_cb = QCheckBox("Stretch")

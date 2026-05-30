@@ -15,7 +15,7 @@ from photutils.psf import EPSFBuilder, extract_stars
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
 from core.models import (SEEING_WARN_FWHM_ARCS, PSF_BETA_MIN, PSF_BETA_MAX, PSF_FWHM_CLIP_NSIGMA,
-                          ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC)
+                          ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC, EPSF_MAX_STARS)
 from analysis.star_catalog import StarCatalogBuilder
 
 CUTOUT_SIZE = 25   # pixels per side for per-star cutouts
@@ -31,8 +31,9 @@ def _moffat_fwhm(gamma: float, alpha: float) -> float:
 class PSFAnalyzer:
     """Fit Moffat PSF to stars, build empirical PSF, compute MTF."""
 
-    def __init__(self):
+    def __init__(self, epsf_max_stars: int = EPSF_MAX_STARS):
         self._catalog_builder = StarCatalogBuilder()
+        self._epsf_max_stars = epsf_max_stars
 
     def analyze(self, image: AstroImage) -> dict:
         image.estimate_background()
@@ -369,6 +370,12 @@ class PSFAnalyzer:
                               fwhm_estimate: float
                               ) -> tuple[np.ndarray | None, np.ndarray, np.ndarray]:
         nddata = image.nddata()
+
+        # Limit to the brightest N stars to keep ePSF build time manageable
+        if self._epsf_max_stars > 0 and len(stars) > self._epsf_max_stars:
+            order = np.argsort(np.asarray(stars["peak"]))[::-1]
+            stars = stars[order[:self._epsf_max_stars]]
+
         stars_tbl = Table()
         stars_tbl["x"] = stars["x_centroid"]
         stars_tbl["y"] = stars["y_centroid"]
