@@ -226,6 +226,7 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
     Returns (img_html, caption_html), or ("", "") if no metric has enough data.
     Adapts: stripplot (N<30), swarmplot (30-250), violinplot (N>250).
     Violin: median drawn in magenta, Q1/Q3 in cyan (inner=None + manual lines).
+    Single-image mode (sd_b empty): plots Image A row only.
     """
     import seaborn as sns
     import pandas as pd
@@ -245,66 +246,70 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
         "eccentricity": 0.0,    # perfectly round star
     }
 
+    has_b = bool(sd_b)
+
     has_data = any(
         sum(1 for s in sd_a if s.get(k) is not None) >= 3 and
-        sum(1 for s in sd_b if s.get(k) is not None) >= 3
+        (not has_b or sum(1 for s in sd_b if s.get(k) is not None) >= 3)
         for k, _ in metrics
     )
     if not has_data:
         return "", ""
 
-    fig, axes = plt.subplots(5, 1, figsize=(7, 7))
+    fig, axes = plt.subplots(5, 1, figsize=(7, 7 if has_b else 5))
     fig.subplots_adjust(hspace=0.55, left=0.18, right=0.97, top=0.95, bottom=0.06)
     palette = {label_a: "steelblue", label_b: "tomato"}
+    order = [label_a, label_b] if has_b else [label_a]
     plot_types_used: set[str] = set()
+
+    def _draw_boxwhisker(ax, vals_list):
+        for i, vals in enumerate(vals_list):
+            ax.boxplot(
+                [vals], positions=[i], vert=False,
+                widths=0.45, zorder=5,
+                patch_artist=True,
+                manage_ticks=False,
+                boxprops=dict(facecolor="none", edgecolor="#00e5ff", linewidth=1.5, alpha=0.9),
+                medianprops=dict(color="magenta", linewidth=2.0, alpha=0.9),
+                whiskerprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                capprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                flierprops=dict(marker="", visible=False),
+            )
 
     for ax, (key, title) in zip(axes, metrics):
         va = [s[key] for s in sd_a if s.get(key) is not None]
-        vb = [s[key] for s in sd_b if s.get(key) is not None]
+        vb = [s[key] for s in sd_b if s.get(key) is not None] if has_b else []
 
-        if len(va) < 3 or len(vb) < 3:
+        min_b_ok = not has_b or len(vb) >= 3
+        if len(va) < 3 or not min_b_ok:
             ax.set_visible(False)
             continue
 
-        n_max = max(len(va), len(vb))
-        df = pd.DataFrame({
-            "value": va + vb,
-            "image": ([label_a] * len(va)) + ([label_b] * len(vb)),
-        })
-
-        def _draw_boxwhisker(ax, vals_list):
-            for i, vals in enumerate(vals_list):
-                ax.boxplot(
-                    [vals], positions=[i], vert=False,
-                    widths=0.45, zorder=5,
-                    patch_artist=True,
-                    manage_ticks=False,
-                    boxprops=dict(facecolor="none", edgecolor="#00e5ff", linewidth=1.5, alpha=0.9),
-                    medianprops=dict(color="magenta", linewidth=2.0, alpha=0.9),
-                    whiskerprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
-                    capprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
-                    flierprops=dict(marker="", visible=False),
-                )
+        n_max = max(len(va), len(vb)) if has_b else len(va)
+        rows = va + vb
+        labels = ([label_a] * len(va)) + ([label_b] * len(vb))
+        df = pd.DataFrame({"value": rows, "image": labels})
+        bw_data = [va, vb] if has_b else [va]
 
         if n_max < 30:
             plot_types_used.add("strip")
             sns.stripplot(data=df, x="value", y="image",
-                          order=[label_a, label_b], palette=palette,
+                          order=order, palette=palette,
                           size=3, jitter=True, ax=ax)
-            _draw_boxwhisker(ax, [va, vb])
+            _draw_boxwhisker(ax, bw_data)
         elif n_max <= 250:
             plot_types_used.add("swarm")
             sns.swarmplot(data=df, x="value", y="image",
-                          order=[label_a, label_b], palette=palette,
+                          order=order, palette=palette,
                           size=3, ax=ax)
-            _draw_boxwhisker(ax, [va, vb])
+            _draw_boxwhisker(ax, bw_data)
         else:
             plot_types_used.add("violin")
             # inner=None; box-whisker overlay provides quartile/median markers
             sns.violinplot(data=df, x="value", y="image",
-                           order=[label_a, label_b], palette=palette,
+                           order=order, palette=palette,
                            inner=None, linewidth=0.8, ax=ax)
-            _draw_boxwhisker(ax, [va, vb])
+            _draw_boxwhisker(ax, bw_data)
 
         if key in _IDEAL_REF:
             ax.axvline(_IDEAL_REF[key], color="red", linestyle="--",
@@ -347,18 +352,32 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
 
     type_sentences = "; ".join(type_desc) + "."
 
+    if has_b:
+        intro = (
+            f"Each row shows <span style='color:steelblue'><b>Image A (blue)</b></span> above "
+            f"<span style='color:tomato'><b>Image B (red)</b></span>. "
+        )
+        compare_note = (
+            f"<b>How to read statistical differences:</b> if the distributions for A and B are "
+            f"well-separated (little or no overlap), the two filters produce measurably different "
+            f"values for that metric. Overlapping distributions indicate consistent measurements. "
+            f"A shift in the magenta median line is the clearest single-value indicator of a "
+            f"systematic difference; non-overlapping IQR boxes provide stronger evidence of a real "
+            f"separation. "
+        )
+    else:
+        intro = (
+            f"Each row shows <span style='color:steelblue'><b>Image A (blue)</b></span> — "
+            f"single-image mode, no Image B. "
+        )
+        compare_note = ""
+
     caption_html = (
         f'<p class="caption">'
         f"<b>Per-star metric distributions.</b> "
-        f"Each row shows <span style='color:steelblue'><b>Image A (blue)</b></span> above "
-        f"<span style='color:tomato'><b>Image B (red)</b></span>. "
+        f"{intro}"
         f"Plot type adapts to the number of stars measured (N): {type_sentences} "
-        f"<b>How to read statistical differences:</b> if the distributions for A and B are "
-        f"well-separated (little or no overlap), the two filters produce measurably different "
-        f"values for that metric. Overlapping distributions indicate consistent measurements. "
-        f"A shift in the magenta median line is the clearest single-value indicator of a "
-        f"systematic difference; non-overlapping IQR boxes provide stronger evidence of a real "
-        f"separation. "
+        f"{compare_note}"
         f"A <span style='color:red'><b>red dashed line</b></span> marks the theoretically ideal "
         f"or physically expected reference value where applicable: Moffat&nbsp;&beta;&nbsp;=&nbsp;4.77 "
         f"(Kolmogorov atmospheric turbulence); Ellipticity&nbsp;=&nbsp;Eccentricity&nbsp;=&nbsp;0 "
@@ -492,22 +511,31 @@ class ReportBuilder:
         html_path.write_text(html, encoding="utf-8")
         return html_path
 
-    def generate(self, image_a: AstroImage, image_b: AstroImage,
-                  result_a: AnalysisResult, result_b: AnalysisResult,
-                  output_dir: str | Path,
+    def generate(self, image_a: AstroImage, image_b: AstroImage | None = None,
+                  result_a: AnalysisResult | None = None, result_b: AnalysisResult | None = None,
+                  output_dir: str | Path = ".",
                   open_browser: bool = True,
                   report_format: str = "html",
                   ref_seeing_arcsec: float = REF_SEEING_ARCSEC) -> Path:
 
         self._ref_seeing_arcsec = ref_seeing_arcsec
+        self._single_image = image_b is None
+        if result_a is None:
+            result_a = AnalysisResult(label="Image A")
+        if result_b is None:
+            result_b = AnalysisResult(label="—")
+
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stem = f"report_{result_a.label}_{result_b.label}_{ts}".replace(" ", "_")
+        if self._single_image:
+            stem = f"report_{result_a.label}_{ts}".replace(" ", "_")
+        else:
+            stem = f"report_{result_a.label}_{result_b.label}_{ts}".replace(" ", "_")
         filename = stem + ".html"
 
         bw_a = image_a.bandwidth_nm
-        bw_b = image_b.bandwidth_nm
+        bw_b = image_b.bandwidth_nm if image_b is not None else None
         bw_differ = (bw_a is not None and bw_b is not None and
                      abs(bw_a - bw_b) > 0.1)
 
@@ -519,7 +547,17 @@ class ReportBuilder:
         _orig_label_a = result_a.original_label or result_a.label
         _orig_label_b = result_b.original_label or result_b.label
 
+        single_image_banner = ""
+        if self._single_image:
+            single_image_banner = (
+                '<div class="info-box" style="background:#2a3a2a;color:#c8e6c9;border-color:#4caf50">'
+                '<strong>Single Image Analysis</strong> — Image B was not loaded. '
+                'Comparison colour-coded tables and differential metrics are not available.'
+                '</div>'
+            )
+
         sections = [
+            single_image_banner,
             self._section_header(image_a, image_b, result_a, result_b, bw_differ,
                                  substituted=_substituted,
                                  orig_label_a=_orig_label_a,
@@ -534,14 +572,15 @@ class ReportBuilder:
             self._section_summary(result_a, result_b, bw_differ),
         ]
 
-
+        title = (f"Filter Analysis: {result_a.label}" if self._single_image
+                 else f"Filter Comparison: {result_a.label} vs {result_b.label}")
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Filter Comparison: {result_a.label} vs {result_b.label}</title>
+  <title>{title}</title>
   <style>{_CSS}</style>
 </head>
 <body>
@@ -575,7 +614,7 @@ class ReportBuilder:
 
     def _write_inspector_file(self,
                                path: Path,
-                               image_a: AstroImage, image_b: AstroImage,
+                               image_a: AstroImage, image_b: AstroImage | None,
                                result_a: AnalysisResult,
                                result_b: AnalysisResult) -> None:
         """Write a companion .npz file for the Report Inspector."""
@@ -595,15 +634,21 @@ class ReportBuilder:
 
         # ── Input images ──────────────────────────────────────────────────────
         _add("display_a", _inspector_display(image_a))
-        _add("display_b", _inspector_display(image_b))
-        _add_options_entry("Input Images", "Original",
-                           {"Image A": "display_a", "Image B": "display_b"})
+        orig_opts: dict[str, str] = {"Image A": "display_a"}
+        if image_b is not None:
+            _add("display_b", _inspector_display(image_b))
+            orig_opts["Image B"] = "display_b"
+        _add_options_entry("Input Images", "Original", orig_opts)
 
-        if image_a.starless_image is not None and image_b.starless_image is not None:
+        sl_opts: dict[str, str] = {}
+        if image_a.starless_image is not None:
             _add("display_sl_a", _inspector_display(image_a.starless_image))
+            sl_opts["Image A"] = "display_sl_a"
+        if image_b is not None and image_b.starless_image is not None:
             _add("display_sl_b", _inspector_display(image_b.starless_image))
-            _add_options_entry("Input Images", "Starless",
-                               {"Image A": "display_sl_a", "Image B": "display_sl_b"})
+            sl_opts["Image B"] = "display_sl_b"
+        if sl_opts:
+            _add_options_entry("Input Images", "Starless", sl_opts)
 
         # ── PSF / MTF ─────────────────────────────────────────────────────────
         pa = result_a.psf_metrics or {}
@@ -629,39 +674,57 @@ class ReportBuilder:
         stars_a = pa.get("star_data", [])
         stars_b = pb.get("star_data", [])
         img_h_a, img_w_a = image_a.data.shape[:2]
-        img_h_b, img_w_b = image_b.data.shape[:2]
+        img_h_b, img_w_b = (image_b.data.shape[:2] if image_b is not None else (0, 0))
 
         fwhm_pts_a = [(s["x"], s["y"], s["fwhm"]) for s in stars_a if s.get("fwhm") is not None]
-        fwhm_pts_b = [(s["x"], s["y"], s["fwhm"]) for s in stars_b if s.get("fwhm") is not None]
         fwhm_map_a = _psf_make_map(fwhm_pts_a, img_h_a, img_w_a)
-        fwhm_map_b = _psf_make_map(fwhm_pts_b, img_h_b, img_w_b)
-        if fwhm_map_a is not None and fwhm_map_b is not None:
+        fwhm_map_b = None
+        if image_b is not None:
+            fwhm_pts_b = [(s["x"], s["y"], s["fwhm"]) for s in stars_b if s.get("fwhm") is not None]
+            fwhm_map_b = _psf_make_map(fwhm_pts_b, img_h_b, img_w_b)
+        fwhm_opts: dict[str, str] = {}
+        if fwhm_map_a is not None:
             _add("psf_fwhm_map_a", fwhm_map_a)
+            fwhm_opts["Image A"] = "psf_fwhm_map_a"
+        if fwhm_map_b is not None:
             _add("psf_fwhm_map_b", fwhm_map_b)
-            _add_options_entry("PSF / MTF", "FWHM gradient map",
-                               {"Image A": "psf_fwhm_map_a", "Image B": "psf_fwhm_map_b"})
+            fwhm_opts["Image B"] = "psf_fwhm_map_b"
+        if fwhm_opts:
+            _add_options_entry("PSF / MTF", "FWHM gradient map", fwhm_opts)
 
         ecc_pts_a = [(s["x"], s["y"], s["eccentricity"]) for s in stars_a if s.get("eccentricity") is not None]
-        ecc_pts_b = [(s["x"], s["y"], s["eccentricity"]) for s in stars_b if s.get("eccentricity") is not None]
         ecc_map_a = _psf_make_map(ecc_pts_a, img_h_a, img_w_a)
-        ecc_map_b = _psf_make_map(ecc_pts_b, img_h_b, img_w_b)
-        if ecc_map_a is not None and ecc_map_b is not None:
+        ecc_map_b = None
+        if image_b is not None:
+            ecc_pts_b = [(s["x"], s["y"], s["eccentricity"]) for s in stars_b if s.get("eccentricity") is not None]
+            ecc_map_b = _psf_make_map(ecc_pts_b, img_h_b, img_w_b)
+        ecc_opts: dict[str, str] = {}
+        if ecc_map_a is not None:
             _add("psf_ecc_map_a", ecc_map_a)
+            ecc_opts["Image A"] = "psf_ecc_map_a"
+        if ecc_map_b is not None:
             _add("psf_ecc_map_b", ecc_map_b)
-            _add_options_entry("PSF / MTF", "Eccentricity map",
-                               {"Image A": "psf_ecc_map_a", "Image B": "psf_ecc_map_b"})
+            ecc_opts["Image B"] = "psf_ecc_map_b"
+        if ecc_opts:
+            _add_options_entry("PSF / MTF", "Eccentricity map", ecc_opts)
 
         ab_a = pa.get("aberration", {})
         ab_b = pb.get("aberration", {})
         er_pts_a = list(zip(ab_a.get("star_xs", []), ab_a.get("star_ys", []), ab_a.get("star_er", [])))
-        er_pts_b = list(zip(ab_b.get("star_xs", []), ab_b.get("star_ys", []), ab_b.get("star_er", [])))
         er_map_a = _psf_make_map(er_pts_a, img_h_a, img_w_a)
-        er_map_b = _psf_make_map(er_pts_b, img_h_b, img_w_b)
-        if er_map_a is not None and er_map_b is not None:
+        er_map_b = None
+        if image_b is not None:
+            er_pts_b = list(zip(ab_b.get("star_xs", []), ab_b.get("star_ys", []), ab_b.get("star_er", [])))
+            er_map_b = _psf_make_map(er_pts_b, img_h_b, img_w_b)
+        er_opts: dict[str, str] = {}
+        if er_map_a is not None:
             _add("psf_er_map_a", er_map_a)
+            er_opts["Image A"] = "psf_er_map_a"
+        if er_map_b is not None:
             _add("psf_er_map_b", er_map_b)
-            _add_options_entry("PSF / MTF", "Radial elongation map",
-                               {"Image A": "psf_er_map_a", "Image B": "psf_er_map_b"})
+            er_opts["Image B"] = "psf_er_map_b"
+        if er_opts:
+            _add_options_entry("PSF / MTF", "Radial elongation map", er_opts)
 
         # ── PSF Simulation ────────────────────────────────────────────────────
         sim = self._plot_psf_simulation(result_a, result_b)
@@ -722,27 +785,31 @@ class ReportBuilder:
         panels_b = (result_b.spatial_metrics or {}).get("panels", {})
         for pkey, img_set_name in _PANEL_IMAGE_SETS.items():
             pa_panel = panels_a.get(pkey)
-            pb_panel = panels_b.get(pkey)
-            if pa_panel is None or pb_panel is None:
+            if pa_panel is None:
                 continue
-            npz_a    = f"sp_{pkey}_a"
-            npz_b    = f"sp_{pkey}_b"
-            npz_diff = f"sp_{pkey}_diff"
-            _add(npz_a,    pa_panel["a"])
-            _add(npz_b,    pb_panel["b"])
-            _add(npz_diff, pa_panel["diff"])
-            _add_options_entry("Spatial Detail", img_set_name,
-                               {"Image A":     npz_a,
-                                "Image B":     npz_b,
-                                "Diff (A−B)": npz_diff})
+            pb_panel = panels_b.get(pkey)
+            sp_opts: dict[str, str] = {}
+            npz_a = f"sp_{pkey}_a"
+            _add(npz_a, pa_panel["a"])
+            sp_opts["Image A"] = npz_a
+            if pb_panel is not None and pb_panel.get("b") is not None:
+                npz_b = f"sp_{pkey}_b"
+                _add(npz_b, pb_panel["b"])
+                sp_opts["Image B"] = npz_b
+            if pa_panel.get("diff") is not None:
+                npz_diff = f"sp_{pkey}_diff"
+                _add(npz_diff, pa_panel["diff"])
+                sp_opts["Diff (A−B)"] = npz_diff
+            _add_options_entry("Spatial Detail", img_set_name, sp_opts)
 
         # ── Catalog JSON ──────────────────────────────────────────────────────
         catalog = {
             "label_a": result_a.label,
             "label_b": result_b.label,
             "filename_a": image_a.path.name,
-            "filename_b": image_b.path.name,
+            "filename_b": image_b.path.name if image_b is not None else "",
             "sim_label_ref": sim_ref_label,
+            "single_image": image_b is None,
             "sections": catalog_sections,
         }
         json_bytes = _json.dumps(catalog, ensure_ascii=False).encode("utf-8")
@@ -752,14 +819,14 @@ class ReportBuilder:
 
     # ── Section 1: Header ─────────────────────────────────────────────────────
 
-    def _section_header(self, img_a: AstroImage, img_b: AstroImage,
+    def _section_header(self, img_a: AstroImage, img_b: AstroImage | None,
                          result_a: AnalysisResult, result_b: AnalysisResult,
                          bw_differ: bool,
                          substituted: bool = False,
                          orig_label_a: str = "",
                          orig_label_b: str = "") -> str:
         bw_warn = ""
-        if bw_differ:
+        if bw_differ and img_b is not None:
             bw_warn = (f'<div class="bw-warn">⚠ <strong>Bandwidth warning:</strong> '
                        f'Filters have different bandwidths '
                        f'({img_a.bandwidth_nm:.1f} nm vs {img_b.bandwidth_nm:.1f} nm). '
@@ -774,7 +841,8 @@ class ReportBuilder:
                 f'One or more input filenames exceed {LABEL_MAX_LEN} characters and have been '
                 f'abbreviated in all plots and legends throughout this report.<br>'
                 f'&nbsp;&nbsp;<strong>Image A</strong> = {orig_label_a}<br>'
-                f'&nbsp;&nbsp;<strong>Image B</strong> = {orig_label_b}</div>'
+                + (f'&nbsp;&nbsp;<strong>Image B</strong> = {orig_label_b}' if img_b is not None else '')
+                + '</div>'
             )
 
         def meta_rows(img: AstroImage, result: AnalysisResult) -> str:
@@ -801,25 +869,39 @@ class ReportBuilder:
             return rows
 
         sl_a = getattr(img_a, "starless_image", None)
-        sl_b = getattr(img_b, "starless_image", None)
+        sl_b = getattr(img_b, "starless_image", None) if img_b is not None else None
 
         thumb_a = _img_tag(self._thumbnail_fig(img_a), f"Preview {img_a.label}")
-        thumb_b = _img_tag(self._thumbnail_fig(img_b), f"Preview {img_b.label}")
         thumb_sl_a = _img_tag(self._thumbnail_fig(sl_a, ref_data=img_a.data),
                                f"Starless {img_a.label}") if sl_a else ""
-        thumb_sl_b = _img_tag(self._thumbnail_fig(sl_b, ref_data=img_b.data),
-                               f"Starless {img_b.label}") if sl_b else ""
-
-        sl_cap_a = ('<p class="caption">Starless (STF-matched stretch)</p>'
-                    if sl_a else "")
-        sl_cap_b = ('<p class="caption">Starless (STF-matched stretch)</p>'
-                    if sl_b else "")
+        sl_cap_a = '<p class="caption">Starless (STF-matched stretch)</p>' if sl_a else ""
 
         hist_tag = _img_tag(self._plot_image_histograms(img_a, img_b), "Pixel histograms")
 
+        title_line = (f"<p><strong>{img_a.label}</strong> vs <strong>{img_b.label}</strong></p>"
+                      if img_b is not None
+                      else f"<p><strong>{img_a.label}</strong></p>")
+        h1_text = ("Filter Image Comparison Report" if img_b is not None
+                   else "Filter Image Analysis Report")
+
+        if img_b is not None:
+            thumb_b = _img_tag(self._thumbnail_fig(img_b), f"Preview {img_b.label}")
+            thumb_sl_b = _img_tag(self._thumbnail_fig(sl_b, ref_data=img_b.data),
+                                   f"Starless {img_b.label}") if sl_b else ""
+            sl_cap_b = '<p class="caption">Starless (STF-matched stretch)</p>' if sl_b else ""
+            b_col = f"""
+  <div style="flex:1;">
+    <h3>{img_b.label}</h3>
+    {thumb_b}
+    {thumb_sl_b}{sl_cap_b}
+    <table><tbody>{meta_rows(img_b, result_b)}</tbody></table>
+  </div>"""
+        else:
+            b_col = ""
+
         return f"""
-<h1>Filter Image Comparison Report</h1>
-<p><strong>{img_a.label}</strong> vs <strong>{img_b.label}</strong></p>
+<h1>{h1_text}</h1>
+{title_line}
 {label_sub_box}
 {bw_warn}
 <h2>1. Image Metadata</h2>
@@ -829,25 +911,22 @@ class ReportBuilder:
     {thumb_a}
     {thumb_sl_a}{sl_cap_a}
     <table><tbody>{meta_rows(img_a, result_a)}</tbody></table>
-  </div>
-  <div style="flex:1;">
-    <h3>{img_b.label}</h3>
-    {thumb_b}
-    {thumb_sl_b}{sl_cap_b}
-    <table><tbody>{meta_rows(img_b, result_b)}</tbody></table>
-  </div>
+  </div>{b_col}
 </div>
 <h3>Pixel Histograms</h3>
 {hist_tag}
 <p class="caption">Log-scale pixel value distributions. Dotted vertical lines mark the median of each image. Dashed lower-opacity lines show the starless version where available.</p>"""
 
-    def _plot_image_histograms(self, img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+    def _plot_image_histograms(self, img_a: AstroImage, img_b: AstroImage | None) -> plt.Figure | None:
         """Combined log-scale histogram of both images with median markers."""
         try:
             fig, ax = plt.subplots(figsize=(8, 4))
             colors = {"a": "steelblue", "b": "tomato"}
 
-            for img, key, label in [(img_a, "a", img_a.label), (img_b, "b", img_b.label)]:
+            img_list = [(img_a, "a", img_a.label)]
+            if img_b is not None:
+                img_list.append((img_b, "b", img_b.label))
+            for img, key, label in img_list:
                 color = colors[key]
 
                 pixels = img.data.ravel().astype(float)
@@ -960,7 +1039,7 @@ shown in the metadata table above.</div>"""
     # ── Section 3: PSF / MTF ──────────────────────────────────────────────────
 
     def _section_psf(self, ra: AnalysisResult, rb: AnalysisResult,
-                      img_a: AstroImage, img_b: AstroImage) -> str:
+                      img_a: AstroImage, img_b: AstroImage | None) -> str:
         err = _error_box("psf", ra, rb)
         pa = ra.psf_metrics or {}
         pb = rb.psf_metrics or {}
@@ -997,7 +1076,7 @@ shown in the metadata table above.</div>"""
 
         # Spatial maps and histograms
         img_h_a, img_w_a = img_a.data.shape[:2]
-        img_h_b, img_w_b = img_b.data.shape[:2]
+        img_h_b, img_w_b = (img_b.data.shape[:2] if img_b is not None else (0, 0))
         stars_a = pa.get("star_data", [])
         stars_b = pb.get("star_data", [])
         fwhm_vals_a = [s["fwhm"] for s in stars_a if s.get("fwhm") is not None]
@@ -1215,7 +1294,7 @@ tighter stars. Points far from the line indicate individual star measurement sca
 
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_epsf_a}</div>
-  <div style="flex:1;">{img_epsf_b}</div>
+  {f'<div style="flex:1;">{img_epsf_b}</div>' if img_b is not None else ''}
   {f'<div style="flex:1;">{img_epsf_ref}</div>' if img_epsf_ref else ''}
 </div>
 <p class="caption">Empirical PSFs (log&#x2081;&#x208a; scale, viridis colormap). The ePSF is
@@ -1284,7 +1363,7 @@ or tracking) and does not reflect a filter quality difference &mdash; what matte
 for comparison is whether the tail is <em>more pronounced</em> in one image.</div>""" + self._section_psf_aberration(ra, rb, img_a, img_b)
 
     def _section_psf_aberration(self, ra: AnalysisResult, rb: AnalysisResult,
-                                  img_a: AstroImage, img_b: AstroImage) -> str:
+                                  img_a: AstroImage, img_b: AstroImage | None) -> str:
         """Aberration analysis subsection appended to the PSF section."""
         pa = ra.psf_metrics or {}
         pb = rb.psf_metrics or {}
@@ -1374,7 +1453,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
 </div>\n"""
 
         img_h_a, img_w_a = img_a.data.shape[:2]
-        img_h_b, img_w_b = img_b.data.shape[:2]
+        img_h_b, img_w_b = (img_b.data.shape[:2] if img_b is not None else (0, 0))
         stars_a = pa.get("star_data", [])
         stars_b = pb.get("star_data", [])
 
@@ -1677,8 +1756,26 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         vmin, vmax = float(np.percentile(all_vals, 1)), float(np.percentile(all_vals, 99))
 
         map_a = _psf_make_map(pts_a, img_h_a, img_w_a)
-        map_b = _psf_make_map(pts_b, img_h_b, img_w_b)
 
+        if not pts_b:
+            # Single-image: one panel only
+            fig, ax_a = plt.subplots(1, 1, figsize=(7, 6), constrained_layout=True)
+            fig.suptitle(title, fontsize=11)
+            if map_a is not None:
+                im = ax_a.imshow(map_a, origin="upper", cmap=cmap, vmin=vmin, vmax=vmax,
+                                 extent=[0, img_w_a, img_h_a, 0], aspect="equal",
+                                 interpolation="bilinear")
+                fig.colorbar(im, ax=ax_a, fraction=0.046, pad=0.04)
+            if pts_a:
+                ax_a.scatter([p[0] for p in pts_a], [p[1] for p in pts_a],
+                             c=[p[2] for p in pts_a], cmap=cmap, vmin=vmin, vmax=vmax,
+                             s=18, edgecolors="white", linewidths=0.5, zorder=3)
+            ax_a.set_title(label_a, fontsize=10)
+            ax_a.set_xlabel("x (px)")
+            ax_a.set_ylabel("y (px)")
+            return fig
+
+        map_b = _psf_make_map(pts_b, img_h_b, img_w_b)
         fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
         fig.suptitle(title, fontsize=11)
 
@@ -1828,7 +1925,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         """
         epsf_a = (ra.psf_metrics or {}).get("epsf_data")
         epsf_b = (rb.psf_metrics or {}).get("epsf_data")
-        if epsf_a is None or epsf_b is None:
+        if epsf_a is None:
             return None
         if not _TEST_IMAGE_PATH.exists():
             return None
@@ -1838,11 +1935,14 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             ) / 255.0
 
             os_a = (ra.psf_metrics or {}).get("epsf_oversampling", 2)
-            os_b = (rb.psf_metrics or {}).get("epsf_oversampling", 2)
             kern_a = _ndimage_zoom(epsf_a, 1.0 / os_a, order=1)
-            kern_b = _ndimage_zoom(epsf_b, 1.0 / os_b, order=1)
             kern_a = kern_a / kern_a.sum() if kern_a.sum() > 0 else kern_a
-            kern_b = kern_b / kern_b.sum() if kern_b.sum() > 0 else kern_b
+
+            kern_b = None
+            if epsf_b is not None:
+                os_b = (rb.psf_metrics or {}).get("epsf_oversampling", 2)
+                kern_b = _ndimage_zoom(epsf_b, 1.0 / os_b, order=1)
+                kern_b = kern_b / kern_b.sum() if kern_b.sum() > 0 else kern_b
 
             # Reference PSF kernel
             ref_fwhm = _ref_fwhm_px(ra.psf_metrics or {}, rb.psf_metrics or {},
@@ -1851,10 +1951,11 @@ coma). Read in conjunction with the FWHM radial profile plot below.
 
             # Convolution at full resolution
             conv_a = np.clip(fftconvolve(test_arr, kern_a, mode="same"), 0.0, 1.0)
-            conv_b = np.clip(fftconvolve(test_arr, kern_b, mode="same"), 0.0, 1.0)
+            conv_b = (np.clip(fftconvolve(test_arr, kern_b, mode="same"), 0.0, 1.0)
+                      if kern_b is not None else None)
             conv_ref = (np.clip(fftconvolve(test_arr, kern_ref, mode="same"), 0.0, 1.0)
                         if kern_ref is not None else None)
-            diff = conv_a - conv_b
+            diff = conv_a - conv_b if conv_b is not None else None
 
             # Cross-section extraction — must happen before downsampling
             _XS_Y_ROWS = {"high": 105, "medium": 425, "low": 670}
@@ -1869,7 +1970,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                         "y_px":        y_px,
                         "original":    test_arr[y_px, _XS_X].copy(),
                         "conv_a":      conv_a[y_px, _XS_X].copy(),
-                        "conv_b":      conv_b[y_px, _XS_X].copy(),
+                        "conv_b":      conv_b[y_px, _XS_X].copy() if conv_b is not None else None,
                         "conv_ref":    conv_ref[y_px, _XS_X].copy() if conv_ref is not None else None,
                         "image_strip": test_arr[y0_strip:y1_strip, _XS_X].copy(),
                     }
@@ -1880,22 +1981,26 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                 zoom_f = 1200.0 / max(h, w)
                 test_arr = _ndimage_zoom(test_arr, zoom_f, order=1)
                 conv_a   = _ndimage_zoom(conv_a,   zoom_f, order=1)
-                conv_b   = _ndimage_zoom(conv_b,   zoom_f, order=1)
-                diff     = _ndimage_zoom(diff,     zoom_f, order=1)
+                if conv_b is not None:
+                    conv_b = _ndimage_zoom(conv_b, zoom_f, order=1)
+                if diff is not None:
+                    diff   = _ndimage_zoom(diff,   zoom_f, order=1)
                 if conv_ref is not None:
                     conv_ref = _ndimage_zoom(conv_ref, zoom_f, order=1)
 
-            d_max = max(float(abs(diff).max()), 1e-9)
-            # Map diff to RGB using RdBu_r colormap
-            diff_norm = (diff / d_max + 1.0) / 2.0          # [0, 1]
-            diff_rgb = (plt.get_cmap("RdBu_r")(diff_norm)[:, :, :3] * 255).astype(np.uint8)
+            diff_rgb = None
+            d_max = None
+            if diff is not None:
+                d_max = max(float(abs(diff).max()), 1e-9)
+                diff_norm = (diff / d_max + 1.0) / 2.0          # [0, 1]
+                diff_rgb = (plt.get_cmap("RdBu_r")(diff_norm)[:, :, :3] * 255).astype(np.uint8)
 
             label_ref = (f"Reference ({self._ref_seeing_arcsec:.1f}″ seeing)"
                          if conv_ref is not None else None)
             return {
                 "original":  (test_arr * 255).astype(np.uint8),
                 "conv_a":    (conv_a   * 255).astype(np.uint8),
-                "conv_b":    (conv_b   * 255).astype(np.uint8),
+                "conv_b":    (conv_b   * 255).astype(np.uint8) if conv_b is not None else None,
                 "conv_ref":  (conv_ref * 255).astype(np.uint8) if conv_ref is not None else None,
                 "diff":      diff_rgb,
                 "diff_max":  d_max,
@@ -1933,7 +2038,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             x = np.arange(1, n_pts + 1)
             orig      = d["original"][::-1]
             a_arr     = d["conv_a"][::-1]
-            b_arr     = d["conv_b"][::-1]
+            b_arr     = d["conv_b"][::-1] if d.get("conv_b") is not None else None
             _ref_raw  = d.get("conv_ref")
             ref_arr   = _ref_raw[::-1] if _ref_raw is not None else None
             ref_label = sim.get("label_ref", "Reference seeing")
@@ -1969,8 +2074,9 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                         label="Original")
             ax_raw.plot(x, a_arr, color="steelblue", linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label=sim["label_a"])
-            ax_raw.plot(x, b_arr, color="tomato",    linewidth=1.0, alpha=XS_LINE_ALPHA,
-                        label=sim["label_b"])
+            if b_arr is not None:
+                ax_raw.plot(x, b_arr, color="tomato", linewidth=1.0, alpha=XS_LINE_ALPHA,
+                            label=sim["label_b"])
             if ref_arr is not None:
                 ax_raw.plot(x, ref_arr, color="forestgreen", linewidth=1.0,
                             linestyle="--", alpha=XS_LINE_ALPHA, label=ref_label)
@@ -1986,8 +2092,9 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                         alpha=XS_LINE_ALPHA, label="Original")
             ax_env.plot(x, _envelope(a_arr), color="steelblue", linewidth=1.4,
                         alpha=XS_LINE_ALPHA, label=sim["label_a"])
-            ax_env.plot(x, _envelope(b_arr), color="tomato",    linewidth=1.4,
-                        alpha=XS_LINE_ALPHA, label=sim["label_b"])
+            if b_arr is not None:
+                ax_env.plot(x, _envelope(b_arr), color="tomato", linewidth=1.4,
+                            alpha=XS_LINE_ALPHA, label=sim["label_b"])
             if ref_arr is not None:
                 ax_env.plot(x, _envelope(ref_arr), color="forestgreen", linewidth=1.4,
                             linestyle="--", alpha=XS_LINE_ALPHA, label=ref_label)
@@ -2021,16 +2128,22 @@ coma). Read in conjunction with the FWHM radial profile plot below.
 
         levels = ["high", "medium", "low"]
         x = np.arange(len(levels))
-        width = 0.25
+
+        has_b = any(xs_data[lv].get("conv_b") is not None for lv in xs_data)
+        width = 0.25 if has_b else 0.3
 
         orig_m   = [modulation(xs_data[lv]["original"]) if lv in xs_data else 0.0 for lv in levels]
         conv_a_m = [modulation(xs_data[lv]["conv_a"])   if lv in xs_data else 0.0 for lv in levels]
-        conv_b_m = [modulation(xs_data[lv]["conv_b"])   if lv in xs_data else 0.0 for lv in levels]
 
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.bar(x - width, orig_m,   width, label="Original",        color="black",     alpha=0.75)
-        ax.bar(x,         conv_a_m, width, label=sim["label_a"],    color="steelblue", alpha=0.85)
-        ax.bar(x + width, conv_b_m, width, label=sim["label_b"],    color="tomato",    alpha=0.85)
+        if has_b:
+            conv_b_m = [modulation(xs_data[lv]["conv_b"]) if lv in xs_data else 0.0 for lv in levels]
+            ax.bar(x - width, orig_m,   width, label="Original",        color="black",     alpha=0.75)
+            ax.bar(x,         conv_a_m, width, label=sim["label_a"],    color="steelblue", alpha=0.85)
+            ax.bar(x + width, conv_b_m, width, label=sim["label_b"],    color="tomato",    alpha=0.85)
+        else:
+            ax.bar(x - width / 2, orig_m,   width, label="Original",     color="black",     alpha=0.75)
+            ax.bar(x + width / 2, conv_a_m, width, label=sim["label_a"], color="steelblue", alpha=0.85)
         ax.set_xticks(x)
         ax.set_xticklabels(["High contrast", "Medium contrast", "Low contrast"])
         ax.set_ylabel("Michelson contrast  (Imax − Imin) / (Imax + Imin)")
@@ -2073,9 +2186,10 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         if not available:
             return None
 
+        has_b = any(xs_data[lv].get("conv_b") is not None for lv in xs_data)
         n_bands = len(bands)
         x       = np.arange(n_bands)
-        width = 0.25
+        width = 0.25 if has_b else 0.3
 
         fig, axes = plt.subplots(len(available), 1,
                                   figsize=(9, 4 * len(available)), squeeze=False)
@@ -2084,17 +2198,23 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             d        = xs_data[level]
             env_orig = _envelope(d["original"][::-1])
             env_a    = _envelope(d["conv_a"][::-1])
-            env_b    = _envelope(d["conv_b"][::-1])
             orig_vals = [float(np.mean(env_orig[sl])) for _, sl in bands]
             a_vals    = [float(np.mean(env_a[sl]))    for _, sl in bands]
-            b_vals    = [float(np.mean(env_b[sl]))    for _, sl in bands]
 
-            ax_row.bar(x - width, orig_vals, width, label="Original",
-                       color="black",     alpha=0.75)
-            ax_row.bar(x,         a_vals,   width, label=sim["label_a"],
-                       color="steelblue", alpha=0.85)
-            ax_row.bar(x + width, b_vals,   width, label=sim["label_b"],
-                       color="tomato",    alpha=0.85)
+            if has_b and d.get("conv_b") is not None:
+                env_b  = _envelope(d["conv_b"][::-1])
+                b_vals = [float(np.mean(env_b[sl])) for _, sl in bands]
+                ax_row.bar(x - width, orig_vals, width, label="Original",
+                           color="black",     alpha=0.75)
+                ax_row.bar(x,         a_vals,   width, label=sim["label_a"],
+                           color="steelblue", alpha=0.85)
+                ax_row.bar(x + width, b_vals,   width, label=sim["label_b"],
+                           color="tomato",    alpha=0.85)
+            else:
+                ax_row.bar(x - width / 2, orig_vals, width, label="Original",
+                           color="black",     alpha=0.75)
+                ax_row.bar(x + width / 2, a_vals,   width, label=sim["label_a"],
+                           color="steelblue", alpha=0.85)
             ax_row.set_xticks(x)
             ax_row.set_xticklabels([b[0] for b in bands], fontsize=8)
             ax_row.set_ylabel("Mean local contrast\n(peak − valley)", fontsize=8)
@@ -2140,26 +2260,28 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         if not available:
             return None
 
+        has_b     = any(xs_data[k].get("conv_b") is not None for k, _, _ in available)
         has_ref   = sim.get("label_ref") is not None and any(
             xs_data[k].get("conv_ref") is not None for k, _, _ in available
         )
         n_levels  = len(available)
         n_bands   = len(bands)
-        bars_per_level = 3 if has_ref else 2
-        bar_w     = 0.09 if has_ref else 0.12
+        # bars per group: A always present; B optional; Ref optional
+        bars_per_level = (1 + int(has_b) + int(has_ref))
+        if has_ref and has_b:
+            bar_w = 0.09
+        elif has_b or has_ref:
+            bar_w = 0.12
+        else:
+            bar_w = 0.15
         group_gap = n_levels * bars_per_level * bar_w + 0.15
         x_centers = np.arange(n_bands) * group_gap
 
-        fig, ax = plt.subplots(figsize=(10 if has_ref else 9, 5))
+        fig, ax = plt.subplots(figsize=(10 if (has_ref or has_b) else 8, 5))
 
-        # Center of each level group: for 2 bars (A,B) centered at offset±bar_w/2,
-        # for 3 bars (A,B,Ref) centered at offset (B is middle bar).
-        if has_ref:
-            offsets = np.linspace(-(n_levels - 1) * 1.5 * bar_w,
-                                   (n_levels - 1) * 1.5 * bar_w, n_levels)
-        else:
-            offsets = np.linspace(-(n_levels - 1) * bar_w,
-                                   (n_levels - 1) * bar_w, n_levels)
+        # Compute per-level x offsets so bars are centred within each group
+        offsets = np.linspace(-(n_levels - 1) * bars_per_level * bar_w / 2,
+                               (n_levels - 1) * bars_per_level * bar_w / 2, n_levels)
 
         from matplotlib.patches import Patch
         legend_handles = []
@@ -2168,7 +2290,6 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             d        = xs_data[level]
             env_orig = _envelope(d["original"][::-1])
             env_a    = _envelope(d["conv_a"][::-1])
-            env_b    = _envelope(d["conv_b"][::-1])
             env_ref  = (_envelope(d["conv_ref"][::-1])
                         if has_ref and d.get("conv_ref") is not None else None)
 
@@ -2178,35 +2299,37 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             for _, sl in bands:
                 orig_b = env_orig[sl]
                 pw_a = env_a[sl] / np.clip(orig_b, 1e-6, None)
-                pw_b = env_b[sl] / np.clip(orig_b, 1e-6, None)
                 ratios_a.append(float(pw_a.mean()))
                 errs_a.append(float(pw_a.std()))
-                ratios_b.append(float(pw_b.mean()))
-                errs_b.append(float(pw_b.std()))
+                if has_b and d.get("conv_b") is not None:
+                    env_b = _envelope(d["conv_b"][::-1])
+                    pw_b = env_b[sl] / np.clip(orig_b, 1e-6, None)
+                    ratios_b.append(float(pw_b.mean()))
+                    errs_b.append(float(pw_b.std()))
                 if env_ref is not None:
                     pw_r = env_ref[sl] / np.clip(orig_b, 1e-6, None)
                     ratios_ref.append(float(pw_r.mean()))
                     errs_ref.append(float(pw_r.std()))
 
-            if has_ref:
-                pos_a   = x_centers + offsets[i] - bar_w
-                pos_b   = x_centers + offsets[i]
-                pos_ref = x_centers + offsets[i] + bar_w
-            else:
-                pos_a = x_centers + offsets[i] - bar_w / 2
-                pos_b = x_centers + offsets[i] + bar_w / 2
+            # Positions: A always leftmost in the group
+            half = (bars_per_level - 1) / 2.0
+            pos_a = x_centers + offsets[i] - half * bar_w
+            pos_b = pos_a + bar_w if has_b else None
+            pos_ref = (pos_a + bar_w * int(has_b) + bar_w) if has_ref else None
 
             ax.bar(pos_a, ratios_a, bar_w, color=color, alpha=0.85,
                    yerr=errs_a, capsize=3, error_kw={"linewidth": 0.8})
-            ax.bar(pos_b, ratios_b, bar_w, color=color, alpha=0.85,
-                   hatch="///", yerr=errs_b, capsize=3, error_kw={"linewidth": 0.8})
+            if has_b and ratios_b:
+                ax.bar(pos_b, ratios_b, bar_w, color=color, alpha=0.85,
+                       hatch="///", yerr=errs_b, capsize=3, error_kw={"linewidth": 0.8})
             if has_ref and ratios_ref:
                 ax.bar(pos_ref, ratios_ref, bar_w, facecolor="none",
                        edgecolor="forestgreen", linewidth=1.5, linestyle=":",
                        yerr=errs_ref, capsize=3, error_kw={"linewidth": 0.8})
 
             legend_handles.append(Patch(facecolor=color, alpha=0.85, label=f"{title} — {sim['label_a']}"))
-            legend_handles.append(Patch(facecolor=color, alpha=0.85, hatch="///", label=f"{title} — {sim['label_b']}"))
+            if has_b:
+                legend_handles.append(Patch(facecolor=color, alpha=0.85, hatch="///", label=f"{title} — {sim['label_b']}"))
 
         extra_handles = [plt.Line2D([0], [0], color="black", linestyle="--", linewidth=1.0,
                                     label="Full retention (ratio = 1)")]
@@ -2219,7 +2342,9 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         ax.set_xticklabels([b[0] for b in bands], fontsize=8)
         ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=9)
         ax.set_ylabel("Contrast retention ratio  (convolved / original)", fontsize=9)
-        ax.set_title(f"Spatial-Frequency Contrast Retention — {sim['label_a']} vs {sim['label_b']}", fontsize=10)
+        title_str = (f"Spatial-Frequency Contrast Retention — {sim['label_a']} vs {sim['label_b']}"
+                     if has_b else f"Spatial-Frequency Contrast Retention — {sim['label_a']}")
+        ax.set_title(title_str, fontsize=10)
         ax.legend(handles=legend_handles + extra_handles, fontsize=7,
                   ncol=2, loc="upper right")
         ax.grid(True, alpha=0.3, axis="y")
@@ -2263,15 +2388,18 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         label_a   = sim.get("label_a", "A")
         label_b   = sim.get("label_b", "B")
         label_ref = sim.get("label_ref")   # None when plate scale unknown
+        has_b     = any(xs_data[k].get("conv_b") is not None for k, _ in available)
         has_ref   = label_ref is not None and any(
             xs_data[k].get("conv_ref") is not None for k, _ in available
         )
 
-        ref_header = f"<th>{label_ref}</th>" if has_ref else ""
+        ref_header  = f"<th>{label_ref}</th>" if has_ref else ""
+        b_header    = f"<th>{label_b}</th>" if has_b else ""
+        stat_header = "<th>Stat. test</th>" if has_b else ""
         header = (
             f"<tr><th>Band</th><th>Contrast</th>"
-            f"<th>{label_a}</th><th>{label_b}</th>"
-            f"{ref_header}<th>Stat. test</th></tr>"
+            f"<th>{label_a}</th>{b_header}"
+            f"{ref_header}{stat_header}</tr>"
         )
 
         rows = []
@@ -2281,26 +2409,31 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                 d        = xs_data[key]
                 env_orig = _envelope(d["original"][::-1])
                 env_a    = _envelope(d["conv_a"][::-1])
-                env_b    = _envelope(d["conv_b"][::-1])
                 pw_a = env_a[sl] / np.clip(env_orig[sl], 1e-6, None)
-                pw_b = env_b[sl] / np.clip(env_orig[sl], 1e-6, None)
 
-                _, p = ttest_rel(pw_a, pw_b)
-                p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
-                p_style = (' style="background:#b3e5fc"' if p < 0.05
-                           else ' style="background:#e0e0e0"')
-                p_cell  = f"<td{p_style}>{p_str}</td>"
+                b_cell  = ""
+                p_cell  = ""
+                sa_style = ""
+                if has_b and d.get("conv_b") is not None:
+                    env_b = _envelope(d["conv_b"][::-1])
+                    pw_b = env_b[sl] / np.clip(env_orig[sl], 1e-6, None)
 
-                # Green/red: larger retention = better
-                tol = 1e-4
-                if pw_a.mean() > pw_b.mean() + tol:
-                    sa_style = ' style="background:#c8e6c9"'
-                    sb_style = ' style="background:#ffcdd2"'
-                elif pw_b.mean() > pw_a.mean() + tol:
-                    sa_style = ' style="background:#ffcdd2"'
-                    sb_style = ' style="background:#c8e6c9"'
-                else:
-                    sa_style = sb_style = ""
+                    _, p = ttest_rel(pw_a, pw_b)
+                    p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
+                    p_style = (' style="background:#b3e5fc"' if p < 0.05
+                               else ' style="background:#e0e0e0"')
+                    p_cell  = f"<td{p_style}>{p_str}</td>"
+
+                    tol = 1e-4
+                    if pw_a.mean() > pw_b.mean() + tol:
+                        sa_style = ' style="background:#c8e6c9"'
+                        sb_style = ' style="background:#ffcdd2"'
+                    elif pw_b.mean() > pw_a.mean() + tol:
+                        sa_style = ' style="background:#ffcdd2"'
+                        sb_style = ' style="background:#c8e6c9"'
+                    else:
+                        sa_style = sb_style = ""
+                    b_cell = f"<td{sb_style}>{pw_b.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_b.std():.3f}</td>"
 
                 # Reference column (neutral shading, no statistical test)
                 ref_cell = ""
@@ -2320,8 +2453,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                     f"<tr>{band_cell}"
                     f"<td>{level_title}</td>"
                     f"<td{sa_style}>{pw_a.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_a.std():.3f}</td>"
-                    f"<td{sb_style}>{pw_b.mean():.3f}&nbsp;&plusmn;&nbsp;{pw_b.std():.3f}</td>"
-                    f"{ref_cell}{p_cell}</tr>"
+                    f"{b_cell}{ref_cell}{p_cell}</tr>"
                 )
 
         ref_footnote = (
@@ -2330,36 +2462,47 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             f"— a benchmark for typical good atmospheric conditions."
         ) if has_ref else ""
 
+        stat_footnote = (
+            "<p class=\"footnote\">Paired t-test on per-pixel retention ratios (same pixel positions, "
+            "different PSFs). Highlighted cells: p&lt;0.05 — the two images are statistically "
+            f"distinguishable in that band/contrast combination.{ref_footnote}</p>"
+        ) if has_b else ""
+
         return (
             "<p><strong>Contrast retention summary (mean &plusmn; std, convolved / original):"
             "</strong></p>"
             f"<table>{header}{''.join(rows)}</table>"
-            "<p class=\"footnote\">Paired t-test on per-pixel retention ratios (same pixel positions, "
-            "different PSFs). Highlighted cells: p&lt;0.05 — the two images are statistically "
-            f"distinguishable in that band/contrast combination.{ref_footnote}</p>"
+            f"{stat_footnote}"
         )
 
     def _psf_simulation_html(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
-        """Return HTML block with four PSF simulation panels at 1:1 pixel resolution."""
+        """Return HTML block with PSF simulation panels at 1:1 pixel resolution."""
         sim = self._plot_psf_simulation(ra, rb)
         if sim is None:
             return ""
+
+        has_b = sim.get("conv_b") is not None
 
         def panel(arr, title, caption=""):
             tag = _arr_img_tag(arr, title)
             cap = f'<p class="caption">{caption}</p>' if caption else ""
             return f'<div style="margin-bottom:20px;"><p><strong>{title}</strong></p>{tag}{cap}</div>'
 
-        diff_caption = (
-            f"Pixel-level difference A − B (RdBu_r colormap, range ±{sim['diff_max']:.4f}). "
-            "Red = A brighter after convolution; blue = B brighter. "
-            "Larger values in fine-detail regions indicate a measurable sharpness difference."
-        )
+        diff_panel = ""
+        if has_b and sim.get("diff") is not None:
+            diff_caption = (
+                f"Pixel-level difference A − B (RdBu_r colormap, range ±{sim['diff_max']:.4f}). "
+                "Red = A brighter after convolution; blue = B brighter. "
+                "Larger values in fine-detail regions indicate a measurable sharpness difference."
+            )
+            diff_panel = panel(sim['diff'], 'Difference (A − B)', diff_caption)
 
         xs_figs          = self._plot_psf_crosssections(sim)
-        band_mod_fig     = _img_tag(self._plot_psf_band_modulation(sim),               "Frequency-band contrast retention")
-        retention_fig    = _img_tag(self._plot_psf_contrast_retention_ratios(sim),     "Contrast retention ratios")
+        band_mod_fig     = _img_tag(self._plot_psf_band_modulation(sim),           "Frequency-band contrast retention")
+        retention_fig    = _img_tag(self._plot_psf_contrast_retention_ratios(sim), "Contrast retention ratios")
 
+        color_key = (f"Black = original; blue = {sim['label_a']}; red = {sim['label_b']}."
+                     if has_b else f"Black = original; blue = {sim['label_a']}.")
         xs_caption = (
             "<strong>Top panel (image strip):</strong> ~100-row grayscale strip from the original "
             "test chart centred on the cross-section row, displayed with finest bars at the left "
@@ -2373,10 +2516,11 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             "each PSF preserves at each spatial scale. "
             "X-axis uses a <strong>square-root scale</strong> (ticks show actual pixel distance "
             "from the finest bars): fine bars are spread across the left where PSF differences "
-            "matter most; the coarser end is gently compressed. "
-            f"Black = original; blue = {sim['label_a']}; red = {sim['label_b']}. "
+            f"matter most; the coarser end is gently compressed. {color_key} "
             "A filter with a tighter PSF retains a higher envelope as x approaches 1."
         )
+        sanity_note = (" and should be near-identical for both filters — a useful sanity check."
+                       if has_b else " — a useful sanity check.")
         band_mod_caption = (
             "Three charts — one per contrast row (high / medium / low) — each showing mean "
             "rolling local contrast (peak&minus;valley, ±5&thinsp;px window) grouped into "
@@ -2385,12 +2529,14 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             "sensitive to PSF width: a broader PSF smears the finest bars first, so a larger "
             "drop from <em>Original</em> to the filter columns here indicates a resolution "
             "penalty at high spatial frequencies. "
-            "The <strong>Coarse</strong> band (301+&thinsp;px) is largely PSF-insensitive "
-            "and should be near-identical for both filters — a useful sanity check. "
+            f"The <strong>Coarse</strong> band (301+&thinsp;px) is largely PSF-insensitive"
+            f"{sanity_note} "
             "Comparing per-level charts reveals whether PSF blur degrades high-contrast "
             "detail more than low-contrast nebulosity, giving a frequency-resolved "
             "contrast-retention profile directly analogous to the MTF curves above."
         )
+        retention_caption_b = (f"; solid bars = {sim['label_a']}, hatched bars = {sim['label_b']}."
+                                if has_b else ".")
 
         xs_block = ""
         if xs_figs:
@@ -2416,10 +2562,18 @@ probe of PSF resolution at multiple spatial frequencies in a single exposure.</p
 (convolved / original) per spatial-frequency band. A ratio of 1.0 indicates perfect contrast
 retention; values below 1.0 indicate that the PSF reduces contrast at that spatial scale —
 lower bars = more blurring. Error bars show the standard deviation of the per-pixel ratios within
-each band. Colors identify contrast level (high / medium / low); solid bars = {sim['label_a']},
-hatched bars = {sim['label_b']}.</p>
+each band. Colors identify contrast level (high / medium / low){retention_caption_b}</p>
 {self._psf_retention_table(sim)}"""
             self._cached_retention_html = self._psf_retention_table(sim)
+
+        diff_para = ("""<p>
+  A pixel-level difference map (A &minus; B) is computed and displayed with the RdBu_r
+  diverging colormap, centred at zero. Red regions indicate pixels where filter A produced
+  higher intensity after convolution (A&rsquo;s PSF is locally tighter and preserved more
+  contrast); blue regions indicate B is locally brighter. The horizontal cross-sections below
+  isolate three contrast levels from Block&thinsp;1 of the chart and quantify the
+  peak-to-valley swing preserved by each PSF.
+</p>""" if has_b else "")
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
@@ -2442,25 +2596,18 @@ hatched bars = {sim['label_b']}.</p>
   combination &mdash; that is, how much spatial detail the optical + atmospheric + filter
   system can resolve under the conditions that produced each image.
 </p>
-<p>
-  A pixel-level difference map (A &minus; B) is computed and displayed with the RdBu_r
-  diverging colormap, centred at zero. Red regions indicate pixels where filter A produced
-  higher intensity after convolution (A&rsquo;s PSF is locally tighter and preserved more
-  contrast); blue regions indicate B is locally brighter. The horizontal cross-sections below
-  isolate three contrast levels from Block&thinsp;1 of the chart and quantify the
-  peak-to-valley swing preserved by each PSF.
-</p>
+{diff_para}
 <p>Each image is rendered at 1 image-pixel&thinsp;:&thinsp;1 screen-pixel.</p>
 {panel(sim['original'], 'Original test chart')}
 {panel(sim['conv_a'],   f"Convolved — {sim['label_a']}")}
-{panel(sim['conv_b'],   f"Convolved — {sim['label_b']}")}
+{panel(sim['conv_b'],   f"Convolved — {sim['label_b']}") if has_b else ''}
 {panel(sim['conv_ref'], f"Convolved — {sim['label_ref']}") if sim.get('conv_ref') is not None else ''}
-{panel(sim['diff'],     'Difference (A − B)', diff_caption)}{xs_block}"""
+{diff_panel}{xs_block}"""
 
     # ── Section 4: Halo ───────────────────────────────────────────────────────
 
     def _section_halo(self, ra: AnalysisResult, rb: AnalysisResult,
-                       img_a: AstroImage, img_b: AstroImage) -> str:
+                       img_a: AstroImage, img_b: AstroImage | None) -> str:
         err = _error_box("halo", ra, rb)
         ha = ra.halo_metrics or {}
         hb = rb.halo_metrics or {}
@@ -2760,12 +2907,14 @@ bright stars.</div>"""
         return fig
 
     def _plot_halo_star_grid(self, matched: list,
-                              img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+                              img_a: AstroImage, img_b: AstroImage | None) -> plt.Figure | None:
         if not matched:
             return None
 
         bgsub_a = img_a.background_subtracted() if img_a.background is not None else img_a.data
-        bgsub_b = img_b.background_subtracted() if img_b.background is not None else img_b.data
+        bgsub_b = (img_b.background_subtracted() if img_b is not None and img_b.background is not None
+                   else (img_b.data if img_b is not None else None))
+        label_b = img_b.label if img_b is not None else "—"
 
         from core.stretch import stf_stretch
 
@@ -2832,11 +2981,11 @@ bright stars.</div>"""
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
             if sb is not None:
                 h2c_b = sb.get("halo_to_core_ratio")
-                ax_b.set_title(f"#{idx+1} {img_b.label}"
+                ax_b.set_title(f"#{idx+1} {label_b}"
                                + (f"\nh/c={h2c_b:.5f}" if h2c_b is not None else ""),
                                fontsize=9)
             else:
-                ax_b.set_title(f"#{idx+1} {img_b.label}\n(no match)", fontsize=9)
+                ax_b.set_title(f"#{idx+1} {label_b}\n(no match)", fontsize=9)
             ax_b.axis("off")
             if sb is not None:
                 ax_b.plot(half, half, '+', color='magenta', markersize=12,
@@ -2857,7 +3006,7 @@ bright stars.</div>"""
                                linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_a.label)
                 if xs_b_vals is not None:
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
-                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
+                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=label_b)
                 ax_xs.set_title(f"#{idx+1} cross-section", fontsize=8)
                 ax_xs.set_xlabel("px from centre", fontsize=7)
                 ax_xs.tick_params(labelsize=7)
@@ -2882,7 +3031,7 @@ bright stars.</div>"""
                                     alpha=0.25, color="steelblue")
             if rdf_m_b is not None:
                 ax_rdf.semilogy(rdf_r_b, 10**rdf_m_b, color="tomato",
-                                linewidth=1.0, label=img_b.label)
+                                linewidth=1.0, label=label_b)
                 ax_rdf.fill_between(rdf_r_b,
                                     10**(rdf_m_b - rdf_s_b),
                                     10**(rdf_m_b + rdf_s_b),
@@ -2900,13 +3049,15 @@ bright stars.</div>"""
         return fig
 
     def _plot_saturated_star_grid(self, matched: list,
-                                   img_a: AstroImage, img_b: AstroImage) -> plt.Figure | None:
+                                   img_a: AstroImage, img_b: AstroImage | None) -> plt.Figure | None:
         """Cutout + cross-section grid for saturated bright stars (no Moffat fit)."""
         if not matched:
             return None
 
         bgsub_a = img_a.background_subtracted() if img_a.background is not None else img_a.data
-        bgsub_b = img_b.background_subtracted() if img_b.background is not None else img_b.data
+        bgsub_b = (img_b.background_subtracted() if img_b is not None and img_b.background is not None
+                   else (img_b.data if img_b is not None else None))
+        label_b = img_b.label if img_b is not None else "—"
 
         from core.stretch import stf_stretch
 
@@ -2955,7 +3106,7 @@ bright stars.</div>"""
 
             ax_b.imshow(disp_b, origin="upper", cmap="turbo",
                         vmin=0, vmax=1, interpolation="nearest", aspect="equal")
-            title_b = (f"S{idx+1} {img_b.label}\n"
+            title_b = (f"S{idx+1} {label_b}\n"
                        + ("⚠ saturated core" if sb is not None else "(no match)"))
             ax_b.set_title(title_b, fontsize=9)
             ax_b.axis("off")
@@ -2975,7 +3126,7 @@ bright stars.</div>"""
                 if sb is not None:
                     xs_b_vals = np.maximum(cut_b[mid_row, :w_min], noise_floor)
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
-                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=img_b.label)
+                                   linewidth=1.0, alpha=XS_LINE_ALPHA, label=label_b)
                 ax_xs.set_title(f"S{idx+1} cross-section", fontsize=8)
                 ax_xs.set_xlabel("px from centre", fontsize=7)
                 ax_xs.tick_params(labelsize=7)
@@ -3000,7 +3151,7 @@ bright stars.</div>"""
                                     alpha=0.25, color="steelblue")
             if rdf_m_b is not None:
                 ax_rdf.semilogy(rdf_r_b, 10**rdf_m_b, color="tomato",
-                                linewidth=1.0, label=img_b.label)
+                                linewidth=1.0, label=label_b)
                 ax_rdf.fill_between(rdf_r_b,
                                     10**(rdf_m_b - rdf_s_b),
                                     10**(rdf_m_b + rdf_s_b),
@@ -3988,6 +4139,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 
     def _section_summary(self, ra: AnalysisResult, rb: AnalysisResult,
                           bw_differ: bool) -> str:
+        if getattr(self, "_single_image", False):
+            return ""
         sm_a = ra.spatial_metrics or {}
         sm_b = rb.spatial_metrics or {}
 

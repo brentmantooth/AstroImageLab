@@ -112,11 +112,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_image_loaded(self, img) -> None:
-        both_loaded = (self._panel_a.image is not None and
-                       self._panel_b.image is not None)
-        self._control.set_run_enabled(both_loaded)
-        if both_loaded:
+        either_loaded = (self._panel_a.image is not None or
+                         self._panel_b.image is not None)
+        self._control.set_run_enabled(either_loaded)
+        if self._panel_a.image is not None and self._panel_b.image is not None:
             self._control.set_alignment_status("Waiting for analysis…", ok=True)
+        elif either_loaded:
+            self._control.set_alignment_status("Single-image mode", ok=True)
 
     def _on_roi_mode_toggled(self, enabled: bool) -> None:
         self._panel_a.set_roi_mode(enabled)
@@ -166,20 +168,42 @@ class MainWindow(QMainWindow):
     def _on_run(self, settings: dict) -> None:
         img_a = self._panel_a.image
         img_b = self._panel_b.image
-        if img_a is None or img_b is None:
+
+        if img_a is None and img_b is None:
             QMessageBox.warning(self, "Missing images",
-                                "Please load both Image A and Image B before running.")
+                                "Please load at least one image before running.")
             self._control.set_run_enabled(True)
             return
 
-        # Push bandwidth and filter thickness values from the input fields into the image objects
-        self._panel_a.apply_bandwidth_from_field()
-        self._panel_b.apply_bandwidth_from_field()
-        self._panel_a.apply_filter_thickness_from_field()
-        self._panel_b.apply_filter_thickness_from_field()
+        # If only one image is loaded, confirm single-image mode
+        if img_a is None or img_b is None:
+            answer = QMessageBox.question(
+                self, "Single-image analysis",
+                "Only one image is loaded. Run in single-image analysis mode?\n\n"
+                "Comparison metrics and A/B colour-coded tables will not be available.\n"
+                "All per-image analyses (PSF, SNR, halo, edge, power spectrum, spatial\n"
+                "detail) will still run on the loaded image.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._control.set_run_enabled(True)
+                return
+            # Ensure img_a is always the loaded image so downstream code is uniform
+            if img_a is None:
+                img_a = img_b
+                img_b = None
 
-        # Warn if either image has no bandwidth set
-        missing = [img.label for img in (img_a, img_b) if img.bandwidth_nm is None]
+        # Identify which panels are active so bandwidth/thickness are applied correctly
+        _active_panels = ([self._panel_a] if img_b is None
+                          else [self._panel_a, self._panel_b])
+        for _p in _active_panels:
+            _p.apply_bandwidth_from_field()
+            _p.apply_filter_thickness_from_field()
+
+        # Warn if the loaded image(s) have no bandwidth set
+        loaded_imgs = [img for img in (img_a, img_b) if img is not None]
+        missing = [img.label for img in loaded_imgs if img.bandwidth_nm is None]
         if missing:
             answer = QMessageBox.question(
                 self,
@@ -214,10 +238,14 @@ class MainWindow(QMainWindow):
         settings["roi"] = self._roi
         settings["crosshair"] = self._crosshair
 
+        # Determine starless sources: when single-image, use whichever panel has the image
+        _sl_a = (self._panel_a.starless_image if self._panel_a.image is img_a
+                 else self._panel_b.starless_image)
+        _sl_b = self._panel_b.starless_image if img_b is not None else None
         self._thread = AnalysisThread(
             img_a, img_b, settings,
-            starless_a=self._panel_a.starless_image,
-            starless_b=self._panel_b.starless_image,
+            starless_a=_sl_a,
+            starless_b=_sl_b,
             parent=self,
         )
         self._thread.progress.connect(self._on_progress)

@@ -26,7 +26,7 @@ class SpatialDetailAnalyzer:
     figures. All processing uses mean-signal-normalised data.
     """
 
-    def analyze(self, image_a: AstroImage, image_b: AstroImage,
+    def analyze(self, image_a: AstroImage, image_b: AstroImage | None = None,
                 kernel_sizes: tuple = STD_KERNEL_SIZES,
                 log_sigmas: tuple = LOG_SIGMAS,
                 wavelet: str = WAVELET_NAME,
@@ -36,10 +36,11 @@ class SpatialDetailAnalyzer:
                 xs_snr_width: int | None = None) -> dict:
 
         image_a.estimate_background()
-        image_b.estimate_background()
+        if image_b is not None:
+            image_b.estimate_background()
 
         norm_a = self._normalise(image_a)
-        norm_b = self._normalise(image_b)
+        norm_b = self._normalise(image_b) if image_b is not None else None
 
         result: dict = {
             "contrast_ratios_a": {},
@@ -52,13 +53,15 @@ class SpatialDetailAnalyzer:
         }
         figures: dict = {}
 
-        if norm_a is None or norm_b is None:
+        if norm_a is None or (image_b is not None and norm_b is None):
             result["warning"] = "Mean signal ≤ 0 in one or both images; spatial analysis skipped."
             return result
 
         # Nebula / background masks (used for contrast ratio)
         mask_neb_a, mask_bg_a = self._make_masks(image_a)
-        mask_neb_b, mask_bg_b = self._make_masks(image_b)
+        mask_neb_b = mask_bg_b = None
+        if image_b is not None:
+            mask_neb_b, mask_bg_b = self._make_masks(image_b)
 
         # When a user ROI is provided, crop the analysis arrays to that region after
         # normalisation so the global signal mean is used, not the ROI's local mean.
@@ -68,11 +71,12 @@ class SpatialDetailAnalyzer:
         if roi is not None:
             rx0, ry0, rx1, ry1 = roi
             analysis_a  = norm_a[ry0:ry1, rx0:rx1]
-            analysis_b  = norm_b[ry0:ry1, rx0:rx1]
+            analysis_b  = norm_b[ry0:ry1, rx0:rx1] if norm_b is not None else None
             mask_neb_a  = mask_neb_a[ry0:ry1, rx0:rx1]
             mask_bg_a   = mask_bg_a[ry0:ry1, rx0:rx1]
-            mask_neb_b  = mask_neb_b[ry0:ry1, rx0:rx1]
-            mask_bg_b   = mask_bg_b[ry0:ry1, rx0:rx1]
+            if mask_neb_b is not None:
+                mask_neb_b  = mask_neb_b[ry0:ry1, rx0:rx1]
+                mask_bg_b   = mask_bg_b[ry0:ry1, rx0:rx1]
             display_roi = None   # arrays are already the analysis region; no further cropping
             result["roi_used"] = roi
             if crosshair is not None:
@@ -90,12 +94,14 @@ class SpatialDetailAnalyzer:
                 crosshair_roi = None
         else:
             analysis_a  = norm_a
-            analysis_b  = norm_b
+            analysis_b  = norm_b  # may be None in single-image mode
             # Bright-feature bounding box for display cropping (uses image A's mask)
             display_roi = self._nebula_bounding_box(mask_neb_a, norm_a.shape)
             crosshair_roi = crosshair   # full-image coords are correct when no ROI
 
         result["display_roi"] = display_roi
+
+        _label_b = image_b.label if image_b is not None else None
 
         # 1-3. Local std, LoG, wavelet — all read norm_a/norm_b with no shared mutable state,
         # so they run concurrently. Each method returns (b64_figs, partial_result).
@@ -105,19 +111,19 @@ class SpatialDetailAnalyzer:
                 mask_neb_a, mask_bg_a,
                 mask_neb_b, mask_bg_b,
                 kernel_sizes,
-                image_a.label, image_b.label,
+                image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
             )
             _f_log = _ex.submit(self._log_analysis,
                 analysis_a, analysis_b, log_sigmas,
-                image_a.label, image_b.label,
+                image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
             )
             _f_wav = _ex.submit(self._wavelet_analysis,
                 analysis_a, analysis_b, wavelet, levels,
-                image_a.label, image_b.label,
+                image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
             )
@@ -139,29 +145,38 @@ class SpatialDetailAnalyzer:
         result["panels"].update(wav_partial["panels"])
 
         if crosshair is not None:
-            figures["xs_context"] = fig_to_b64(self._plot_context_figure(
-                image_a, image_b, image_a.label, image_b.label, crosshair), dpi=150)
             pos_a, prof_a = self._sample_line(norm_a, **crosshair)
-            pos_b, prof_b = self._sample_line(norm_b, **crosshair)
-            figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile(
-                pos_a, prof_a, pos_b, prof_b, image_a.label, image_b.label), dpi=150)
             pos_a_raw, prof_a_raw = self._sample_line(image_a.data, **crosshair)
-            pos_b_raw, prof_b_raw = self._sample_line(image_b.data, **crosshair)
-            figures["xs_image_profile_raw"] = fig_to_b64(self._plot_image_profile(
-                pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
-                image_a.label, image_b.label,
-                title="Cross-section brightness profile (raw counts)",
-                ylabel="Pixel value (raw ADU)",
-            ), dpi=150)
-
-            _width = xs_snr_width if xs_snr_width is not None else XS_SNR_REGION_WIDTH
-            xs_snr = self._compute_xs_snr(
-                pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
-                image_a.label, image_b.label, _width)
-            if xs_snr:
-                result["xs_snr"] = {k: v for k, v in xs_snr.items() if k != "fig"}
-                figures["xs_snr_profile"] = fig_to_b64(xs_snr["fig"], dpi=150)
-                plt.close(xs_snr["fig"])
+            if image_b is not None and norm_b is not None:
+                figures["xs_context"] = fig_to_b64(self._plot_context_figure(
+                    image_a, image_b, image_a.label, image_b.label, crosshair), dpi=150)
+                pos_b, prof_b = self._sample_line(norm_b, **crosshair)
+                figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile(
+                    pos_a, prof_a, pos_b, prof_b, image_a.label, image_b.label), dpi=150)
+                pos_b_raw, prof_b_raw = self._sample_line(image_b.data, **crosshair)
+                figures["xs_image_profile_raw"] = fig_to_b64(self._plot_image_profile(
+                    pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
+                    image_a.label, image_b.label,
+                    title="Cross-section brightness profile (raw counts)",
+                    ylabel="Pixel value (raw ADU)",
+                ), dpi=150)
+                _width = xs_snr_width if xs_snr_width is not None else XS_SNR_REGION_WIDTH
+                xs_snr = self._compute_xs_snr(
+                    pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
+                    image_a.label, image_b.label, _width)
+                if xs_snr:
+                    result["xs_snr"] = {k: v for k, v in xs_snr.items() if k != "fig"}
+                    figures["xs_snr_profile"] = fig_to_b64(xs_snr["fig"], dpi=150)
+                    plt.close(xs_snr["fig"])
+            else:
+                # Single-image: produce cross-section profile for image A only
+                figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile_single(
+                    pos_a, prof_a, image_a.label), dpi=150)
+                figures["xs_image_profile_raw"] = fig_to_b64(self._plot_image_profile_single(
+                    pos_a_raw, prof_a_raw, image_a.label,
+                    title="Cross-section brightness profile (raw counts)",
+                    ylabel="Pixel value (raw ADU)",
+                ), dpi=150)
 
         result["crosshair"] = crosshair
         result["figures"] = figures
@@ -238,39 +253,51 @@ class SpatialDetailAnalyzer:
                        crosshair=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {"contrast_ratios_a": {}, "contrast_ratios_b": {}, "panels": {}}
+        single = norm_b is None
         for ks in kernel_sizes:
             std_a = self._compute_std_map(norm_a, ks)
-            std_b = self._compute_std_map(norm_b, ks)
+            std_b = self._compute_std_map(norm_b, ks) if not single else None
 
             # Contrast ratios (computed on unsmoothed maps)
             cr_a = self._contrast_ratio(std_a, mask_neb_a, mask_bg_a)
-            cr_b = self._contrast_ratio(std_b, mask_neb_b, mask_bg_b)
             partial["contrast_ratios_a"][ks] = cr_a
-            partial["contrast_ratios_b"][ks] = cr_b
+            if not single:
+                cr_b = self._contrast_ratio(std_b, mask_neb_b, mask_bg_b)
+                partial["contrast_ratios_b"][ks] = cr_b
 
             partial["panels"][f"std_{ks}px"] = {
                 "a":    std_a.astype(np.float32),
-                "b":    std_b.astype(np.float32),
-                "diff": (std_a - std_b).astype(np.float32),
+                "b":    std_b.astype(np.float32) if std_b is not None else None,
+                "diff": (std_a - std_b).astype(np.float32) if std_b is not None else None,
             }
 
-            fig = self._plot_side_by_side(
-                self._crop_border(std_a, SECTION8_BORDER_CROP_FRACTION), self._crop_border(std_b, SECTION8_BORDER_CROP_FRACTION),
-                f"Local σ — kernel {ks}px — {label_a}",
-                f"Local σ — kernel {ks}px — {label_b}",
-                diff_title=f"Diff (A−B), kernel {ks}px",
-                cmap=SECTION8_ANALYSIS_CMAP,
-                nonlinear_norm=True,
-                display_roi=None,
-            )
+            if not single:
+                fig = self._plot_side_by_side(
+                    self._crop_border(std_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(std_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local σ — kernel {ks}px — {label_a}",
+                    f"Local σ — kernel {ks}px — {label_b}",
+                    diff_title=f"Diff (A−B), kernel {ks}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                    display_roi=None,
+                )
+            else:
+                fig = self._plot_single(
+                    self._crop_border(std_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local σ — kernel {ks}px — {label_a}",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                )
             figures[f"std_{ks}px"] = fig
 
             if crosshair is not None:
                 pos, pa = self._sample_line(std_a, **crosshair)
-                _, pb = self._sample_line(std_b, **crosshair)
-                figures[f"xs_std_{ks}px"] = self._plot_cross_section(
-                    pos, pa, pb, label_a, label_b,
-                    f"Cross-section — Local σ, kernel {ks}px")
+                if not single:
+                    _, pb = self._sample_line(std_b, **crosshair)
+                    figures[f"xs_std_{ks}px"] = self._plot_cross_section(
+                        pos, pa, pb, label_a, label_b,
+                        f"Cross-section — Local σ, kernel {ks}px")
 
         return figs_to_b64(figures, dpi=150), partial
 
@@ -316,26 +343,35 @@ class SpatialDetailAnalyzer:
                        crosshair=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {"panels": {}}
+        single = norm_b is None
         for sigma in sigmas:
             log_a = np.abs(gaussian_laplace(norm_a, sigma=sigma))
-            log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma))
+            log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma)) if not single else None
             partial["panels"][f"log_{sigma}"] = {
                 "a":    log_a.astype(np.float32),
-                "b":    log_b.astype(np.float32),
-                "diff": (log_a - log_b).astype(np.float32),
+                "b":    log_b.astype(np.float32) if log_b is not None else None,
+                "diff": (log_a - log_b).astype(np.float32) if log_b is not None else None,
             }
-            fig = self._plot_side_by_side(
-                self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
-                self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
-                f"|LoG| σ={sigma}px — {label_a}",
-                f"|LoG| σ={sigma}px — {label_b}",
-                diff_title=f"LoG diff (A−B), σ={sigma}px",
-                cmap=SECTION8_ANALYSIS_CMAP,
-                nonlinear_norm=True,
-                display_roi=None,
-            )
+            if not single:
+                fig = self._plot_side_by_side(
+                    self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"|LoG| σ={sigma}px — {label_a}",
+                    f"|LoG| σ={sigma}px — {label_b}",
+                    diff_title=f"LoG diff (A−B), σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                    display_roi=None,
+                )
+            else:
+                fig = self._plot_single(
+                    self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"|LoG| σ={sigma}px — {label_a}",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                )
             figures[f"log_sigma{sigma}"] = fig
-            if crosshair is not None:
+            if crosshair is not None and not single:
                 pos, pa = self._sample_line(log_a, **crosshair)
                 _, pb = self._sample_line(log_b, **crosshair)
                 figures[f"xs_log_sigma{sigma}"] = self._plot_cross_section(
@@ -357,24 +393,21 @@ class SpatialDetailAnalyzer:
             "wavelet_snr_a": {}, "wavelet_snr_b": {},
             "panels": {},
         }
+        single = norm_b is None
 
-        coeffs_a = pywt.wavedec2(norm_a, wavelet, level=levels,
-                                   mode="periodization")
-        coeffs_b = pywt.wavedec2(norm_b, wavelet, level=levels,
-                                   mode="periodization")
+        coeffs_a = pywt.wavedec2(norm_a, wavelet, level=levels, mode="periodization")
+        coeffs_b = pywt.wavedec2(norm_b, wavelet, level=levels, mode="periodization") if not single else None
 
         sigma_a = self._estimate_noise(coeffs_a)
-        sigma_b = self._estimate_noise(coeffs_b)
+        sigma_b = self._estimate_noise(coeffs_b) if coeffs_b is not None else None
         partial["sigma_noise_a"] = sigma_a
         partial["sigma_noise_b"] = sigma_b
 
         # Per-level SNR (index 1 = coarsest detail, -1 = finest detail)
         for lvl_idx in range(1, levels + 1):
-            # coeffs layout: [approx, detail_coarsest, ..., detail_finest]
-            # level 1 = finest = coeffs[-1]; level N = coarsest = coeffs[1]
             coeff_idx = levels + 1 - lvl_idx  # map human level to list index
             snr_a = self._level_snr(coeffs_a, coeff_idx, sigma_a, lvl_idx)
-            snr_b = self._level_snr(coeffs_b, coeff_idx, sigma_b, lvl_idx)
+            snr_b = self._level_snr(coeffs_b, coeff_idx, sigma_b, lvl_idx) if coeffs_b is not None else None
             partial["wavelet_snr_a"][lvl_idx] = snr_a
             partial["wavelet_snr_b"][lvl_idx] = snr_b
 
@@ -388,23 +421,31 @@ class SpatialDetailAnalyzer:
                 continue
             coeff_idx = levels + 1 - display_level
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
-            rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels)
+            rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels) if coeffs_b is not None else None
             partial["panels"][f"wavelet_{display_level}"] = {
                 "a":    rec_a.astype(np.float32),
-                "b":    rec_b.astype(np.float32),
-                "diff": (rec_a - rec_b).astype(np.float32),
+                "b":    rec_b.astype(np.float32) if rec_b is not None else None,
+                "diff": (rec_a - rec_b).astype(np.float32) if rec_b is not None else None,
             }
-            fig = self._plot_side_by_side(
-                self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION), self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
-                f"Wavelet level {display_level} — {label_a}",
-                f"Wavelet level {display_level} — {label_b}",
-                diff_title=f"Level {display_level} diff (A−B)",
-                cmap=SECTION8_ANALYSIS_CMAP,
-                symmetric_diff=True,
-                display_roi=None,
-            )
+            if not single:
+                fig = self._plot_side_by_side(
+                    self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Wavelet level {display_level} — {label_a}",
+                    f"Wavelet level {display_level} — {label_b}",
+                    diff_title=f"Level {display_level} diff (A−B)",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    symmetric_diff=True,
+                    display_roi=None,
+                )
+            else:
+                fig = self._plot_single(
+                    self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Wavelet level {display_level} — {label_a}",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                )
             figures[f"wavelet_level{display_level}"] = fig
-            if crosshair is not None:
+            if crosshair is not None and not single:
                 pos, pa = self._sample_line(rec_a, **crosshair)
                 _, pb = self._sample_line(rec_b, **crosshair)
                 figures[f"xs_wavelet_level{display_level}"] = self._plot_cross_section(
@@ -516,20 +557,50 @@ class SpatialDetailAnalyzer:
 
         return fig
 
+    def _plot_single(self, arr_a: np.ndarray, title_a: str,
+                     cmap: str = "viridis",
+                     nonlinear_norm: bool = False,
+                     smooth_display: bool = True) -> plt.Figure:
+        if smooth_display:
+            arr_a = self._smooth_for_display(arr_a)
+        vmin = float(np.percentile(arr_a, 0.5))
+        vmax = float(np.percentile(arr_a, 99.5))
+        if vmax <= vmin:
+            vmax = vmin + 1e-9
+        norm = mcolors.PowerNorm(gamma=0.5, vmin=vmin, vmax=vmax) if nonlinear_norm else None
+        h, w = arr_a.shape[:2]
+        aspect_ratio = h / max(w, 1)
+        panel_w = 10.0
+        panel_h = panel_w * aspect_ratio
+        fig, ax = plt.subplots(1, 1, figsize=(panel_w, panel_h), constrained_layout=True)
+        im = ax.imshow(arr_a, origin="upper", cmap=cmap,
+                       norm=norm if norm is not None else None,
+                       vmin=None if norm is not None else vmin,
+                       vmax=None if norm is not None else vmax,
+                       interpolation="nearest", aspect="equal")
+        ax.set_title(title_a, fontsize=10)
+        ax.axis("off")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        return fig
+
     def _plot_snr_bars(self, snr_a: dict, snr_b: dict,
-                        label_a: str, label_b: str, levels: int) -> plt.Figure:
+                        label_a: str, label_b: str | None, levels: int) -> plt.Figure:
         fig, ax = plt.subplots(figsize=(7, 4))
         x = np.arange(1, levels + 1)
-        width = 0.35
         vals_a = [snr_a.get(lvl) or 0.0 for lvl in x]
-        vals_b = [snr_b.get(lvl) or 0.0 for lvl in x]
-        bars_a = ax.bar(x - width / 2, vals_a, width, label=label_a, color="steelblue")
-        bars_b = ax.bar(x + width / 2, vals_b, width, label=label_b, color="tomato")
+        if label_b is not None:
+            width = 0.35
+            vals_b = [snr_b.get(lvl) or 0.0 for lvl in x]
+            ax.bar(x - width / 2, vals_a, width, label=label_a, color="steelblue")
+            ax.bar(x + width / 2, vals_b, width, label=label_b, color="tomato")
+            ax.set_title("Wavelet per-level SNR comparison")
+        else:
+            ax.bar(x, vals_a, 0.6, label=label_a, color="steelblue")
+            ax.set_title("Wavelet per-level SNR")
         ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8,
                    label="SNR = 1 (signal = noise)")
         ax.set_xlabel("Wavelet level (1 = finest ~2px, 4 = coarsest ~16px)")
         ax.set_ylabel("Signal energy / Noise energy")
-        ax.set_title("Wavelet per-level SNR comparison")
         ax.set_xticks(x)
         ax.set_xticklabels([f"Level {i}" for i in x])
         ax.legend(fontsize=8)
@@ -645,6 +716,21 @@ class SpatialDetailAnalyzer:
                 alpha=XS_LINE_ALPHA, label=label_a)
         ax.plot(pos_b, prof_b, color="#1f77b4", linewidth=1.5,
                 alpha=XS_LINE_ALPHA, label=label_b)
+        ax.set_xlabel("Position along line (px)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        return fig
+
+    @staticmethod
+    def _plot_image_profile_single(pos: np.ndarray, prof: np.ndarray,
+                                    label: str,
+                                    title: str = "Cross-section brightness profile",
+                                    ylabel: str = "Pixel value (normalised)") -> plt.Figure:
+        fig, ax = plt.subplots(figsize=(9, 4), constrained_layout=True)
+        ax.plot(pos, prof, color="#ff7f0e", linewidth=1.5,
+                alpha=XS_LINE_ALPHA, label=label)
         ax.set_xlabel("Position along line (px)")
         ax.set_ylabel(ylabel)
         ax.set_title(title)

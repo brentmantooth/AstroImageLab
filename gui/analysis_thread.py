@@ -62,7 +62,8 @@ class AnalysisThread(QThread):
         pso = s.get("pixel_scale_override")
         if pso:
             img_a.pixel_scale = pso
-            img_b.pixel_scale = pso
+            if img_b is not None:
+                img_b.pixel_scale = pso
 
         # Long-filename substitution: abbreviate labels before any analyzer runs so all
         # figure titles and legends use the short label from the first render.
@@ -70,10 +71,10 @@ class AnalysisThread(QThread):
         # Starless images are synced to "{main_label} (starless)" so they always match
         # the abbreviated main label in every figure that uses a starless image.
         _orig_label_a = img_a.label
-        _orig_label_b = img_b.label
+        _orig_label_b = img_b.label if img_b is not None else None
         if len(_orig_label_a) > LABEL_MAX_LEN:
             img_a.label = "Image A"
-        if len(_orig_label_b) > LABEL_MAX_LEN:
+        if img_b is not None and len(img_b.label) > LABEL_MAX_LEN:
             img_b.label = "Image B"
 
         # Always sync starless labels to keep them consistent with the main image label.
@@ -81,7 +82,7 @@ class AnalysisThread(QThread):
         _orig_starless_label_b = self._starless_b.label if self._starless_b else None
         if self._starless_a is not None:
             self._starless_a.label = f"{img_a.label} (starless)"
-        if self._starless_b is not None:
+        if self._starless_b is not None and img_b is not None:
             self._starless_b.label = f"{img_b.label} (starless)"
 
         result_a = AnalysisResult(
@@ -89,13 +90,16 @@ class AnalysisThread(QThread):
             original_label=_orig_label_a if img_a.label != _orig_label_a else None,
         )
         result_b = AnalysisResult(
-            label=img_b.label,
-            original_label=_orig_label_b if img_b.label != _orig_label_b else None,
+            label=img_b.label if img_b is not None else "—",
+            original_label=_orig_label_b if (img_b is not None and img_b.label != _orig_label_b) else None,
         )
 
-        # Alignment (always serial — must complete before analysis begins)
-        self.progress.emit(2, "Aligning images…")
-        aligned = self._align(img_a, img_b, result_a)
+        # Alignment (always serial — must complete before analysis begins; skipped if single-image)
+        if img_b is not None:
+            self.progress.emit(2, "Aligning images…")
+            aligned = self._align(img_a, img_b, result_a)
+        else:
+            self.progress.emit(2, "Single-image mode — skipping alignment…")
 
         # Build ordered task list: (metric_key, display_label, callable)
         # Each callable is a zero-arg function that writes into result_a / result_b.
@@ -104,95 +108,110 @@ class AnalysisThread(QThread):
         if metrics.get("psf"):
             _epsf_max = s.get("epsf_max_stars", 500)
             def _psf(img_a=img_a, img_b=img_b, _max=_epsf_max):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fa = ex.submit(PSFAnalyzer(epsf_max_stars=_max).analyze, img_a)
-                    fb = ex.submit(PSFAnalyzer(epsf_max_stars=_max).analyze, img_b)
-                    result_a.psf_metrics = fa.result()
-                    result_b.psf_metrics = fb.result()
+                if img_b is not None:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                        fa = ex.submit(PSFAnalyzer(epsf_max_stars=_max).analyze, img_a)
+                        fb = ex.submit(PSFAnalyzer(epsf_max_stars=_max).analyze, img_b)
+                        result_a.psf_metrics = fa.result()
+                        result_b.psf_metrics = fb.result()
+                else:
+                    result_a.psf_metrics = PSFAnalyzer(epsf_max_stars=_max).analyze(img_a)
             tasks.append(("psf", "Computing PSF / MTF", _psf))
 
         if metrics.get("halo"):
             def _halo(img_a=img_a, img_b=img_b):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fa = ex.submit(HaloAnalyzer().analyze, img_a)
-                    fb = ex.submit(HaloAnalyzer().analyze, img_b)
-                    result_a.halo_metrics = fa.result()
-                    result_b.halo_metrics = fb.result()
+                if img_b is not None:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                        fa = ex.submit(HaloAnalyzer().analyze, img_a)
+                        fb = ex.submit(HaloAnalyzer().analyze, img_b)
+                        result_a.halo_metrics = fa.result()
+                        result_b.halo_metrics = fb.result()
+                else:
+                    result_a.halo_metrics = HaloAnalyzer().analyze(img_a)
             tasks.append(("halo", "Analysing halos", _halo))
 
 
         if metrics.get("edge"):
             sl_a = self._starless_a
-            sl_b = self._starless_b
+            sl_b = self._starless_b if img_b is not None else None
             if sl_a is not None:
                 sl_a.pixel_scale = img_a.pixel_scale
             if sl_b is not None:
                 sl_b.pixel_scale = img_b.pixel_scale
 
-            def _edge(src_a=sl_a or img_a, src_b=sl_b or img_b):
+            def _edge(src_a=sl_a or img_a, src_b=(sl_b or img_b) if img_b is not None else None):
                 ea = EdgeAnalyzer()
                 _ch = s.get("crosshair")
 
                 # Always auto-detect top-N ROIs on the full image.
                 # The user ROI applies only to spatial detail and power spectrum.
                 result_a.edge_metrics = ea.analyze(src_a, roi=None)
-                result_b.edge_metrics = ea.analyze(src_b, roi=None)
 
-                # Angle normalisation: use the scan direction from whichever image
-                # has the stronger overall gradient, so both ESFs measure the same
-                # cross-section orientation.
-                edges_a = result_a.edge_metrics.get("edges", [])
-                edges_b = result_b.edge_metrics.get("edges", [])
-                a_max = max((e.get("gradient_magnitude") or 0 for e in edges_a), default=0)
-                b_max = max((e.get("gradient_magnitude") or 0 for e in edges_b), default=0)
+                if src_b is not None:
+                    result_b.edge_metrics = ea.analyze(src_b, roi=None)
 
-                if edges_a and edges_b and a_max != b_max:
-                    rois_a = result_a.edge_metrics.get("rois_used")
-                    rois_b = result_b.edge_metrics.get("rois_used")
-                    if b_max > a_max:
-                        forced = [e["angle_rad"] for e in edges_b]
-                        result_a.edge_metrics = ea.analyze(src_a, roi=rois_b,
-                                                           forced_angles=forced)
-                    else:
-                        forced = [e["angle_rad"] for e in edges_a]
-                        result_b.edge_metrics = ea.analyze(src_b, roi=rois_a,
-                                                           forced_angles=forced)
+                    # Angle normalisation: use the scan direction from whichever image
+                    # has the stronger overall gradient, so both ESFs measure the same
+                    # cross-section orientation.
+                    edges_a = result_a.edge_metrics.get("edges", [])
+                    edges_b = result_b.edge_metrics.get("edges", [])
+                    a_max = max((e.get("gradient_magnitude") or 0 for e in edges_a), default=0)
+                    b_max = max((e.get("gradient_magnitude") or 0 for e in edges_b), default=0)
+
+                    if edges_a and edges_b and a_max != b_max:
+                        rois_a = result_a.edge_metrics.get("rois_used")
+                        rois_b = result_b.edge_metrics.get("rois_used")
+                        if b_max > a_max:
+                            forced = [e["angle_rad"] for e in edges_b]
+                            result_a.edge_metrics = ea.analyze(src_a, roi=rois_b,
+                                                               forced_angles=forced)
+                        else:
+                            forced = [e["angle_rad"] for e in edges_a]
+                            result_b.edge_metrics = ea.analyze(src_b, roi=rois_a,
+                                                               forced_angles=forced)
+
+                    if _ch is not None:
+                        xs_b = ea.analyze_crosshair(src_b, _ch)
+                        if xs_b:
+                            result_b.edge_metrics["edges"].append(xs_b)
+
+                    result_b.edge_metrics["used_starless"] = sl_b is not None
 
                 # Append crosshair edge ESF/LSF if a cross-section line was drawn.
                 if _ch is not None:
                     xs_a = ea.analyze_crosshair(src_a, _ch)
-                    xs_b = ea.analyze_crosshair(src_b, _ch)
                     if xs_a:
                         result_a.edge_metrics["edges"].append(xs_a)
-                    if xs_b:
-                        result_b.edge_metrics["edges"].append(xs_b)
 
                 result_a.edge_metrics["used_starless"] = sl_a is not None
-                result_b.edge_metrics["used_starless"] = sl_b is not None
             tasks.append(("edge", "Extracting edge spread function", _edge))
 
         if metrics.get("power"):
-            def _power(ps_a=self._starless_a or img_a, ps_b=self._starless_b or img_b):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fa = ex.submit(PowerSpectrumAnalyzer().analyze, ps_a, roi)
-                    fb = ex.submit(PowerSpectrumAnalyzer().analyze, ps_b, roi)
-                    result_a.power_metrics = fa.result()
-                    result_b.power_metrics = fb.result()
+            _ps_b_src = (self._starless_b or img_b) if img_b is not None else None
+            def _power(ps_a=self._starless_a or img_a, ps_b=_ps_b_src):
+                if ps_b is not None:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                        fa = ex.submit(PowerSpectrumAnalyzer().analyze, ps_a, roi)
+                        fb = ex.submit(PowerSpectrumAnalyzer().analyze, ps_b, roi)
+                        result_a.power_metrics = fa.result()
+                        result_b.power_metrics = fb.result()
+                    result_b.power_metrics["used_starless"] = self._starless_b is not None
+                    if self._starless_b is not None:
+                        sm = PowerSpectrumAnalyzer().analyze(img_b, roi=roi)
+                        result_b.power_metrics["star_power"] = {
+                            "figures":        sm.get("figures"),
+                            "radial_power":   sm.get("radial_power"),
+                            "freq_axis":      sm.get("freq_axis"),
+                            "mid_high_ratio": sm.get("mid_high_ratio"),
+                        }
+                else:
+                    result_a.power_metrics = PowerSpectrumAnalyzer().analyze(ps_a, roi=roi)
                 result_a.power_metrics["used_starless"] = self._starless_a is not None
-                result_b.power_metrics["used_starless"] = self._starless_b is not None
                 # When a starless image was the primary input, also run on the star
                 # image so the report can show the effect of stars on the spectrum.
                 if self._starless_a is not None:
                     sm = PowerSpectrumAnalyzer().analyze(img_a, roi=roi)
                     result_a.power_metrics["star_power"] = {
-                        "figures":        sm.get("figures"),
-                        "radial_power":   sm.get("radial_power"),
-                        "freq_axis":      sm.get("freq_axis"),
-                        "mid_high_ratio": sm.get("mid_high_ratio"),
-                    }
-                if self._starless_b is not None:
-                    sm = PowerSpectrumAnalyzer().analyze(img_b, roi=roi)
-                    result_b.power_metrics["star_power"] = {
                         "figures":        sm.get("figures"),
                         "radial_power":   sm.get("radial_power"),
                         "freq_axis":      sm.get("freq_axis"),
@@ -204,8 +223,9 @@ class AnalysisThread(QThread):
             wavelet_levels = s.get("wavelet_levels", 4)
             crosshair = s.get("crosshair")
             xs_snr_width = s.get("xs_snr_width")
+            _sd_b_src = (self._starless_b or img_b) if img_b is not None else None
 
-            def _spatial(sd_a=self._starless_a or img_a, sd_b=self._starless_b or img_b,
+            def _spatial(sd_a=self._starless_a or img_a, sd_b=_sd_b_src,
                           _ch=crosshair, _roi=roi, _xs_snr_width=xs_snr_width):
                 sda = SpatialDetailAnalyzer()
                 spatial = sda.analyze(sd_a, sd_b, levels=wavelet_levels, crosshair=_ch, roi=_roi,
@@ -218,18 +238,21 @@ class AnalysisThread(QThread):
 
         if metrics.get("snr"):
             sl_a = self._starless_a
-            sl_b = self._starless_b
+            sl_b = self._starless_b if img_b is not None else None
             def _snr(sl_a=sl_a, sl_b=sl_b):
                 from analysis.snr_analyzer import SNRAnalyzer
-                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                    fa = ex.submit(SNRAnalyzer().analyze, img_a)
-                    fb = ex.submit(SNRAnalyzer().analyze, img_b)
-                    result_a.snr_metrics = fa.result()
-                    result_b.snr_metrics = fb.result()
+                if img_b is not None:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                        fa = ex.submit(SNRAnalyzer().analyze, img_a)
+                        fb = ex.submit(SNRAnalyzer().analyze, img_b)
+                        result_a.snr_metrics = fa.result()
+                        result_b.snr_metrics = fb.result()
+                    if sl_b is not None:
+                        result_b.snr_metrics["starless"] = SNRAnalyzer().analyze(sl_b)
+                else:
+                    result_a.snr_metrics = SNRAnalyzer().analyze(img_a)
                 if sl_a is not None:
                     result_a.snr_metrics["starless"] = SNRAnalyzer().analyze(sl_a)
-                if sl_b is not None:
-                    result_b.snr_metrics["starless"] = SNRAnalyzer().analyze(sl_b)
             tasks.append(("snr", "Computing SNR maps", _snr))
 
         if parallel and len(tasks) > 1:
@@ -274,7 +297,8 @@ class AnalysisThread(QThread):
         # Restore original labels on the image objects so they remain correct
         # for any GUI display after the analysis completes.
         img_a.label = _orig_label_a
-        img_b.label = _orig_label_b
+        if img_b is not None and _orig_label_b is not None:
+            img_b.label = _orig_label_b
         if self._starless_a is not None and _orig_starless_label_a is not None:
             self._starless_a.label = _orig_starless_label_a
         if self._starless_b is not None and _orig_starless_label_b is not None:

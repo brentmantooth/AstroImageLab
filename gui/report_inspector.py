@@ -111,6 +111,7 @@ class _InspectorData:
     sim_label_ref: str
     filename_a: str = ""
     filename_b: str = ""
+    single_image: bool = False
     sections: dict[str, list[_Entry]] = field(default_factory=dict)
 
 
@@ -123,6 +124,7 @@ def _load_inspector_data(npz: "np.lib.npyio.NpzFile") -> _InspectorData:
         sim_label_ref=cat.get("sim_label_ref", ""),
         filename_a=cat.get("filename_a", ""),
         filename_b=cat.get("filename_b", ""),
+        single_image=cat.get("single_image", False),
     )
     npz_keys = set(npz.files)
     for section, entries in cat.get("sections", {}).items():
@@ -211,7 +213,7 @@ class InspectorImageCanvas(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def load_entry(self, arr_a: np.ndarray, arr_b: np.ndarray,
+    def load_entry(self, arr_a: np.ndarray, arr_b: np.ndarray | None,
                    keep_line: bool = False) -> None:
         old_shape = self._arr_a.shape[:2] if self._arr_a is not None else None
         new_shape = arr_a.shape[:2]
@@ -285,15 +287,29 @@ class InspectorImageCanvas(QWidget):
             self._ax_a.imshow(self._arr_a, cmap=self._cmap(self._arr_a),
                               origin="upper", aspect="equal",
                               vmin=0, vmax=255 if self._arr_a.dtype == np.uint8 else None)
-            self._ax_b.imshow(self._arr_b, cmap=self._cmap(self._arr_b),
-                              origin="upper", aspect="equal",
-                              vmin=0, vmax=255 if self._arr_b.dtype == np.uint8 else None)
             self._ax_a.set_title(self._label_a, fontsize=9, pad=3)
-            self._ax_b.set_title(self._label_b, fontsize=9, pad=3)
-            for ax in (self._ax_a, self._ax_b):
-                ax.set_xticks([]);  ax.set_yticks([])
+            self._ax_a.set_xticks([]);  self._ax_a.set_yticks([])
+            if self._arr_b is not None:
+                self._ax_b.imshow(self._arr_b, cmap=self._cmap(self._arr_b),
+                                  origin="upper", aspect="equal",
+                                  vmin=0, vmax=255 if self._arr_b.dtype == np.uint8 else None)
+                self._ax_b.set_title(self._label_b, fontsize=9, pad=3)
+                self._ax_b.set_xticks([]);  self._ax_b.set_yticks([])
+            else:
+                # Single-image mode: grey placeholder in right panel
+                H, W = self._arr_a.shape[:2]
+                self._ax_b.imshow(np.full((H, W), 40, dtype=np.uint8),
+                                  cmap="gray", origin="upper", aspect="equal",
+                                  vmin=0, vmax=255)
+                self._ax_b.text(W / 2, H / 2, "No Image B",
+                                ha="center", va="center",
+                                color="#aaaaaa", fontsize=13)
+                self._ax_b.set_title(self._label_b, fontsize=9, pad=3)
+                self._ax_b.set_xticks([]);  self._ax_b.set_yticks([])
             if self._p0 is not None and self._p1 is not None:
-                for ax in (self._ax_a, self._ax_b):
+                draw_axes = ([self._ax_a, self._ax_b] if self._arr_b is not None
+                             else [self._ax_a])
+                for ax in draw_axes:
                     ax.plot([self._p0[0], self._p1[0]],
                             [self._p0[1], self._p1[1]],
                             color="cyan", lw=1.5, solid_capstyle="round")
@@ -302,7 +318,7 @@ class InspectorImageCanvas(QWidget):
         else:
             # Slider / composite mode
             arr_a = self._arr_a
-            arr_b = self._arr_b
+            arr_b = self._arr_b if self._arr_b is not None else arr_a
             W = arr_a.shape[1]
             split = int(W * self._reveal)
             if arr_a.ndim == 2:
@@ -518,12 +534,13 @@ class _ProfileCanvas(QWidget):
         self._canvas.draw_idle()
 
     def update_profiles(self, dist_a: np.ndarray, prof_a: np.ndarray,
-                         dist_b: np.ndarray, prof_b: np.ndarray,
+                         dist_b: np.ndarray | None, prof_b: np.ndarray | None,
                          label_a: str, label_b: str,
                          normalized: bool = True) -> None:
         self._ax.cla()
         self._ax.plot(dist_a, prof_a, color="steelblue", lw=1.2, label=label_a)
-        self._ax.plot(dist_b, prof_b, color="tomato",    lw=1.2, label=label_b)
+        if dist_b is not None and prof_b is not None:
+            self._ax.plot(dist_b, prof_b, color="tomato", lw=1.2, label=label_b)
         self._ax.set_xlabel("Distance (px)", fontsize=8)
         self._ax.set_ylabel("Normalized intensity" if normalized else "Value", fontsize=8)
         self._ax.legend(fontsize=7, loc="upper right")
@@ -554,6 +571,7 @@ class ReportInspector(QMainWindow):
 
         self._npz = np.load(str(npz_path), allow_pickle=False)
         self._data = _load_inspector_data(self._npz)
+        self._single_image = self._data.single_image
         self._current_arr_a: np.ndarray | None = None
         self._current_arr_b: np.ndarray | None = None
         self._current_shape: tuple | None = None
@@ -620,9 +638,15 @@ class ReportInspector(QMainWindow):
         # ── Filename info row (unobtrusive) ────────────────────────────
         fn_a = self._data.filename_a or self._data.label_a
         fn_b = self._data.filename_b or self._data.label_b
-        if fn_a or fn_b:
-            fn_row = QHBoxLayout()
-            fn_lbl = QLabel(f"A: {fn_a}    │    B: {fn_b}")
+        fn_row = QHBoxLayout()
+        if self._single_image:
+            fn_text = f"Single Image Analysis — A: {fn_a}"
+        elif fn_a or fn_b:
+            fn_text = f"A: {fn_a}    │    B: {fn_b}"
+        else:
+            fn_text = ""
+        if fn_text:
+            fn_lbl = QLabel(fn_text)
             fn_lbl.setStyleSheet("color: #888888; font-size: 8pt;")
             fn_row.addWidget(fn_lbl)
             fn_row.addStretch()
@@ -778,6 +802,8 @@ class ReportInspector(QMainWindow):
         self._right_combo.addItems(option_labels)
         if len(option_labels) >= 2:
             self._right_combo.setCurrentIndex(1)
+        # In single-image mode the right panel shows a placeholder; disable right combo
+        self._right_combo.setEnabled(not self._single_image)
         self._left_combo.blockSignals(False)
         self._right_combo.blockSignals(False)
         self._load_current_panels()
@@ -804,6 +830,12 @@ class ReportInspector(QMainWindow):
             return
         normalized = self._normalize_check.isChecked()
         dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1, normalize=normalized)
+        if self._current_arr_b is None:
+            self._profile_canvas.update_profiles(
+                dist_a, prof_a, None, None,
+                self._left_combo.currentText(), "",
+                normalized=normalized)
+            return
         # Scale line coordinates to the right panel's pixel space if sizes differ.
         # p0/p1 are in the left panel's (arr_a) pixel coordinate system.
         ha, wa = self._current_arr_a.shape[:2]
@@ -847,27 +879,35 @@ class ReportInspector(QMainWindow):
         if key_left is None or key_right is None:
             return
 
-        raw_left  = _get_array(self._npz, key_left)
-        raw_right = _get_array(self._npz, key_right)
-        if raw_left is None or raw_right is None:
+        raw_left = _get_array(self._npz, key_left)
+        if raw_left is None:
             return
 
-        arr_left  = _prepare_for_display(raw_left)
-        arr_right = _prepare_for_display(raw_right)
+        arr_left = _prepare_for_display(raw_left)
 
         old_shape = self._current_shape
         new_shape = arr_left.shape[:2]
         keep_line = (old_shape is not None and old_shape == new_shape)
 
         self._current_arr_a = raw_left.astype(np.float32)
-        self._current_arr_b = raw_right.astype(np.float32)
         if self._current_arr_a.max() > 1.5:
             self._current_arr_a /= 255.0
-        if self._current_arr_b.max() > 1.5:
-            self._current_arr_b /= 255.0
         self._current_shape = new_shape
 
-        self._image_canvas.set_labels(left_label, right_label)
-        self._image_canvas.load_entry(arr_left, arr_right, keep_line=keep_line)
+        if self._single_image:
+            self._current_arr_b = None
+            self._image_canvas.set_labels(left_label, "No Image B")
+            self._image_canvas.load_entry(arr_left, None, keep_line=keep_line)
+        else:
+            raw_right = _get_array(self._npz, key_right)
+            if raw_right is None:
+                return
+            arr_right = _prepare_for_display(raw_right)
+            self._current_arr_b = raw_right.astype(np.float32)
+            if self._current_arr_b.max() > 1.5:
+                self._current_arr_b /= 255.0
+            self._image_canvas.set_labels(left_label, right_label)
+            self._image_canvas.load_entry(arr_left, arr_right, keep_line=keep_line)
+
         if not keep_line:
             self._profile_canvas.clear()
