@@ -243,6 +243,7 @@ class AnalysisControlPanel(QWidget):
         left_col.addWidget(self._parallel_cb)
 
         self._dark_mode_cb = QCheckBox("Dark mode graphics")
+        self._dark_mode_cb.setChecked(True)
         self._dark_mode_cb.setToolTip(
             "Render report figures with a dark background.\n"
             "Applies matplotlib's dark_background style to all charts."
