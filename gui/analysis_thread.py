@@ -42,10 +42,17 @@ class AnalysisThread(QThread):
         self._starless_b = starless_b
 
     def run(self) -> None:
+        import matplotlib as _mpl
+        import matplotlib.pyplot as _plt
+        _saved_params = _mpl.rcParams.copy()
+        if self._settings.get("dark_mode_graphics", False):
+            _plt.style.use("dark_background")
         try:
             self._execute()
         except Exception as exc:
             self.error.emit(str(exc))
+        finally:
+            _mpl.rcParams.update(_saved_params)
 
     # ------------------------------------------------------------------
     # Main execution
@@ -261,8 +268,7 @@ class AnalysisThread(QThread):
             self._run_serial(tasks, result_a, result_b)
 
         # Report generation (always serial — needs all results)
-        fmt = s.get("report_format", "html")
-        self.progress.emit(96, f"Generating {fmt.upper()} report…")
+        self.progress.emit(96, "Generating HTML report…")
         report_path = ""
         try:
             builder = ReportBuilder()
@@ -270,7 +276,6 @@ class AnalysisThread(QThread):
                 img_a, img_b, result_a, result_b,
                 output_dir=s.get("output_dir", "."),
                 open_browser=True,
-                report_format=fmt,
                 ref_seeing_arcsec=s.get("ref_seeing_arcsec", 2.0),
             )
             report_path = str(out)

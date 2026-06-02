@@ -191,18 +191,6 @@ class AnalysisControlPanel(QWidget):
         # ── Left column: all selection / status controls ────────────────
         left_col = QVBoxLayout()
 
-        fmt_row = QHBoxLayout()
-        fmt_row.addWidget(QLabel("Report format:"))
-        self._report_fmt = QComboBox()
-        self._report_fmt.addItems(["HTML", "PDF"])
-        self._report_fmt.setToolTip(
-            "PDF requires WeasyPrint (pip install weasyprint).\n"
-            "If unavailable the report is saved as HTML automatically."
-        )
-        fmt_row.addWidget(self._report_fmt)
-        fmt_row.addStretch()
-        left_col.addLayout(fmt_row)
-
         out_row = QHBoxLayout()
         self._out_dir = QLineEdit()
         self._out_dir.setPlaceholderText("Select output directory…")
@@ -253,6 +241,13 @@ class AnalysisControlPanel(QWidget):
             "When unchecked, metrics run one at a time using less memory."
         )
         left_col.addWidget(self._parallel_cb)
+
+        self._dark_mode_cb = QCheckBox("Dark mode graphics")
+        self._dark_mode_cb.setToolTip(
+            "Render report figures with a dark background.\n"
+            "Applies matplotlib's dark_background style to all charts."
+        )
+        left_col.addWidget(self._dark_mode_cb)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
@@ -372,7 +367,6 @@ class AnalysisControlPanel(QWidget):
         return {
             "metrics": {k: cb.isChecked() for k, cb in self._checks.items()},
             "export_figures": {k: cb.isChecked() for k, cb in self._export_checks.items()},
-            "report_format": self._report_fmt.currentText().lower(),
             "min_snr": self._min_snr.value(),
             "seeing_warn_arcsec": self._seeing_thresh.value(),
             "pixel_scale_override": pso if pso > 0 else None,
@@ -384,6 +378,7 @@ class AnalysisControlPanel(QWidget):
             "crosshair": self._line,
             "output_dir": self._out_dir.text().strip() or str(Path.home() / "filter_reports"),
             "parallel": self._parallel_cb.isChecked(),
+            "dark_mode_graphics": self._dark_mode_cb.isChecked(),
         }
 
     # ------------------------------------------------------------------

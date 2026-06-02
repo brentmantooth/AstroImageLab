@@ -389,8 +389,12 @@ class HaloAnalyzer:
         r_max_plot = max(r[-1], (halo_r or r[-1]) * 1.2)
         r_fine = np.linspace(r[0], r_max_plot, 400)
 
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        meas_color = "w" if _is_dark else "k"
+
         fig, ax = plt.subplots(figsize=(7, 4))
-        ax.semilogy(r, I_norm, "k.", markersize=3, label="Measured")
+        ax.semilogy(r, I_norm, f"{meas_color}.", markersize=3, label="Measured")
 
         core = _moffat1d(r_fine, popt[0], popt[1], popt[2])
         halo = _moffat1d(r_fine, popt[3], popt[4], popt[5])

@@ -106,8 +106,13 @@ tr:nth-child(even) { background: #f0f4fa; }
 .worse  { background: #f8d7da !important; }
 .warn-box { background: #fff3cd; border: 1px solid #ffc107;
             border-radius: 4px; padding: 10px 14px; margin: 10px 0; }
-.info-box { background: #d1ecf1; border: 1px solid #bee5eb;
+details.info-box, .info-box { background: #d1ecf1; border: 1px solid #bee5eb;
             border-radius: 4px; padding: 10px 14px; margin: 10px 0; }
+details.info-box > summary { cursor: pointer; font-weight: bold;
+            user-select: none; padding: 2px 0; list-style: none; }
+details.info-box > summary::-webkit-details-marker { display: none; }
+details.info-box > summary::before { content: "▶ "; font-size: 0.85em; }
+details.info-box[open] > summary::before { content: "▼ "; font-size: 0.85em; }
 .bw-warn { background: #f8d7da; border: 1px solid #f5c6cb;
            border-radius: 4px; padding: 12px 16px; margin: 14px 0;
            font-size: 1.05em; }
@@ -160,6 +165,15 @@ def _arr_to_b64_png(arr: np.ndarray) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
+
+
+def _info_box(body: str, title: str = "More information",
+              open: bool = False, style: str = "") -> str:
+    """Collapsible info panel using HTML5 <details>/<summary>."""
+    open_attr  = " open" if open else ""
+    style_attr = f' style="{style}"' if style else ""
+    return (f'<details class="info-box"{open_attr}{style_attr}>'
+            f'<summary>{title}</summary>{body}</details>')
 
 
 def _arr_img_tag(arr: np.ndarray, alt: str = "") -> str:
@@ -451,71 +465,10 @@ def _pixel_size_mm(img: AstroImage) -> float | None:
 class ReportBuilder:
     """Generate a self-contained HTML comparison report."""
 
-    # ------------------------------------------------------------------
-    # PDF writing — WeasyPrint preferred, xhtml2pdf fallback
-    # ------------------------------------------------------------------
-
-    def _write_pdf(self, html: str, output_dir: Path, stem: str,
-                   html_filename: str, result_a: AnalysisResult) -> Path:
-        """Try WeasyPrint, fall back to xhtml2pdf, then fall back to HTML."""
-        pdf_path  = output_dir / (stem + ".pdf")
-        html_path = output_dir / html_filename
-
-        # ── Attempt 1: WeasyPrint ──────────────────────────────────────
-        # importlib.import_module() is used deliberately so that PyInstaller's
-        # static AST scanner does not detect weasyprint as a dependency and
-        # bundle it (and its GTK3/Pango DLLs) into the compiled executable.
-        try:
-            import importlib as _il
-            _weasy = _il.import_module("weasyprint")
-            _weasy.HTML(string=html, base_url=str(output_dir)).write_pdf(str(pdf_path))
-            return pdf_path
-        except ImportError:
-            wp_reason = "not installed"
-        except OSError as e:
-            wp_reason = (
-                "missing native GTK/Pango libraries — "
-                "install via 'conda install -c conda-forge weasyprint' "
-                "or download the GTK3 runtime installer for Windows"
-                if ("libpango" in str(e) or "pango" in str(e).lower() or "0x7e" in str(e))
-                else str(e)
-            )
-        except Exception as e:
-            wp_reason = str(e)
-
-        # ── Attempt 2: xhtml2pdf ───────────────────────────────────────
-        try:
-            from xhtml2pdf import pisa as _pisa
-            with open(pdf_path, "wb") as _f:
-                result = _pisa.CreatePDF(html, dest=_f, encoding="utf-8")
-            if not result.err:
-                result_a.warnings.append(
-                    f"WeasyPrint unavailable ({wp_reason}); PDF rendered with xhtml2pdf — "
-                    "complex CSS layout may differ slightly from the HTML version."
-                )
-                return pdf_path
-            xp_reason = f"xhtml2pdf reported errors (code {result.err})"
-        except ImportError:
-            xp_reason = "not installed"
-        except Exception as e:
-            xp_reason = str(e)
-
-        # ── Fallback: HTML ─────────────────────────────────────────────
-        result_a.warnings.append(
-            f"PDF generation failed — WeasyPrint: {wp_reason}; "
-            f"xhtml2pdf: {xp_reason}. "
-            "Report saved as HTML instead. "
-            "Install a PDF renderer: pip install xhtml2pdf  "
-            "or conda install -c conda-forge weasyprint"
-        )
-        html_path.write_text(html, encoding="utf-8")
-        return html_path
-
     def generate(self, image_a: AstroImage, image_b: AstroImage | None = None,
                   result_a: AnalysisResult | None = None, result_b: AnalysisResult | None = None,
                   output_dir: str | Path = ".",
                   open_browser: bool = True,
-                  report_format: str = "html",
                   ref_seeing_arcsec: float = REF_SEEING_ARCSEC) -> Path:
 
         self._ref_seeing_arcsec = ref_seeing_arcsec
@@ -549,11 +502,12 @@ class ReportBuilder:
 
         single_image_banner = ""
         if self._single_image:
-            single_image_banner = (
-                '<div class="info-box" style="background:#2a3a2a;color:#c8e6c9;border-color:#4caf50">'
-                '<strong>Single Image Analysis</strong> — Image B was not loaded. '
-                'Comparison colour-coded tables and differential metrics are not available.'
-                '</div>'
+            single_image_banner = _info_box(
+                'Image B was not loaded. '
+                'Comparison colour-coded tables and differential metrics are not available.',
+                title="Single Image Analysis",
+                open=True,
+                style="background:#2a3a2a;color:#c8e6c9;border-color:#4caf50",
             )
 
         sections = [
@@ -591,11 +545,8 @@ class ReportBuilder:
 </body>
 </html>"""
 
-        if report_format == "pdf":
-            out_path = self._write_pdf(html, output_dir, stem, filename, result_a)
-        else:
-            out_path = output_dir / filename
-            out_path.write_text(html, encoding="utf-8")
+        out_path = output_dir / filename
+        out_path.write_text(html, encoding="utf-8")
 
         if open_browser:
             webbrowser.open(out_path.as_uri())
@@ -836,13 +787,13 @@ class ReportBuilder:
                        f'bandwidth-independent.</div>')
         label_sub_box = ""
         if substituted:
-            label_sub_box = (
-                f'<div class="info-box"><strong>Label substitution:</strong> '
+            label_sub_box = _info_box(
                 f'One or more input filenames exceed {LABEL_MAX_LEN} characters and have been '
                 f'abbreviated in all plots and legends throughout this report.<br>'
                 f'&nbsp;&nbsp;<strong>Image A</strong> = {orig_label_a}<br>'
-                + (f'&nbsp;&nbsp;<strong>Image B</strong> = {orig_label_b}' if img_b is not None else '')
-                + '</div>'
+                + (f'&nbsp;&nbsp;<strong>Image B</strong> = {orig_label_b}' if img_b is not None else ''),
+                title="Label substitution",
+                open=True,
             )
 
         def meta_rows(img: AstroImage, result: AnalysisResult) -> str:
@@ -1032,9 +983,10 @@ class ReportBuilder:
 <h2>2. Observation Context</h2>
 {seeing_warn}
 {warn_html}
-<div class="info-box">PSF/MTF comparisons are most meaningful when both images were
-captured on the same night under similar atmospheric conditions. DATE-OBS values are
-shown in the metadata table above.</div>"""
+{_info_box('PSF/MTF comparisons are most meaningful when both images were '
+           'captured on the same night under similar atmospheric conditions. DATE-OBS values are '
+           'shown in the metadata table above.',
+           title="Comparison conditions")}"""
 
     # ── Section 3: PSF / MTF ──────────────────────────────────────────────────
 
@@ -1123,34 +1075,50 @@ shown in the metadata table above.</div>"""
         (sig_ell,         p_ell)          = _sig("ellipticity")
         (sig_ecc,         p_ecc)          = _sig("eccentricity")
 
+        _ref_psf_box = (_info_box(
+            f'The reference curve is a <em>synthetic</em> Moffat profile &mdash; not measured from data. '
+            f'A Moffat PSF has the form 1&thinsp;/&thinsp;(1&thinsp;+&thinsp;r&#x00B2;/&gamma;&#x00B2;)&#x03B2;, '
+            f'where &gamma; is derived from the specified FWHM. The shape parameter '
+            f'&beta;&thinsp;=&thinsp;{REF_SEEING_BETA} is the Kolmogorov atmospheric turbulence value, '
+            f'appropriate for diffraction-limited ground-based seeing. '
+            f'The FWHM ({self._ref_seeing_arcsec:.2f}&Prime;) converts to pixels using the plate scale '
+            f'derived from the measured ePSFs of Images A/B; if the plate scale cannot be determined '
+            f'the reference is omitted. This reference is a benchmark for typical good seeing, not a '
+            f'theoretical maximum &mdash; shorter wavelengths, larger apertures, or adaptive optics '
+            f'can all exceed it.',
+            title="About the reference PSF",
+        ) if img_epsf_ref else "")
+
         return f"""
 <h2>4. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
 {err}
-<div class="info-box">The Point Spread Function (PSF) describes how a point source
-(star) is rendered. FWHM measures the core width; smaller FWHM = sharper stars.
-The Modulation Transfer Function (MTF) shows how well contrast is preserved at each
-spatial frequency; MTF50 is the frequency at which contrast falls to 50%.
-These metrics are normalised to unit amplitude and are valid regardless of filter bandwidth.</div>
-<div class="info-box"><strong>Star quality pipeline &mdash; how the table counts are derived</strong><br><br>
-Stars pass through a two-stage quality pipeline before any metric or ePSF is computed.
-All five metrics (FWHM, &beta;, ellipticity, eccentricity) and the ePSF are computed from
-the same final clean set, so the statistics are self-consistent.<br><br>
-<b>Stage 1 &mdash; spatial and photometric filters (Candidate PSF stars):</b>
-DAOStarFinder detects all sources above a 5&sigma; threshold. Candidates are then kept only
-if they are: (a) unsaturated (peak &lt; 90&nbsp;% of the data range); (b) high signal-to-noise
-(peak&nbsp;/&nbsp;background&nbsp;RMS &ge; 30); (c) at least 50&nbsp;px from any image border
-(to avoid edge-truncated PSFs); and (d) isolated (no neighbour within 5&times;FWHM, which would
-contaminate the Moffat fit or the ePSF cutout).<br><br>
-<b>Stage 2 &mdash; Moffat fit quality gates (Outliers rejected):</b>
-A Moffat&nbsp;2D profile is fitted to each candidate. Stars are excluded if:
-the fit fails to converge; the fitted &gamma; &lt; 0.1 (unphysically narrow);
-the fitted &beta; falls outside [1.0,&nbsp;10.0] (unphysical wing-falloff exponent &mdash;
-pure Kolmogorov turbulence predicts &beta;&nbsp;&asymp;&nbsp;4.77, so values below 1 or above 10 indicate
-a failed or pathological fit); or the resulting FWHM deviates by more than 3&times;MAD
-from the median FWHM of the full candidate set (sigma-clipping to remove occasional
-saturated, trailed, or double stars that survived stage 1).<br><br>
-A large ratio of detected to used stars is normal; deep narrowband frames with rich nebulosity
-can contain thousands of faint and crowded sources that are correctly excluded.</div>
+{_info_box('The Point Spread Function (PSF) describes how a point source '
+           '(star) is rendered. FWHM measures the core width; smaller FWHM = sharper stars. '
+           'The Modulation Transfer Function (MTF) shows how well contrast is preserved at each '
+           'spatial frequency; MTF50 is the frequency at which contrast falls to 50%. '
+           'These metrics are normalised to unit amplitude and are valid regardless of filter bandwidth.',
+           title="About PSF &amp; MTF")}
+{_info_box('<strong>Star quality pipeline &mdash; how the table counts are derived</strong><br><br>'
+           'Stars pass through a two-stage quality pipeline before any metric or ePSF is computed. '
+           'All five metrics (FWHM, &beta;, ellipticity, eccentricity) and the ePSF are computed from '
+           'the same final clean set, so the statistics are self-consistent.<br><br>'
+           '<b>Stage 1 &mdash; spatial and photometric filters (Candidate PSF stars):</b> '
+           'DAOStarFinder detects all sources above a 5&sigma; threshold. Candidates are then kept only '
+           'if they are: (a) unsaturated (peak &lt; 90&nbsp;% of the data range); (b) high signal-to-noise '
+           '(peak&nbsp;/&nbsp;background&nbsp;RMS &ge; 30); (c) at least 50&nbsp;px from any image border '
+           '(to avoid edge-truncated PSFs); and (d) isolated (no neighbour within 5&times;FWHM, which would '
+           'contaminate the Moffat fit or the ePSF cutout).<br><br>'
+           '<b>Stage 2 &mdash; Moffat fit quality gates (Outliers rejected):</b> '
+           'A Moffat&nbsp;2D profile is fitted to each candidate. Stars are excluded if: '
+           'the fit fails to converge; the fitted &gamma; &lt; 0.1 (unphysically narrow); '
+           'the fitted &beta; falls outside [1.0,&nbsp;10.0] (unphysical wing-falloff exponent &mdash; '
+           'pure Kolmogorov turbulence predicts &beta;&nbsp;&asymp;&nbsp;4.77, so values below 1 or above 10 indicate '
+           'a failed or pathological fit); or the resulting FWHM deviates by more than 3&times;MAD '
+           'from the median FWHM of the full candidate set (sigma-clipping to remove occasional '
+           'saturated, trailed, or double stars that survived stage 1).<br><br>'
+           'A large ratio of detected to used stars is normal; deep narrowband frames with rich nebulosity '
+           'can contain thousands of faint and crowded sources that are correctly excluded.',
+           title="Star quality pipeline")}
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th><th>Difference</th></tr>
@@ -1171,59 +1139,52 @@ can contain thousands of faint and crowded sources that are correctly excluded.<
 
 {dist_html}
 
-<div class="info-box">
-  <strong>Understanding the PSF metrics:</strong><br><br>
-
-  <strong>FWHM (Full Width at Half Maximum)</strong> &mdash; The diameter of a star
-  image at half its peak brightness, derived from a Moffat&nbsp;2D fit. Smaller = sharper.
-  Ground-based imaging is typically seeing-limited (1&ndash;3 arcsec); the best sites
-  achieve sub-arcsecond FWHM. For filter comparison the arcsec value is the primary metric
-  (scale-independent). A larger FWHM in one image may indicate worse seeing during that
-  session, or additional softening introduced by the filter (e.g. substrate wedge or
-  coating scatter). The reported value is the <em>median</em> of the clean per-star FWHM
-  distribution; the &plusmn; figure is the Median Absolute Deviation (MAD), a robust spread
-  measure that, like the median, is insensitive to the outlier stars removed by the quality
-  pipeline. Stars whose FWHM deviates by more than 3&times;MAD from the median are excluded
-  before the aggregate is computed.<br><br>
-
-  <strong>Moffat &beta; (beta)</strong> &mdash; The wing-falloff exponent of the Moffat
-  profile I(r)&nbsp;=&nbsp;A&nbsp;&times;&nbsp;(1&nbsp;+&nbsp;(r/&gamma;)&sup2;)<sup>&minus;&beta;</sup>
-  fitted to each star. Higher &beta; means the stellar wings fall off more steeply,
-  leaving less scattered light outside the core. Pure Kolmogorov atmospheric turbulence
-  predicts &beta;&nbsp;&asymp;&nbsp;4.77; in practice values of 2&ndash;6 are typical.
-  <strong>Ideal: &beta;&nbsp;&gt;&nbsp;3.</strong>
-  Low &beta; (1&ndash;2) indicates extended wings from vibration, wind shake, or poor tracking;
-  very high &beta; (&gt;&nbsp;6) suggests an unusually compact PSF or thin atmosphere.
-  A consistently lower &beta; for one filter implies it scatters more light into the
-  halo/wing region &mdash; compare with the Halo Analysis section.
-  Only fits with &beta; in [1.0,&nbsp;10.0] are accepted; values outside this range are
-  considered pathological fits and are excluded from the statistics and ePSF.<br><br>
-
-  <strong>Ellipticity</strong> &mdash; How non-circular the average star shape is,
-  measured from second-order image moments (0 = perfectly round, 1 = infinitely
-  elongated). <strong>Ideal: &lt; 0.05.</strong> Values of 0.05&ndash;0.10 are
-  borderline; &gt; 0.10 indicates a significant elongation that may reduce
-  effective resolution in one axis. Common causes: tracking drift, autoguider
-  lag, astigmatism, or filter substrate wedge. A large difference in ellipticity
-  between the two filters is a specific indicator of filter tilt or wedge.<br><br>
-
-  <strong>Eccentricity</strong> &mdash; A complementary measure of star elongation
-  derived from the ratio of semi-minor to semi-major axis: e = &radic;(1 &minus; (b/a)&sup2;).
-  <strong>Ideal: &lt; 0.10.</strong> Unlike ellipticity, eccentricity weights
-  extreme elongation more strongly.<br><br>
-
-  <strong>MTF50 (cycles/pixel)</strong> &mdash; The spatial frequency at which the
-  Modulation Transfer Function falls to 50% of its peak. Higher MTF50 = the
-  system preserves contrast at finer scales. The maximum physically possible
-  value is 0.5 cyc/px (Nyquist limit for fully-sampled images).
-  <strong>Ideal: as high as possible; typical ground-based: 0.1&ndash;0.3 cyc/px.</strong>
-  MTF50 is the single most useful number for ranking overall sharpness.<br><br>
-
-  <strong>MTF @ Nyquist</strong> &mdash; The residual MTF at exactly 0.5 cyc/px.
-  For a well-sampled, diffraction-limited system this should approach 0.
-  <strong>Ideal: close to 0.</strong> A notably non-zero value at Nyquist can
-  indicate undersampling (FWHM &lt; ~2 px) or aliasing from a very sharp PSF.
-</div>
+{_info_box(
+  '<strong>FWHM (Full Width at Half Maximum)</strong> &mdash; The diameter of a star '
+  'image at half its peak brightness, derived from a Moffat&nbsp;2D fit. Smaller = sharper. '
+  'Ground-based imaging is typically seeing-limited (1&ndash;3 arcsec); the best sites '
+  'achieve sub-arcsecond FWHM. For filter comparison the arcsec value is the primary metric '
+  '(scale-independent). A larger FWHM in one image may indicate worse seeing during that '
+  'session, or additional softening introduced by the filter (e.g. substrate wedge or '
+  'coating scatter). The reported value is the <em>median</em> of the clean per-star FWHM '
+  'distribution; the &plusmn; figure is the Median Absolute Deviation (MAD), a robust spread '
+  'measure that, like the median, is insensitive to the outlier stars removed by the quality '
+  'pipeline. Stars whose FWHM deviates by more than 3&times;MAD from the median are excluded '
+  'before the aggregate is computed.<br><br>'
+  '<strong>Moffat &beta; (beta)</strong> &mdash; The wing-falloff exponent of the Moffat '
+  'profile I(r)&nbsp;=&nbsp;A&nbsp;&times;&nbsp;(1&nbsp;+&nbsp;(r/&gamma;)&sup2;)<sup>&minus;&beta;</sup> '
+  'fitted to each star. Higher &beta; means the stellar wings fall off more steeply, '
+  'leaving less scattered light outside the core. Pure Kolmogorov atmospheric turbulence '
+  'predicts &beta;&nbsp;&asymp;&nbsp;4.77; in practice values of 2&ndash;6 are typical. '
+  '<strong>Ideal: &beta;&nbsp;&gt;&nbsp;3.</strong> '
+  'Low &beta; (1&ndash;2) indicates extended wings from vibration, wind shake, or poor tracking; '
+  'very high &beta; (&gt;&nbsp;6) suggests an unusually compact PSF or thin atmosphere. '
+  'A consistently lower &beta; for one filter implies it scatters more light into the '
+  'halo/wing region &mdash; compare with the Halo Analysis section. '
+  'Only fits with &beta; in [1.0,&nbsp;10.0] are accepted; values outside this range are '
+  'considered pathological fits and are excluded from the statistics and ePSF.<br><br>'
+  '<strong>Ellipticity</strong> &mdash; How non-circular the average star shape is, '
+  'measured from second-order image moments (0 = perfectly round, 1 = infinitely '
+  'elongated). <strong>Ideal: &lt; 0.05.</strong> Values of 0.05&ndash;0.10 are '
+  'borderline; &gt; 0.10 indicates a significant elongation that may reduce '
+  'effective resolution in one axis. Common causes: tracking drift, autoguider '
+  'lag, astigmatism, or filter substrate wedge. A large difference in ellipticity '
+  'between the two filters is a specific indicator of filter tilt or wedge.<br><br>'
+  '<strong>Eccentricity</strong> &mdash; A complementary measure of star elongation '
+  'derived from the ratio of semi-minor to semi-major axis: e = &radic;(1 &minus; (b/a)&sup2;). '
+  '<strong>Ideal: &lt; 0.10.</strong> Unlike ellipticity, eccentricity weights '
+  'extreme elongation more strongly.<br><br>'
+  '<strong>MTF50 (cycles/pixel)</strong> &mdash; The spatial frequency at which the '
+  'Modulation Transfer Function falls to 50% of its peak. Higher MTF50 = the '
+  'system preserves contrast at finer scales. The maximum physically possible '
+  'value is 0.5 cyc/px (Nyquist limit for fully-sampled images). '
+  '<strong>Ideal: as high as possible; typical ground-based: 0.1&ndash;0.3 cyc/px.</strong> '
+  'MTF50 is the single most useful number for ranking overall sharpness.<br><br>'
+  '<strong>MTF @ Nyquist</strong> &mdash; The residual MTF at exactly 0.5 cyc/px. '
+  'For a well-sampled, diffraction-limited system this should approach 0. '
+  '<strong>Ideal: close to 0.</strong> A notably non-zero value at Nyquist can '
+  'indicate undersampling (FWHM &lt; ~2 px) or aliasing from a very sharp PSF.',
+  title="Understanding the PSF metrics")}
 
 {img_fwhm_map}
 <p class="caption">Smoothed FWHM map (px) across the field. Shared colour scale between both images. Dots mark individual star measurements.</p>
@@ -1240,57 +1201,55 @@ can contain thousands of faint and crowded sources that are correctly excluded.<
 consistent star size between filters. Systematic offset reveals which filter produces
 tighter stars. Points far from the line indicate individual star measurement scatter.</p>
 
-<div class="info-box">
-  <strong>How the Empirical PSF (ePSF) was built.</strong>
-  The ePSF is constructed from all stars that passed the quality filters
-  (unsaturated, adequate SNR, isolated from neighbours). Cutouts of each star
-  are extracted from the background-subtracted image with a box size of
-  max(25 px, 6 &times; FWHM) to capture the full wing extent.
-  The <a href="https://photutils.readthedocs.io/en/stable/api/photutils.psf.EPSFBuilder.html"
-  target="_blank"><em>photutils</em> <code>EPSFBuilder</code></a>
-  (<a href="https://photutils.readthedocs.io/en/stable/user_guide/epsf_building.html"
-  target="_blank">building guide</a>) iteratively stacks these cutouts at
-  <strong>2&times; oversampling</strong>, aligning each star to its fitted
-  sub-pixel centroid position to fill in the finer spatial grid. At each iteration
-  the ePSF model is updated and each star is re-centred; the process repeats until
-  the maximum centroid shift across all stars falls below
-  <strong>0.001 px</strong> (the <code>center_accuracy</code> convergence
-  criterion), or until the hard limit of <strong>15 iterations</strong> is
-  reached. The number of stars actually used in the fit is shown in the table above.
-  The result is displayed on a logarithmic scale to reveal structure spanning
-  several orders of magnitude in brightness.
-  <em>Note:</em> the current version of photutils does not expose the actual
-  iteration count or a per-star residual metric through its public API; these
-  fields will be populated automatically if a future photutils release returns
-  them.<br><br>
-
-  <strong>What to look for:</strong>
-  <ul style="margin:0.4em 0 0 1.2em;padding:0;">
-    <li><strong>Circular, compact core</strong> &mdash; ideal outcome: good focus,
-        stable atmosphere, no significant aberrations.</li>
-    <li><strong>Elliptical core</strong> &mdash; the elongation direction indicates
-        the dominant cause: tracking drift (RA or Dec axis), astigmatism
-        (diagonal elongation), or field rotation (curved smear on Alt-Az mounts).
-        The eccentricity and position angle metrics in the table quantify this.</li>
-    <li><strong>Asymmetric tails extending to one side</strong> &mdash; most commonly
-        tracking or guiding drift in one axis, coma from the optical system
-        (particularly if stars across the whole field share the same tail direction),
-        or wind-induced mount vibration. If both filters show the same tail
-        direction and magnitude, the cause is common to both capture sessions
-        (optical or tracking), not filter-specific.</li>
-    <li><strong>Extended, diffuse wings</strong> &mdash; poor seeing, thermal
-        currents in the optical path, or vibration broadening the PSF without
-        a directional bias.</li>
-    <li><strong>Steep, clean falloff</strong> &mdash; the flux drops 2&ndash;3 orders of
-        magnitude within a few FWHM. This is ideal: most of the star&rsquo;s light
-        is in the core, minimising contamination of adjacent nebula structure.
-        A steeper falloff (higher Moffat &beta;) is always better for contrast on
-        fine detail next to bright stars.</li>
-    <li><strong>Airy-ring structure</strong> &mdash; concentric rings around the
-        core indicate near-diffraction-limited performance (exceptional seeing
-        and optics, rarely seen in long-exposure deep-sky imaging).</li>
-  </ul>
-</div>
+{_info_box(
+  'The ePSF is constructed from all stars that passed the quality filters '
+  '(unsaturated, adequate SNR, isolated from neighbours). Cutouts of each star '
+  'are extracted from the background-subtracted image with a box size of '
+  'max(25 px, 6 &times; FWHM) to capture the full wing extent. '
+  'The <a href="https://photutils.readthedocs.io/en/stable/api/photutils.psf.EPSFBuilder.html" '
+  'target="_blank"><em>photutils</em> <code>EPSFBuilder</code></a> '
+  '(<a href="https://photutils.readthedocs.io/en/stable/user_guide/epsf_building.html" '
+  'target="_blank">building guide</a>) iteratively stacks these cutouts at '
+  '<strong>2&times; oversampling</strong>, aligning each star to its fitted '
+  'sub-pixel centroid position to fill in the finer spatial grid. At each iteration '
+  'the ePSF model is updated and each star is re-centred; the process repeats until '
+  'the maximum centroid shift across all stars falls below '
+  '<strong>0.001 px</strong> (the <code>center_accuracy</code> convergence '
+  'criterion), or until the hard limit of <strong>15 iterations</strong> is '
+  'reached. The number of stars actually used in the fit is shown in the table above. '
+  'The result is displayed on a logarithmic scale to reveal structure spanning '
+  'several orders of magnitude in brightness. '
+  '<em>Note:</em> the current version of photutils does not expose the actual '
+  'iteration count or a per-star residual metric through its public API; these '
+  'fields will be populated automatically if a future photutils release returns '
+  'them.<br><br>'
+  '<strong>What to look for:</strong>'
+  '<ul style="margin:0.4em 0 0 1.2em;padding:0;">'
+  '<li><strong>Circular, compact core</strong> &mdash; ideal outcome: good focus, '
+  'stable atmosphere, no significant aberrations.</li>'
+  '<li><strong>Elliptical core</strong> &mdash; the elongation direction indicates '
+  'the dominant cause: tracking drift (RA or Dec axis), astigmatism '
+  '(diagonal elongation), or field rotation (curved smear on Alt-Az mounts). '
+  'The eccentricity and position angle metrics in the table quantify this.</li>'
+  '<li><strong>Asymmetric tails extending to one side</strong> &mdash; most commonly '
+  'tracking or guiding drift in one axis, coma from the optical system '
+  '(particularly if stars across the whole field share the same tail direction), '
+  'or wind-induced mount vibration. If both filters show the same tail '
+  'direction and magnitude, the cause is common to both capture sessions '
+  '(optical or tracking), not filter-specific.</li>'
+  '<li><strong>Extended, diffuse wings</strong> &mdash; poor seeing, thermal '
+  'currents in the optical path, or vibration broadening the PSF without '
+  'a directional bias.</li>'
+  '<li><strong>Steep, clean falloff</strong> &mdash; the flux drops 2&ndash;3 orders of '
+  'magnitude within a few FWHM. This is ideal: most of the star&rsquo;s light '
+  'is in the core, minimising contamination of adjacent nebula structure. '
+  'A steeper falloff (higher Moffat &beta;) is always better for contrast on '
+  'fine detail next to bright stars.</li>'
+  '<li><strong>Airy-ring structure</strong> &mdash; concentric rings around the '
+  'core indicate near-diffraction-limited performance (exceptional seeing '
+  'and optics, rarely seen in long-exposure deep-sky imaging).</li>'
+  '</ul>',
+  title="How the Empirical PSF (ePSF) was built")}
 
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_epsf_a}</div>
@@ -1307,60 +1266,50 @@ two images to distinguish session-specific from system-wide causes.
 {img_mtf}
 <p class="caption">MTF curves for both filters overlaid, derived from the ePSF shown above.
 Higher curve = better contrast preservation at fine scales.</p>
-{f'''<div class="info-box"><strong>About the reference PSF:</strong><br>
-The reference curve is a <em>synthetic</em> Moffat profile &mdash; not measured from data.
-A Moffat PSF has the form 1&thinsp;/&thinsp;(1&thinsp;+&thinsp;r&#x00B2;/&gamma;&#x00B2;)&#x03B2;,
-where &gamma; is derived from the specified FWHM. The shape parameter
-&beta;&thinsp;=&thinsp;{REF_SEEING_BETA} is the Kolmogorov atmospheric turbulence value,
-appropriate for diffraction-limited ground-based seeing.
-The FWHM ({self._ref_seeing_arcsec:.2f}&Prime;) converts to pixels using the plate scale
-derived from the measured ePSFs of Images A/B; if the plate scale cannot be determined
-the reference is omitted. This reference is a benchmark for typical good seeing, not a
-theoretical maximum &mdash; shorter wavelengths, larger apertures, or adaptive optics
-can all exceed it.''' if img_epsf_ref else ''}
-<div class="info-box"><strong>Reading the MTF plot — and how it is derived from the ePSF:</strong><br><br>
-<strong>From ePSF to MTF:</strong>
-The empirical PSF is first normalised to unit sum so that it represents a probability
-distribution of where a point source&rsquo;s photons land on the detector.
-A 2-D Fast Fourier Transform (FFT) is then applied, producing the complex-valued
-<em>Optical Transfer Function</em> (OTF). The MTF is the magnitude of the OTF:
-MTF(f<sub>x</sub>, f<sub>y</sub>) = |OTF(f<sub>x</sub>, f<sub>y</sub>)|, normalised
-so that MTF(0, 0) = 1. Because the ePSF is built at 2&times; oversampling, the
-frequency axes are divided by the oversampling factor so that the final MTF is
-expressed in <strong>cycles per native image pixel</strong>, with the Nyquist limit
-at exactly 0.5 cyc/px.<br><br>
-<strong>Radial average:</strong>
-The 2-D MTF is isotropically averaged into a 1-D curve by computing the mean MTF
-value within concentric annular bins of width 1 sample, centred on the zero-frequency
-origin. This azimuthal average assumes the PSF is roughly circular; if the ePSF
-shows significant ellipticity, the radial curve represents the geometric mean of the
-MTF along the major and minor axes and will understate the best-case resolution in
-one direction.<br><br>
-<strong>Interpreting the curve:</strong>
-An ideal MTF starts at 1.0 (zero frequency) and decreases monotonically to 0 at
-the Nyquist frequency (0.5 cycles/pixel). Optical aberrations, atmospheric seeing,
-and focus errors lower the curve — especially at higher spatial frequencies.
-<strong>MTF50</strong> is the spatial frequency where contrast falls to 50% —
-analogous to a half-power point; higher MTF50 = sharper images.
-If one filter&rsquo;s curve lies consistently above the other it delivers better
-sharpness at all scales. If the curves cross, one filter is sharper at fine scales
-while the other preserves mid-scale contrast better.<br><br>
-<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset,
-filter tilt, or optical aberrations introduced by the filter glass. A significant
-MTF difference between filters that should be optically identical warrants checking
-filter flatness and seating.</div>
+{_ref_psf_box}
+{_info_box('<strong>From ePSF to MTF:</strong> '
+           'The empirical PSF is first normalised to unit sum so that it represents a probability '
+           'distribution of where a point source&rsquo;s photons land on the detector. '
+           'A 2-D Fast Fourier Transform (FFT) is then applied, producing the complex-valued '
+           '<em>Optical Transfer Function</em> (OTF). The MTF is the magnitude of the OTF: '
+           'MTF(f<sub>x</sub>, f<sub>y</sub>) = |OTF(f<sub>x</sub>, f<sub>y</sub>)|, normalised '
+           'so that MTF(0, 0) = 1. Because the ePSF is built at 2&times; oversampling, the '
+           'frequency axes are divided by the oversampling factor so that the final MTF is '
+           'expressed in <strong>cycles per native image pixel</strong>, with the Nyquist limit '
+           'at exactly 0.5 cyc/px.<br><br>'
+           '<strong>Radial average:</strong> '
+           'The 2-D MTF is isotropically averaged into a 1-D curve by computing the mean MTF '
+           'value within concentric annular bins of width 1 sample, centred on the zero-frequency '
+           'origin. This azimuthal average assumes the PSF is roughly circular; if the ePSF '
+           'shows significant ellipticity, the radial curve represents the geometric mean of the '
+           'MTF along the major and minor axes and will understate the best-case resolution in '
+           'one direction.<br><br>'
+           '<strong>Interpreting the curve:</strong> '
+           'An ideal MTF starts at 1.0 (zero frequency) and decreases monotonically to 0 at '
+           'the Nyquist frequency (0.5 cycles/pixel). Optical aberrations, atmospheric seeing, '
+           'and focus errors lower the curve &mdash; especially at higher spatial frequencies. '
+           '<strong>MTF50</strong> is the spatial frequency where contrast falls to 50% &mdash; '
+           'analogous to a half-power point; higher MTF50 = sharper images. '
+           'If one filter&rsquo;s curve lies consistently above the other it delivers better '
+           'sharpness at all scales. If the curves cross, one filter is sharper at fine scales '
+           'while the other preserves mid-scale contrast better.<br><br>'
+           '<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset, '
+           'filter tilt, or optical aberrations introduced by the filter glass. A significant '
+           'MTF difference between filters that should be optically identical warrants checking '
+           'filter flatness and seating.',
+           title="Reading the MTF plot")}
 
 {self._psf_simulation_html(ra, rb)}
 
-<div class="info-box"><strong>Comparing the two images:</strong>
-A smaller FWHM (arcsec) and higher MTF50 indicate sharper resolution &mdash;
-these are the primary quality indicators for filter comparison. A higher
-Moffat &beta; indicates less scattered light in the wings. Ellipticity should be
-similar between filters; a large difference suggests filter tilt, substrate
-wedge, or different seeing conditions between sessions. If the ePSFs show
-the same asymmetric tail in both images, the cause is common to both (optics
-or tracking) and does not reflect a filter quality difference &mdash; what matters
-for comparison is whether the tail is <em>more pronounced</em> in one image.</div>""" + self._section_psf_aberration(ra, rb, img_a, img_b)
+{_info_box('A smaller FWHM (arcsec) and higher MTF50 indicate sharper resolution &mdash; '
+           'these are the primary quality indicators for filter comparison. A higher '
+           'Moffat &beta; indicates less scattered light in the wings. Ellipticity should be '
+           'similar between filters; a large difference suggests filter tilt, substrate '
+           'wedge, or different seeing conditions between sessions. If the ePSFs show '
+           'the same asymmetric tail in both images, the cause is common to both (optics '
+           'or tracking) and does not reflect a filter quality difference &mdash; what matters '
+           'for comparison is whether the tail is <em>more pronounced</em> in one image.',
+           title="Comparing the two images")}""" + self._section_psf_aberration(ra, rb, img_a, img_b)
 
     def _section_psf_aberration(self, ra: AnalysisResult, rb: AnalysisResult,
                                   img_a: AstroImage, img_b: AstroImage | None) -> str:
@@ -1381,8 +1330,11 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         html = "\n<h3>Field Aberration Analysis</h3>\n"
 
         if warn_a and warn_b:
-            return (html + f'<div class="info-box"><strong>Insufficient star coverage for '
-                    f'aberration analysis.</strong><br>{warn_a}<br>{warn_b}</div>')
+            return html + _info_box(
+                f'{warn_a}<br>{warn_b}',
+                title="Insufficient star coverage for aberration analysis",
+                open=True,
+            )
 
         def _score_td(val, lo, hi, higher_is_bad: bool = True, fmt: str = ".3f") -> str:
             if val is None:
@@ -1418,39 +1370,39 @@ for comparison is whether the tail is <em>more pronounced</em> in one image.</di
         if warn_b:
             html += f'<p class="footnote"><em>{rb.label}: {warn_b}</em></p>\n'
 
-        html += """<div class="info-box">
-<strong>What each metric measures:</strong><br><br>
-<strong>Coma index (Pearson&nbsp;r, |e<sub>r</sub>|&nbsp;vs&nbsp;radius)</strong> &mdash;
-Pearson correlation between each star&rsquo;s absolute radial elongation and its distance
-from the field centre. Range: &minus;1 to +1. Values near&nbsp;0 indicate no radial pattern;
-values&nbsp;&ge;&nbsp;0.5 suggest elongation growing systematically with radius, consistent
-with off-axis coma. Negative values (rare) indicate tangential elongation dominates at
-larger radii.<br><br>
-<strong>Radial elongation fraction</strong> &mdash;
-For all stars with eccentricity&nbsp;&gt;&nbsp;0.05, the mean fraction of their elongation
-pointing radially (away from or toward the field centre). Range:&nbsp;0 to&nbsp;1. Values
-near&nbsp;1 mean nearly all elongation is radial (coma or collimation); values near&nbsp;0
-mean elongation is predominantly tangential or in a non-radial direction.<br><br>
-<strong>Orientation circular std (°)</strong> &mdash;
-Circular standard deviation of per-star elongation position angles across the entire field.
-A small value (&lt;&nbsp;20°) means all stars are elongated in nearly the same direction
-regardless of position &mdash; characteristic of collimation error or a tilted element.
-A large value (&gt;&nbsp;45°) indicates no dominant elongation direction.
-<em>Note: lower is not better</em> &mdash; a very low value paired with high radial
-elongation fraction points to a fixed collimation problem, not a healthy image.<br><br>
-<strong>Corner/centre FWHM ratio</strong> &mdash;
-Median star FWHM in the outer 30&nbsp;% of field radius divided by median FWHM in the
-inner 30&nbsp;%. Values near&nbsp;1.0 indicate uniform sharpness across the field. Values
-&gt;&nbsp;1.3 indicate measurably blurrier stars toward the corners, consistent with field
-curvature, defocus, or related aberration. Cannot distinguish field curvature from pure
-defocus without a through-focus sequence.<br><br>
-<strong>FWHM radial gradient</strong> &mdash;
-Coefficients of a quadratic fit FWHM(r)&nbsp;=&nbsp;a&thinsp;r&#x00B2;&nbsp;+&nbsp;b&thinsp;r&nbsp;+&nbsp;c
-on normalised radius r&nbsp;&isin;&nbsp;[0,&nbsp;1]. A large positive quadratic coefficient (a)
-indicates accelerating FWHM growth toward the corners (field curvature signature). A
-large linear coefficient (b) with small quadratic indicates more linear growth (tilt or
-coma). Read in conjunction with the FWHM radial profile plot below.
-</div>\n"""
+        html += _info_box(
+            '<strong>Coma index (Pearson&nbsp;r, |e<sub>r</sub>|&nbsp;vs&nbsp;radius)</strong> &mdash; '
+            'Pearson correlation between each star&rsquo;s absolute radial elongation and its distance '
+            'from the field centre. Range: &minus;1 to +1. Values near&nbsp;0 indicate no radial pattern; '
+            'values&nbsp;&ge;&nbsp;0.5 suggest elongation growing systematically with radius, consistent '
+            'with off-axis coma. Negative values (rare) indicate tangential elongation dominates at '
+            'larger radii.<br><br>'
+            '<strong>Radial elongation fraction</strong> &mdash; '
+            'For all stars with eccentricity&nbsp;&gt;&nbsp;0.05, the mean fraction of their elongation '
+            'pointing radially (away from or toward the field centre). Range:&nbsp;0 to&nbsp;1. Values '
+            'near&nbsp;1 mean nearly all elongation is radial (coma or collimation); values near&nbsp;0 '
+            'mean elongation is predominantly tangential or in a non-radial direction.<br><br>'
+            '<strong>Orientation circular std (°)</strong> &mdash; '
+            'Circular standard deviation of per-star elongation position angles across the entire field. '
+            'A small value (&lt;&nbsp;20°) means all stars are elongated in nearly the same direction '
+            'regardless of position &mdash; characteristic of collimation error or a tilted element. '
+            'A large value (&gt;&nbsp;45°) indicates no dominant elongation direction. '
+            '<em>Note: lower is not better</em> &mdash; a very low value paired with high radial '
+            'elongation fraction points to a fixed collimation problem, not a healthy image.<br><br>'
+            '<strong>Corner/centre FWHM ratio</strong> &mdash; '
+            'Median star FWHM in the outer 30&nbsp;% of field radius divided by median FWHM in the '
+            'inner 30&nbsp;%. Values near&nbsp;1.0 indicate uniform sharpness across the field. Values '
+            '&gt;&nbsp;1.3 indicate measurably blurrier stars toward the corners, consistent with field '
+            'curvature, defocus, or related aberration. Cannot distinguish field curvature from pure '
+            'defocus without a through-focus sequence.<br><br>'
+            '<strong>FWHM radial gradient</strong> &mdash; '
+            'Coefficients of a quadratic fit FWHM(r)&nbsp;=&nbsp;a&thinsp;r&#x00B2;&nbsp;+&nbsp;b&thinsp;r&nbsp;+&nbsp;c '
+            'on normalised radius r&nbsp;&isin;&nbsp;[0,&nbsp;1]. A large positive quadratic coefficient (a) '
+            'indicates accelerating FWHM growth toward the corners (field curvature signature). A '
+            'large linear coefficient (b) with small quadratic indicates more linear growth (tilt or '
+            'coma). Read in conjunction with the FWHM radial profile plot below.',
+            title="What each metric measures",
+        ) + "\n"
 
         img_h_a, img_w_a = img_a.data.shape[:2]
         img_h_b, img_w_b = (img_b.data.shape[:2] if img_b is not None else (0, 0))
@@ -1529,23 +1481,23 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                      'Red: stars elongated radially outward from field centre (coma signature). '
                      'Blue: tangentially elongated. Near zero: circular or mixed orientation.</p>\n')
 
-        html += f"""<div class="info-box">
-<strong>Limitations of single-image aberration analysis:</strong>
-<ul style="margin:0.4em 0 0 1.2em;padding:0;">
-  <li><strong>Seeing vs optics:</strong> Atmospheric seeing produces random per-frame elongation.
-      Optical aberrations are repeatable across nights. A single image cannot separate the two
-      &mdash; compare results from multiple sessions to identify genuine optical signatures.</li>
-  <li><strong>No absolute wavefront error:</strong> Converting these indices to nm of wavefront
-      error requires focal ratio and aperture, which are not reliably encoded in image headers.
-      All scores are relative/comparative only.</li>
-  <li><strong>Field curvature / defocus degeneracy:</strong> Both produce isotropic FWHM growth
-      toward the field corners and cannot be distinguished without a through-focus sequence.</li>
-  <li><strong>Star count sensitivity:</strong> Scores are unreliable with fewer than
-      {ABERRATION_MIN_STARS} well-distributed stars with valid orientation measurements.</li>
-  <li><strong>Monochromatic:</strong> Chromatic aberration cannot be detected from a single-filter
-      image.</li>
-</ul>
-</div>\n"""
+        html += _info_box(
+            '<ul style="margin:0.4em 0 0 1.2em;padding:0;">'
+            '<li><strong>Seeing vs optics:</strong> Atmospheric seeing produces random per-frame elongation. '
+            'Optical aberrations are repeatable across nights. A single image cannot separate the two '
+            '&mdash; compare results from multiple sessions to identify genuine optical signatures.</li>'
+            '<li><strong>No absolute wavefront error:</strong> Converting these indices to nm of wavefront '
+            'error requires focal ratio and aperture, which are not reliably encoded in image headers. '
+            'All scores are relative/comparative only.</li>'
+            '<li><strong>Field curvature / defocus degeneracy:</strong> Both produce isotropic FWHM growth '
+            'toward the field corners and cannot be distinguished without a through-focus sequence.</li>'
+            f'<li><strong>Star count sensitivity:</strong> Scores are unreliable with fewer than '
+            f'{ABERRATION_MIN_STARS} well-distributed stars with valid orientation measurements.</li>'
+            '<li><strong>Monochromatic:</strong> Chromatic aberration cannot be detected from a single-filter '
+            'image.</li>'
+            '</ul>',
+            title="Limitations of single-image aberration analysis",
+        ) + "\n"
         return html
 
     @staticmethod
@@ -1845,9 +1797,14 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         lo = min(fa.min(), fb.min()) * 0.9
         hi = max(fa.max(), fb.max()) * 1.1
 
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
         fig, ax = plt.subplots(figsize=(5, 5))
         ax.scatter(fa, fb, alpha=0.65, color="steelblue", s=25, zorder=3)
-        ax.plot([lo, hi], [lo, hi], "k--", linewidth=1.2, label="Slope = 1 (equal FWHM)")
+        ax.plot([lo, hi], [lo, hi], color=orig_color, linestyle="--",
+                linewidth=1.2, label="Slope = 1 (equal FWHM)")
         ax.set_xlabel(f"FWHM {ra.label} (px)")
         ax.set_ylabel(f"FWHM {rb.label} (px)")
         ax.set_title(f"Per-star FWHM correlation  (n = {len(fa)} matched stars)")
@@ -2028,6 +1985,10 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                 env[i] = window.max() - window.min()
             return env
 
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
         figs = []
         for level, title in levels:
             if level not in xs_data:
@@ -2070,7 +2031,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                 ax_img.tick_params(labelsize=7)
 
             # ── Raw intensity traces ───────────────────────────────────
-            ax_raw.plot(x, orig,  color="black",     linewidth=1.0, alpha=XS_LINE_ALPHA,
+            ax_raw.plot(x, orig,  color=orig_color,  linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label="Original")
             ax_raw.plot(x, a_arr, color="steelblue", linewidth=1.0, alpha=XS_LINE_ALPHA,
                         label=sim["label_a"])
@@ -2088,7 +2049,7 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             ax_raw.grid(True, alpha=0.3, which="both")
 
             # ── Local contrast envelope ────────────────────────────────
-            ax_env.plot(x, _envelope(orig),  color="black",     linewidth=1.4,
+            ax_env.plot(x, _envelope(orig),  color=orig_color,  linewidth=1.4,
                         alpha=XS_LINE_ALPHA, label="Original")
             ax_env.plot(x, _envelope(a_arr), color="steelblue", linewidth=1.4,
                         alpha=XS_LINE_ALPHA, label=sim["label_a"])
@@ -2135,14 +2096,18 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         orig_m   = [modulation(xs_data[lv]["original"]) if lv in xs_data else 0.0 for lv in levels]
         conv_a_m = [modulation(xs_data[lv]["conv_a"])   if lv in xs_data else 0.0 for lv in levels]
 
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
         fig, ax = plt.subplots(figsize=(7, 4))
         if has_b:
             conv_b_m = [modulation(xs_data[lv]["conv_b"]) if lv in xs_data else 0.0 for lv in levels]
-            ax.bar(x - width, orig_m,   width, label="Original",        color="black",     alpha=0.75)
+            ax.bar(x - width, orig_m,   width, label="Original",        color=orig_color,  alpha=0.75)
             ax.bar(x,         conv_a_m, width, label=sim["label_a"],    color="steelblue", alpha=0.85)
             ax.bar(x + width, conv_b_m, width, label=sim["label_b"],    color="tomato",    alpha=0.85)
         else:
-            ax.bar(x - width / 2, orig_m,   width, label="Original",     color="black",     alpha=0.75)
+            ax.bar(x - width / 2, orig_m,   width, label="Original",     color=orig_color,  alpha=0.75)
             ax.bar(x + width / 2, conv_a_m, width, label=sim["label_a"], color="steelblue", alpha=0.85)
         ax.set_xticks(x)
         ax.set_xticklabels(["High contrast", "Medium contrast", "Low contrast"])
@@ -2191,6 +2156,10 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         x       = np.arange(n_bands)
         width = 0.25 if has_b else 0.3
 
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
         fig, axes = plt.subplots(len(available), 1,
                                   figsize=(9, 4 * len(available)), squeeze=False)
 
@@ -2205,14 +2174,14 @@ coma). Read in conjunction with the FWHM radial profile plot below.
                 env_b  = _envelope(d["conv_b"][::-1])
                 b_vals = [float(np.mean(env_b[sl])) for _, sl in bands]
                 ax_row.bar(x - width, orig_vals, width, label="Original",
-                           color="black",     alpha=0.75)
+                           color=orig_color,  alpha=0.75)
                 ax_row.bar(x,         a_vals,   width, label=sim["label_a"],
                            color="steelblue", alpha=0.85)
                 ax_row.bar(x + width, b_vals,   width, label=sim["label_b"],
                            color="tomato",    alpha=0.85)
             else:
                 ax_row.bar(x - width / 2, orig_vals, width, label="Original",
-                           color="black",     alpha=0.75)
+                           color=orig_color,  alpha=0.75)
                 ax_row.bar(x + width / 2, a_vals,   width, label=sim["label_a"],
                            color="steelblue", alpha=0.85)
             ax_row.set_xticks(x)
@@ -2286,6 +2255,10 @@ coma). Read in conjunction with the FWHM radial profile plot below.
         from matplotlib.patches import Patch
         legend_handles = []
 
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
         for i, (level, title, color) in enumerate(available):
             d        = xs_data[level]
             env_orig = _envelope(d["original"][::-1])
@@ -2317,27 +2290,28 @@ coma). Read in conjunction with the FWHM radial profile plot below.
             pos_b = pos_a + bar_w if has_b else None
             pos_ref = (pos_a + bar_w * int(has_b) + bar_w) if has_ref else None
 
+            _ekw = {"linewidth": 0.8, "ecolor": orig_color}
             ax.bar(pos_a, ratios_a, bar_w, color=color, alpha=0.85,
-                   yerr=errs_a, capsize=3, error_kw={"linewidth": 0.8})
+                   yerr=errs_a, capsize=3, error_kw=_ekw)
             if has_b and ratios_b:
                 ax.bar(pos_b, ratios_b, bar_w, color=color, alpha=0.85,
-                       hatch="///", yerr=errs_b, capsize=3, error_kw={"linewidth": 0.8})
+                       hatch="///", yerr=errs_b, capsize=3, error_kw=_ekw)
             if has_ref and ratios_ref:
                 ax.bar(pos_ref, ratios_ref, bar_w, facecolor="none",
                        edgecolor="forestgreen", linewidth=1.5, linestyle=":",
-                       yerr=errs_ref, capsize=3, error_kw={"linewidth": 0.8})
+                       yerr=errs_ref, capsize=3, error_kw=_ekw)
 
             legend_handles.append(Patch(facecolor=color, alpha=0.85, label=f"{title} — {sim['label_a']}"))
             if has_b:
                 legend_handles.append(Patch(facecolor=color, alpha=0.85, hatch="///", label=f"{title} — {sim['label_b']}"))
 
-        extra_handles = [plt.Line2D([0], [0], color="black", linestyle="--", linewidth=1.0,
+        extra_handles = [plt.Line2D([0], [0], color=orig_color, linestyle="--", linewidth=1.0,
                                     label="Full retention (ratio = 1)")]
         if has_ref:
             extra_handles.append(Patch(facecolor="none", edgecolor="forestgreen",
                                        linewidth=1.5, label=sim["label_ref"]))
 
-        ax.axhline(1.0, color="black", linestyle="--", linewidth=1.0)
+        ax.axhline(1.0, color=orig_color, linestyle="--", linewidth=1.0)
         ax.set_xticks(x_centers)
         ax.set_xticklabels([b[0] for b in bands], fontsize=8)
         ax.set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=9)
@@ -2649,65 +2623,90 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
         t_mm = img_a.filter_thickness_mm
         if f_rat and pix_mm and f_rat > 0 and pix_mm > 0:
             r_expected = t_mm / (GLASS_REFRACTIVE_INDEX * f_rat * pix_mm)
-            optics_note = (
-                f'<div class="info-box">'
-                f'<strong>Expected halo size for this telescope</strong> '
+            optics_note = _info_box(
                 f'(f/{f_rat:.1f}, {pix_mm*1000:.2f} µm pixels, '
                 f'{t_mm:.1f} mm filter thickness): '
                 f'halo radius ≈ <strong>{r_expected:.0f} px</strong>. '
                 f'The cutout windows in the grid below are sized to '
-                f'2× this expected radius to ensure the full halo extent is visible.'
-                f'</div>'
+                f'2× this expected radius to ensure the full halo extent is visible.',
+                title="Expected halo size for this telescope",
             )
         else:
             optics_note = ""
 
+        _halo_causes_box = _info_box(
+            '<strong>Focal ratio and halo size.</strong> '
+            'Halos around bright stars in narrowband images arise from internal reflections '
+            'within the filter substrate and its AR coatings. A fraction of the incoming '
+            'light reflects off the back surface of the filter glass, travels back through '
+            'the substrate, reflects off the front surface, and then exits &mdash; offset laterally '
+            'from the direct beam. This offset is what appears as the circular glow surrounding '
+            'bright stars.<br><br>'
+            'The halo radius at the focal plane is approximately:<br>'
+            '<code>R &asymp; t / (n &times; f_ratio &times; pixel_size)</code><br>'
+            'where <em>t</em> is the filter substrate thickness, <em>n</em> &asymp; 1.9 (dichroic '
+            'filter glass refractive index), and <em>pixel_size</em> is in mm. Because f-ratio appears in '
+            'the denominator, <strong>faster telescopes (lower f-ratio) produce proportionally '
+            'larger halos</strong> for the same filter. A narrowband filter that shows no '
+            'visible halo on a slow f/10 refractor may produce a prominent halo on an f/4 '
+            'Newtonian. This is a property of the optical system, not the filter quality alone. '
+            'The halo-to-core <em>ratio</em> (amplitude of the halo relative to the star core) '
+            'is a more filter-specific quality indicator than the raw halo size.',
+            title="What causes halos?",
+        )
+        _halo_computation_box = _info_box(
+            f'For each bright unsaturated star, the background-subtracted radial intensity profile '
+            f'(median-binned in 0.5&thinsp;px annuli out to {HALO_FIT_RADIUS_PX}&thinsp;px) is fitted '
+            f'with a <em>two-component Moffat model</em>:<br>'
+            f'<code>I(r) = A<sub>core</sub> &middot; Moffat(r; &gamma;<sub>core</sub>, &alpha;<sub>core</sub>)'
+            f'             + A<sub>halo</sub> &middot; Moffat(r; &gamma;<sub>halo</sub>, &alpha;<sub>halo</sub>)</code><br>'
+            f'The fit is performed in log<sub>10</sub> space so the profile&rsquo;s wide dynamic range is '
+            f'weighted uniformly rather than being dominated by the bright core.<br><br>'
+            f'<strong>Halo / core ratio</strong> = A<sub>halo</sub> / A<sub>core</sub> &mdash; the '
+            f'amplitude of the wide Moffat component relative to the core peak. A value of 0 means no '
+            f'detectable halo; values above 0.15 indicate significant internal reflection. Because both '
+            f'amplitudes are normalised to the same star, the ratio is independent of absolute brightness '
+            f'and directly comparable between filters.<br><br>'
+            f'<strong>Halo radius</strong> = HWHM of the halo Moffat component: '
+            f'R&thinsp;=&thinsp;&gamma;<sub>halo</sub>&thinsp;&middot;&thinsp;&radic;(2<sup>1/&alpha;<sub>halo</sub></sup>&thinsp;&minus;&thinsp;1). '
+            f'If this value exceeds the {HALO_FIT_RADIUS_PX}&thinsp;px fit window it is marked '
+            f'<em>N/A</em> — the data do not yet show the halo half-power point, so the width cannot '
+            f'be reliably measured. In that case the halo/core ratio is the more reliable indicator. '
+            f'For strongly saturated stars the core is clipped and no Moffat fit is attempted; their '
+            f'halo structure is visible in the cross-sections and RDF plots instead.',
+            title="How halo/core ratio and halo radius are computed",
+        )
+        _halo_rdf_box = _info_box(
+            'For each star, the background-subtracted image is log<sub>10</sub>-transformed (compressing '
+            'the 3&ndash;5 decade dynamic range of a stellar halo into a manageable linear scale) and then '
+            'binned into concentric 1-pixel-wide annuli centred on the detected star centre. The '
+            '<em>mean</em> and <em>standard deviation</em> of the log-transformed pixel values in each '
+            'annulus are recorded, normalised so the profile starts at 1.0 (log<sub>10</sub> = 0 at '
+            'r&thinsp;=&thinsp;0), and then inverse-transformed (10<sup>x</sup>) for display on a '
+            'logarithmic intensity axis. Individual per-star profiles are stacked and averaged to produce '
+            'the aggregate curves shown below. The shaded band shows the ±1&sigma; within-annulus spread — '
+            'a wide band at a given radius means the halo is angularly asymmetric at that distance '
+            '(not a perfect ring).<br><br>'
+            '<strong>How to interpret the profile.</strong> '
+            'For an ideal star with no halo the profile follows a smooth, monotonically decreasing curve '
+            'set by the PSF shape: a Gaussian gives a downward-curving parabola on the log intensity axis; '
+            'a Moffat (more realistic for astronomical seeing) gives a gentler, power-law-like tail. '
+            'The key indicator of a halo is a <em>shoulder</em> — a point where the profile levels off, '
+            'rises slightly, or decays noticeably more slowly than the extrapolated core trend at '
+            'intermediate radii (typically 10&ndash;60 px from the star centre). This shoulder represents '
+            'the reflected light that forms the circular glow around bright stars. A profile that tracks '
+            'a smooth, featureless decay with no shoulder indicates little or no halo contribution. '
+            'Comparing the two overlaid profiles shows which filter produces more halo light at each '
+            'radius, independent of the absolute brightness of the stars used.',
+            title="Radial Distribution Function (RDF) — how it is computed and how to read it",
+        )
+
         return f"""
 <h2>5. Halo Analysis &nbsp;<span class="metric-label-ok">&#10003; bandwidth-independent</span></h2>
 {err}
-<div class="info-box">
-  <strong>What causes halos?</strong>
-  Halos around bright stars in narrowband images arise from internal reflections
-  within the filter substrate and its AR coatings. A fraction of the incoming
-  light reflects off the back surface of the filter glass, travels back through
-  the substrate, reflects off the front surface, and then exits &mdash; offset laterally
-  from the direct beam. This offset is what appears as the circular glow surrounding
-  bright stars.<br><br>
-  <strong>Focal ratio and halo size.</strong>
-  The halo radius at the focal plane is approximately:<br>
-  <code>R &asymp; t / (n &times; f_ratio &times; pixel_size)</code><br>
-  where <em>t</em> is the filter substrate thickness, <em>n</em> &asymp; 1.9 (dichroic
-  filter glass refractive index), and <em>pixel_size</em> is in mm. Because f-ratio appears in
-  the denominator, <strong>faster telescopes (lower f-ratio) produce proportionally
-  larger halos</strong> for the same filter. A narrowband filter that shows no
-  visible halo on a slow f/10 refractor may produce a prominent halo on an f/4
-  Newtonian. This is a property of the optical system, not the filter quality alone.
-  The halo-to-core <em>ratio</em> (amplitude of the halo relative to the star core)
-  is a more filter-specific quality indicator than the raw halo size.
-</div>
+{_halo_causes_box}
 {optics_note}
-<div class="info-box">
-  <strong>How halo/core ratio and halo radius are computed.</strong>
-  For each bright unsaturated star, the background-subtracted radial intensity profile
-  (median-binned in 0.5&thinsp;px annuli out to {HALO_FIT_RADIUS_PX}&thinsp;px) is fitted
-  with a <em>two-component Moffat model</em>:<br>
-  <code>I(r) = A<sub>core</sub> &middot; Moffat(r; &gamma;<sub>core</sub>, &alpha;<sub>core</sub>)
-             + A<sub>halo</sub> &middot; Moffat(r; &gamma;<sub>halo</sub>, &alpha;<sub>halo</sub>)</code><br>
-  The fit is performed in log<sub>10</sub> space so the profile&rsquo;s wide dynamic range is
-  weighted uniformly rather than being dominated by the bright core.<br><br>
-  <strong>Halo / core ratio</strong> = A<sub>halo</sub> / A<sub>core</sub> &mdash; the
-  amplitude of the wide Moffat component relative to the core peak. A value of 0 means no
-  detectable halo; values above 0.15 indicate significant internal reflection. Because both
-  amplitudes are normalised to the same star, the ratio is independent of absolute brightness
-  and directly comparable between filters.<br><br>
-  <strong>Halo radius</strong> = HWHM of the halo Moffat component:
-  R&thinsp;=&thinsp;&gamma;<sub>halo</sub>&thinsp;&middot;&thinsp;&radic;(2<sup>1/&alpha;<sub>halo</sub></sup>&thinsp;&minus;&thinsp;1).
-  If this value exceeds the {HALO_FIT_RADIUS_PX}&thinsp;px fit window it is marked
-  <em>N/A</em> — the data do not yet show the halo half-power point, so the width cannot
-  be reliably measured. In that case the halo/core ratio is the more reliable indicator.
-  For strongly saturated stars the core is clipped and no Moffat fit is attempted; their
-  halo structure is visible in the cross-sections and RDF plots instead.
-</div>
+{_halo_computation_box}
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -2723,30 +2722,7 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
 
-<div class="info-box">
-  <strong>Radial Distribution Function (RDF) — how it is computed and how to read it.</strong><br>
-  For each star, the background-subtracted image is log<sub>10</sub>-transformed (compressing
-  the 3&ndash;5 decade dynamic range of a stellar halo into a manageable linear scale) and then
-  binned into concentric 1-pixel-wide annuli centred on the detected star centre. The
-  <em>mean</em> and <em>standard deviation</em> of the log-transformed pixel values in each
-  annulus are recorded, normalised so the profile starts at 1.0 (log<sub>10</sub> = 0 at
-  r&thinsp;=&thinsp;0), and then inverse-transformed (10<sup>x</sup>) for display on a
-  logarithmic intensity axis. Individual per-star profiles are stacked and averaged to produce
-  the aggregate curves shown below. The shaded band shows the ±1&sigma; within-annulus spread —
-  a wide band at a given radius means the halo is angularly asymmetric at that distance
-  (not a perfect ring).<br><br>
-  <strong>How to interpret the profile.</strong>
-  For an ideal star with no halo the profile follows a smooth, monotonically decreasing curve
-  set by the PSF shape: a Gaussian gives a downward-curving parabola on the log intensity axis;
-  a Moffat (more realistic for astronomical seeing) gives a gentler, power-law-like tail.
-  The key indicator of a halo is a <em>shoulder</em> — a point where the profile levels off,
-  rises slightly, or decays noticeably more slowly than the extrapolated core trend at
-  intermediate radii (typically 10&ndash;60 px from the star centre). This shoulder represents
-  the reflected light that forms the circular glow around bright stars. A profile that tracks
-  a smooth, featureless decay with no shoulder indicates little or no halo contribution.
-  Comparing the two overlaid profiles shows which filter produces more halo light at each
-  radius, independent of the absolute brightness of the stars used.
-</div>
+{_halo_rdf_box}
 
 {rdf_unsat_fig}
 <p class="caption">Aggregate RDF — unsaturated halo stars. Mean normalised intensity vs. radius
@@ -2775,9 +2751,10 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
 {sat_grid_tag}
 {"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped.</p>'}
 
-<div class="info-box"><strong>Ideal:</strong> Halo/core ratio &lt; 0.05 is excellent;
-&gt; 0.15 indicates significant internal reflection that will reduce contrast on
-bright stars.</div>"""
+{_info_box('Halo/core ratio &lt; 0.05 is excellent; '
+           '&gt; 0.15 indicates significant internal reflection that will reduce contrast on '
+           'bright stars.',
+           title="Ideal values")}"""
 
     def _extract_cutout(self, data: np.ndarray,
                          xc: float, yc: float, half: int) -> np.ndarray:
@@ -3336,9 +3313,13 @@ bright stars.</div>"""
         if used_sl_a or used_sl_b:
             who = ", ".join(filter(None, [ra.label if used_sl_a else "",
                                           rb.label if used_sl_b else ""]))
-            sl_note = (f'<div class="info-box">★ Edge analysis for <strong>{who}</strong> '
-                       f'used the starless image so the strongest gradient search locates '
-                       f'a nebula emission boundary rather than a star profile.</div>')
+            sl_note = _info_box(
+                f'★ Edge analysis for <strong>{who}</strong> '
+                f'used the starless image so the strongest gradient search locates '
+                f'a nebula emission boundary rather than a star profile.',
+                title="Starless image used",
+                open=True,
+            )
 
         # Gradient map comparison row — shared scale, rendered as a combined figure
         gm_a = ea.get("gm_display")
@@ -3368,54 +3349,53 @@ bright stars.</div>"""
 <h2>6. Local Contrast / Edge Analysis</h2>
 {err}
 {sl_note}
-<div class="info-box">
-  <strong>Edge Spread Function (ESF)</strong> — A 1-D intensity profile sampled
-  perpendicular to the detected edge, averaged across the full height of the ROI
-  after rotating so the edge runs vertically. An ideal ESF is a smooth sigmoid:
-  the steeper the transition, the better the local contrast and resolution.
-  Normalised to [0, 1], the ESF shape is <strong>bandwidth-independent ✓</strong>
-  and directly comparable between filters.<br><br>
-  <strong>Line Spread Function (LSF)</strong> — The derivative of the ESF,
-  computed with a Savitzky-Golay filter (cubic polynomial, window ≈ 18% of the
-  ESF length, typically 11 points). SG fitting smooths sample-to-sample noise
-  while preserving the height and width of narrow peaks better than a simple
-  finite-difference derivative or Gaussian smoothing, making it the standard
-  method for ESF differentiation in optical MTF analysis (ISO 12233). Ideally a
-  narrow, symmetric peak centred on the edge. A broader LSF peak indicates softer
-  resolution; asymmetry or secondary lobes can indicate optical aberrations,
-  atmospheric dispersion, or poor focus stability during the integration.<br><br>
-  <strong>10–90% edge width</strong> — The pixel (or arcsec) distance between
-  the 10% and 90% intensity points on the ESF. Smaller values indicate a
-  sharper, better-resolved edge. Use the arcsec figure for cross-image comparison
-  if the pixel scales differ.<br><br>
-  The <strong>edge contrast ratio</strong> (bright-side / dark-side mean signal)
-  is <strong>bandwidth-sensitive ⚠</strong>: a narrower filter rejects more
-  continuum background, which can raise this ratio independently of optical quality.
-</div>
+{_info_box(
+  '<strong>Edge Spread Function (ESF)</strong> — A 1-D intensity profile sampled '
+  'perpendicular to the detected edge, averaged across the full height of the ROI '
+  'after rotating so the edge runs vertically. An ideal ESF is a smooth sigmoid: '
+  'the steeper the transition, the better the local contrast and resolution. '
+  'Normalised to [0, 1], the ESF shape is <strong>bandwidth-independent ✓</strong> '
+  'and directly comparable between filters.<br><br>'
+  '<strong>Line Spread Function (LSF)</strong> — The derivative of the ESF, '
+  'computed with a Savitzky-Golay filter (cubic polynomial, window ≈ 18% of the '
+  'ESF length, typically 11 points). SG fitting smooths sample-to-sample noise '
+  'while preserving the height and width of narrow peaks better than a simple '
+  'finite-difference derivative or Gaussian smoothing, making it the standard '
+  'method for ESF differentiation in optical MTF analysis (ISO 12233). Ideally a '
+  'narrow, symmetric peak centred on the edge. A broader LSF peak indicates softer '
+  'resolution; asymmetry or secondary lobes can indicate optical aberrations, '
+  'atmospheric dispersion, or poor focus stability during the integration.<br><br>'
+  '<strong>10–90% edge width</strong> — The pixel (or arcsec) distance between '
+  'the 10% and 90% intensity points on the ESF. Smaller values indicate a '
+  'sharper, better-resolved edge. Use the arcsec figure for cross-image comparison '
+  'if the pixel scales differ.<br><br>'
+  'The <strong>edge contrast ratio</strong> (bright-side / dark-side mean signal) '
+  'is <strong>bandwidth-sensitive ⚠</strong>: a narrower filter rejects more '
+  'continuum background, which can raise this ratio independently of optical quality.',
+  title="Edge Spread Function (ESF) &amp; Line Spread Function (LSF)")}
 
-<div class="info-box">
-  <strong>How the edge regions were selected:</strong>
-  The analysis applies an STF stretch to the background-subtracted image to bring
-  faint emission boundaries into relief, then computes a <strong>pixel-scale-adaptive
-  Gaussian gradient magnitude</strong> (sigma ≈ 1.5 arcsec, capped 1–8 px) across
-  the whole frame. Using a Gaussian gradient rather than a fixed 3×3 Sobel kernel
-  means that diffuse gradients in long-focal-length images are detected as reliably
-  as sharp edges in short-focal-length data.
-  The <strong>three strongest, well-separated gradient peaks</strong>
-  are located automatically (peaks are suppressed within a 90 px radius after each
-  detection to ensure the three regions sample distinct features). A 500 × 500 px
-  context window is shown for each, centred on the gradient peak; the 60 × 60 px
-  analysis region (cyan box) is highlighted within it.
-  If a starless image was provided it is used in place of the stacked image, so the
-  search locates nebula emission boundaries rather than star profiles.
-  Both images are measured over the <em>identical</em> pixel regions: Image A's
-  detected ROI coordinates are reused for Image B after alignment. The
-  <strong>ESF scan direction is taken from whichever image has the stronger overall
-  gradient</strong>, then applied to both, so the two ESF curves always sample the
-  same cross-section orientation and are directly comparable.
-  The table below shows metrics from the strongest of the three edges; individual
-  per-edge figures follow.
-</div>
+{_info_box(
+  'The analysis applies an STF stretch to the background-subtracted image to bring '
+  'faint emission boundaries into relief, then computes a <strong>pixel-scale-adaptive '
+  'Gaussian gradient magnitude</strong> (sigma ≈ 1.5 arcsec, capped 1–8 px) across '
+  'the whole frame. Using a Gaussian gradient rather than a fixed 3×3 Sobel kernel '
+  'means that diffuse gradients in long-focal-length images are detected as reliably '
+  'as sharp edges in short-focal-length data. '
+  'The <strong>three strongest, well-separated gradient peaks</strong> '
+  'are located automatically (peaks are suppressed within a 90 px radius after each '
+  'detection to ensure the three regions sample distinct features). A 500 × 500 px '
+  'context window is shown for each, centred on the gradient peak; the 60 × 60 px '
+  'analysis region (cyan box) is highlighted within it. '
+  'If a starless image was provided it is used in place of the stacked image, so the '
+  'search locates nebula emission boundaries rather than star profiles. '
+  'Both images are measured over the <em>identical</em> pixel regions: Image A\'s '
+  'detected ROI coordinates are reused for Image B after alignment. The '
+  '<strong>ESF scan direction is taken from whichever image has the stronger overall '
+  'gradient</strong>, then applied to both, so the two ESF curves always sample the '
+  'same cross-section orientation and are directly comparable. '
+  'The table below shows metrics from the strongest of the three edges; individual '
+  'per-edge figures follow.',
+  title="How the edge regions were selected")}
 {gradient_row}
 
 <table>
@@ -3427,48 +3407,46 @@ bright stars.</div>"""
 </table>
 
 {edge_figures_html}
-<div class="info-box" style="font-size:0.9em;">
-  <strong>Figures per edge:</strong>
-  <em>ROI context panels</em> (one per image) — 500 × 500 px context window centred on
-  the detected gradient peak.
-  The <span style="color:#90ee90;font-weight:bold;">dashed lime rectangle</span> marks
-  the 60 × 60 px analysis region used for ESF/LSF extraction.
-  The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF
-  scan direction (perpendicular to the edge), clipped to the analysis region;
-  the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows
-  the detected edge orientation, also clipped to the analysis region. &nbsp;
-  <em>ESF / LSF comparison</em> — both images overlaid on shared axes;
-  <span style="color:steelblue;font-weight:bold;">Image A (steelblue)</span> vs
-  <span style="color:tomato;font-weight:bold;">Image B (tomato)</span>.
-  ESF: normalised intensity transition; dashed lines mark the 10% and 90% levels used
-  for the edge width measurement.
-  LSF: derivative of the ESF; peak width and symmetry indicate local resolution quality.
-</div>
+{_info_box(
+  '<em>ROI context panels</em> (one per image) — 500 × 500 px context window centred on '
+  'the detected gradient peak. '
+  'The <span style="color:#90ee90;font-weight:bold;">dashed lime rectangle</span> marks '
+  'the 60 × 60 px analysis region used for ESF/LSF extraction. '
+  'The <span style="color:#00bcd4;font-weight:bold;">cyan line</span> shows the ESF '
+  'scan direction (perpendicular to the edge), clipped to the analysis region; '
+  'the <span style="color:#c8b400;font-weight:bold;">yellow dashed line</span> shows '
+  'the detected edge orientation, also clipped to the analysis region. &nbsp; '
+  '<em>ESF / LSF comparison</em> — both images overlaid on shared axes; '
+  '<span style="color:steelblue;font-weight:bold;">Image A (steelblue)</span> vs '
+  '<span style="color:tomato;font-weight:bold;">Image B (tomato)</span>. '
+  'ESF: normalised intensity transition; dashed lines mark the 10% and 90% levels used '
+  'for the edge width measurement. '
+  'LSF: derivative of the ESF; peak width and symmetry indicate local resolution quality.',
+  title="Figures per edge", style="font-size:0.9em;")}
 
-<div class="info-box">
-  <strong>Interpreting the comparison:</strong>
-  <ul style="margin:0.4em 0 0 1.2em;padding:0;">
-    <li><strong>Edge width (arcsec)</strong> is the primary comparator — it is
-        scale-independent. Prefer the arcsec figure when the two images have
-        different pixel scales.</li>
-    <li>A difference of less than ~10% in edge width is typically within
-        measurement uncertainty for a single edge sample; larger differences
-        are likely real.</li>
-    <li>A <strong>broader LSF peak</strong> in one image suggests lower resolution
-        at the edge spatial frequency. Common causes: worse seeing during that
-        integration, softer focus, or greater atmospheric dispersion from a filter
-        with a very wide bandpass.</li>
-    <li>An <strong>asymmetric or multi-lobed LSF</strong> can indicate optical
-        aberrations, trailing, or non-uniform atmospheric refraction.</li>
-    <li>If edge widths are similar but <strong>gradient magnitude</strong> differs
-        substantially, the difference is likely signal level or background contrast
-        rather than resolution — gradient magnitude is intensity-dependent and
-        should not be used alone to rank image quality.</li>
-    <li>The <strong>edge contrast ratio</strong> is only directly comparable between
-        images of identical bandwidth. A narrower filter naturally yields a higher
-        ratio by suppressing continuum background.</li>
-  </ul>
-</div>"""
+{_info_box(
+  '<ul style="margin:0.4em 0 0 1.2em;padding:0;">'
+  '<li><strong>Edge width (arcsec)</strong> is the primary comparator — it is '
+  'scale-independent. Prefer the arcsec figure when the two images have '
+  'different pixel scales.</li>'
+  '<li>A difference of less than ~10% in edge width is typically within '
+  'measurement uncertainty for a single edge sample; larger differences '
+  'are likely real.</li>'
+  '<li>A <strong>broader LSF peak</strong> in one image suggests lower resolution '
+  'at the edge spatial frequency. Common causes: worse seeing during that '
+  'integration, softer focus, or greater atmospheric dispersion from a filter '
+  'with a very wide bandpass.</li>'
+  '<li>An <strong>asymmetric or multi-lobed LSF</strong> can indicate optical '
+  'aberrations, trailing, or non-uniform atmospheric refraction.</li>'
+  '<li>If edge widths are similar but <strong>gradient magnitude</strong> differs '
+  'substantially, the difference is likely signal level or background contrast '
+  'rather than resolution — gradient magnitude is intensity-dependent and '
+  'should not be used alone to rank image quality.</li>'
+  '<li>The <strong>edge contrast ratio</strong> is only directly comparable between '
+  'images of identical bandwidth. A narrower filter naturally yields a higher '
+  'ratio by suppressing continuum background.</li>'
+  '</ul>',
+  title="Interpreting the comparison")}"""
 
     def _plot_radial_overlay(self, ra: AnalysisResult, rb: AnalysisResult,
                               star_pa: dict | None = None,
@@ -3539,9 +3517,13 @@ bright stars.</div>"""
         if used_a or used_b:
             who = ", ".join(filter(None, [ra.label if used_a else "",
                                           rb.label if used_b else ""]))
-            sl_note = (f'<div class="info-box">★ Power spectrum for <strong>{who}</strong> '
-                       f'was computed on the starless image to reduce star contamination '
-                       f'of the spatial frequency content.</div>')
+            sl_note = _info_box(
+                f'★ Power spectrum for <strong>{who}</strong> '
+                f'was computed on the starless image to reduce star contamination '
+                f'of the spatial frequency content.',
+                title="Starless image used",
+                open=True,
+            )
 
         # Star-image comparison row (only when starless was the primary input)
         star_row_html = ""
@@ -3568,16 +3550,17 @@ power through their profiles, halos, and diffraction spikes.</p>"""
 <h2>7. Micro-contrast / Power Spectrum &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
 {err}
 {sl_note}
-<div class="info-box">The 2D power spectrum of a star-free nebula region reveals the
-spatial frequency content of the image. All data is divided by the mean signal, then
-mean-subtracted and multiplied by a 2D Hanning window before the FFT. Division by the
-mean makes the result dimensionless and comparable across filters with different
-bandwidths; mean subtraction and windowing suppress DC leakage from the image edges.
-Residual power at the lowest frequencies reflects genuine large-scale nebula structure
-rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px)
-measures fine detail content relative to coarse structure.
-<br><strong>Note:</strong> This comparison is only meaningful when both images cover
-the same target region.</div>
+{_info_box('The 2D power spectrum of a star-free nebula region reveals the '
+           'spatial frequency content of the image. All data is divided by the mean signal, then '
+           'mean-subtracted and multiplied by a 2D Hanning window before the FFT. Division by the '
+           'mean makes the result dimensionless and comparable across filters with different '
+           'bandwidths; mean subtraction and windowing suppress DC leakage from the image edges. '
+           'Residual power at the lowest frequencies reflects genuine large-scale nebula structure '
+           'rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px) '
+           'measures fine detail content relative to coarse structure.<br>'
+           '<strong>Note:</strong> This comparison is only meaningful when both images cover '
+           'the same target region.',
+           title="About the power spectrum")}
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -3657,10 +3640,12 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
             return out
 
         has_crosshair = sm.get("crosshair") is not None
-        xs_note = (
-            '<div class="info-box">ℹ Cross-section profiles below are extracted along '
+        xs_note = _info_box(
+            'ℹ Cross-section profiles below are extracted along '
             'the line selected in the viewer. Left axis: both images '
-            '(steelblue = A, tomato = B). Right axis (green dashed): difference A−B.</div>'
+            '(steelblue = A, tomato = B). Right axis (green dashed): difference A−B.',
+            title="Cross-section profiles",
+            open=True,
         ) if has_crosshair else ""
 
         sl_note = ""
@@ -3669,30 +3654,51 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
         if used_a or used_b:
             who = ", ".join(filter(None, [ra.label if used_a else "",
                                           rb.label if used_b else ""]))
-            sl_note = (f'<div class="info-box">★ Spatial detail analysis for '
-                       f'<strong>{who}</strong> used the starless image to reduce '
-                       f'star contamination of the spatial frequency maps.</div>')
+            sl_note = _info_box(
+                f'★ Spatial detail analysis for <strong>{who}</strong> used the starless '
+                f'image to reduce star contamination of the spatial frequency maps.',
+                title="Starless image used",
+                open=True,
+            )
 
         roi_note = ""
         roi_used = sm.get("roi_used")
         if roi_used is not None:
             rx0, ry0, rx1, ry1 = roi_used
-            roi_note = (
-                f'<div class="info-box"><strong>ROI applied:</strong> '
+            roi_note = _info_box(
                 f'Std / LoG / wavelet maps were computed on the user-selected region '
                 f'({rx0}, {ry0}) → ({rx1}, {ry1}) px only. '
                 f'Each image was first normalised by its own full-image mean signal so '
                 f'the contrast ratios and wavelet SNR values are still directly '
                 f'comparable between images regardless of bandwidth differences. '
                 f'Cross-section profiles (if a line was drawn) sample the full image '
-                f'as the line coordinates are in full-image pixel space.</div>'
+                f'as the line coordinates are in full-image pixel space.',
+                title="ROI applied",
+                open=True,
             )
 
-        smooth_note = (
-            '<div class="info-box">ℹ All spatial detail maps are smoothed with a '
+        smooth_note = _info_box(
+            'ℹ All spatial detail maps are smoothed with a '
             'Gaussian filter (σ = 1.0 px) <strong>for display only</strong>. '
             'Scalar metric values (contrast ratios, wavelet SNR) are computed on '
-            'the raw unsmoothed data.</div>'
+            'the raw unsmoothed data.',
+            title="Display smoothing note",
+        )
+        _wavelet_box = _info_box(
+            f'A 4-level Daubechies-4 wavelet decomposition separates the '
+            f'image into spatial scale bands. Level 1 (~2 px) is noise-dominated and used only '
+            f'for noise estimation. Levels 2–3 carry the most relevant signal for filter comparison. '
+            f'<strong>SNR</strong> = signal energy / noise energy at each level; SNR &gt; 1 '
+            f'indicates signal-dominated. '
+            f'Estimated noise (σ): <strong>{ra.label}</strong> = {sigma_a}, '
+            f'<strong>{rb.label}</strong> = {sigma_b} (normalised units). '
+            f'Each level captures structure at roughly 2<sup>level</sup> pixel scales: '
+            f'Level 1 ≈ 2 px (noise-dominated), Level 2 ≈ 4 px (fine detail — star cores, '
+            f'thin filaments), Level 3 ≈ 8 px (medium structures — emission knots, shell edges), '
+            f'Level 4 ≈ 16 px (broader features). A higher SNR at Level 2 indicates the filter '
+            f'preserves sub-arcsecond detail better; Level 3 reflects medium-scale structure. '
+            f'Cross-section profiles show how detail amplitude varies spatially along the selected line.',
+            title="Wavelet decomposition",
         )
 
         return f"""
@@ -3701,22 +3707,24 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
 {sl_note}
 {roi_note}
 {smooth_note}
-<div class="info-box">All maps below are computed on mean-signal-normalised data
-(each image divided by its own mean signal), making them dimensionless and comparable
-across different filter bandwidths. Images are shown side-by-side with a shared
-colour scale; the third panel shows the difference A−B.</div>
+{_info_box('All maps below are computed on mean-signal-normalised data '
+           '(each image divided by its own mean signal), making them dimensionless and comparable '
+           'across different filter bandwidths. Images are shown side-by-side with a shared '
+           'colour scale; the third panel shows the difference A−B.',
+           title="Spatial detail maps overview")}
 
 <h3>8b. Local Standard Deviation Maps</h3>
-<div class="info-box">Measures how much pixel values vary within a neighbourhood.
-Higher values in nebula regions indicate more preserved local detail and contrast.
-<strong>Contrast ratio</strong> = median(nebula std) / median(background std);
-a higher ratio indicates better differentiation of nebula structure from background.
-Each map pixel contains the standard deviation of surrounding pixels within a square
-window. Brighter regions contain more local variation — typically nebula filaments,
-star halos, or noise. A filter with higher std values in targeted emission regions
-preserves more structure; higher std in blank sky regions indicates more photon noise.
-The cross-section profiles below each map pair show how local detail amplitude varies
-along the selected line.</div>
+{_info_box('Measures how much pixel values vary within a neighbourhood. '
+           'Higher values in nebula regions indicate more preserved local detail and contrast. '
+           '<strong>Contrast ratio</strong> = median(nebula std) / median(background std); '
+           'a higher ratio indicates better differentiation of nebula structure from background. '
+           'Each map pixel contains the standard deviation of surrounding pixels within a square '
+           'window. Brighter regions contain more local variation — typically nebula filaments, '
+           'star halos, or noise. A filter with higher std values in targeted emission regions '
+           'preserves more structure; higher std in blank sky regions indicates more photon noise. '
+           'The cross-section profiles below each map pair show how local detail amplitude varies '
+           'along the selected line.',
+           title="Local standard deviation")}
 <table>
   <tr><th>Kernel size</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   {cr_rows}
@@ -3726,34 +3734,23 @@ along the selected line.</div>
 each followed by its cross-section profile.
 The difference map (right) highlights where one filter preserves more local variation.</p>
 <h3>8c. Laplacian of Gaussian (LoG) Maps</h3>
-<div class="info-box">The Laplacian of Gaussian highlights regions of rapid intensity
-change at a specific spatial scale (controlled by σ). Brighter regions in |LoG| maps
-indicate stronger local curvature — sharper edges and finer nebula filaments.
-Smaller σ highlights finer features; larger σ highlights broader structures.
-LoG works by Gaussian-smoothing the image (suppressing structure finer than σ) and
-then computing the Laplacian (second spatial derivative), which peaks at intensity
-boundaries. |LoG| is shown so bright-to-dark and dark-to-bright edges are treated
-equally. Compare maps at each σ: a sharper or higher-contrast filter will show
-brighter LoG response at small σ values. Cross-section profiles reveal subtle
-differences in edge sharpness along the selected line.</div>
+{_info_box('The Laplacian of Gaussian highlights regions of rapid intensity '
+           'change at a specific spatial scale (controlled by σ). Brighter regions in |LoG| maps '
+           'indicate stronger local curvature — sharper edges and finer nebula filaments. '
+           'Smaller σ highlights finer features; larger σ highlights broader structures. '
+           'LoG works by Gaussian-smoothing the image (suppressing structure finer than σ) and '
+           'then computing the Laplacian (second spatial derivative), which peaks at intensity '
+           'boundaries. |LoG| is shown so bright-to-dark and dark-to-bright edges are treated '
+           'equally. Compare maps at each σ: a sharper or higher-contrast filter will show '
+           'brighter LoG response at small σ values. Cross-section profiles reveal subtle '
+           'differences in edge sharpness along the selected line.',
+           title="Laplacian of Gaussian (LoG)")}
 {paired_figs_for("log_", "xs_log_")}
 <p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
 each followed by its cross-section profile.
 A filter preserving more fine detail shows brighter, more defined boundaries at small σ.</p>
 <h3>8d. Wavelet Decomposition</h3>
-<div class="info-box">A 4-level Daubechies-4 wavelet decomposition separates the
-image into spatial scale bands. Level 1 (~2 px) is noise-dominated and used only
-for noise estimation. Levels 2–3 carry the most relevant signal for filter comparison.
-<strong>SNR</strong> = signal energy / noise energy at each level; SNR &gt; 1
-indicates signal-dominated.
-Estimated noise (σ): <strong>{ra.label}</strong> = {sigma_a},
-<strong>{rb.label}</strong> = {sigma_b} (normalised units)
-Each level captures structure at roughly 2<sup>level</sup> pixel scales:
-Level 1 ≈ 2 px (noise-dominated), Level 2 ≈ 4 px (fine detail — star cores,
-thin filaments), Level 3 ≈ 8 px (medium structures — emission knots, shell edges),
-Level 4 ≈ 16 px (broader features). A higher SNR at Level 2 indicates the filter
-preserves sub-arcsecond detail better; Level 3 reflects medium-scale structure.
-Cross-section profiles show how detail amplitude varies spatially along the selected line.</div>
+{_wavelet_box}
 
 {_hires_img_tag(figs.get("wavelet_snr"), "Wavelet SNR")}
 <p class="caption">Per-level SNR for both filters. Level 1 SNR &lt; 1 is expected
@@ -3880,10 +3877,11 @@ The difference panel (right) shows where fine structure differs between the two 
             sl_pair_html = _img_tag(sl_pair_fig, "Starless SNR map comparison")
             starless_html = f"""
 <h3>3c. SNR — Starless Images</h3>
-<div class="info-box">★ SNR analysis repeated on the starless image(s). Stars inflate the
-global SNR and above-threshold percentages because bright star cores contribute many
-high-SNR pixels unrelated to the nebula emission. The starless values below reflect
-pure nebula depth and are recommended for comparing image quality.</div>
+{_info_box('★ SNR analysis repeated on the starless image(s). Stars inflate the '
+           'global SNR and above-threshold percentages because bright star cores contribute many '
+           'high-SNR pixels unrelated to the nebula emission. The starless values below reflect '
+           'pure nebula depth and are recommended for comparing image quality.',
+           title="Starless SNR analysis", open=True)}
 <table>
   <tr><th>Metric</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th></tr>
   <tr><td>Global SNR (σ)</td>
@@ -3904,13 +3902,14 @@ depth drives the color scale. Both images share the same scale for direct compar
         if _has_xs and "xs_context" in _figs:
             xs_crosshair_html = f"""
 <h3>3b. Image Cross-Section</h3>
-<div class="info-box">The cross-section extracts a 1-D brightness profile along the
-line drawn in the viewer. The normalised profile shows relative brightness scaled to the
-mean signal level — use it to compare which filter captures more emission or suppresses
-more continuum. The raw profile shows actual pixel counts, making it easy to assess the
-absolute signal difference and dynamic range. A flatter profile in a continuum-dominated
-field may indicate better sky suppression; a higher peak in an emission region indicates
-greater throughput for that line.</div>
+{_info_box('The cross-section extracts a 1-D brightness profile along the '
+           'line drawn in the viewer. The normalised profile shows relative brightness scaled to the '
+           'mean signal level — use it to compare which filter captures more emission or suppresses '
+           'more continuum. The raw profile shows actual pixel counts, making it easy to assess the '
+           'absolute signal difference and dynamic range. A flatter profile in a continuum-dominated '
+           'field may indicate better sky suppression; a higher peak in an emission region indicates '
+           'greater throughput for that line.',
+           title="Image cross-section profile")}
 {_hires_img_tag(_figs["xs_context"], "xs_context")}
 <p class="caption">Zoomed crop centred on the cross-section line.
 Orange line = {ra.label}, blue line = {rb.label}.</p>
@@ -3949,24 +3948,23 @@ Use this to assess absolute signal levels and dynamic range between filters.</p>
 
             xs_snr_html = f"""
 <h3>3c. Cross-Section SNR</h3>
-<div class="info-box">
-  <p><strong>Methodology:</strong> A {xs_width}-px sample window centred on the profile
-  peak (bright region, gold band) and profile trough (dark region, grey band) is used
-  to estimate signal-to-noise ratio from the raw ADU cross-section. Both images sample
-  the same physical positions (determined from Image A's peak/trough) for a direct
-  comparison.</p>
-  <p><strong>SNR formula (std-based):</strong>
-  SNR&nbsp;=&nbsp;(&mu;<sub>bright</sub>&nbsp;&minus;&nbsp;&mu;<sub>dark</sub>)&nbsp;/&nbsp;
-  &radic;((&sigma;<sub>bright</sub>&sup2;&nbsp;+&nbsp;&sigma;<sub>dark</sub>&sup2;)&nbsp;/&nbsp;width),
-  where &mu; and &sigma; are the mean and standard deviation within each sample window.</p>
-  <p><strong>Assumptions:</strong> The cross-section line passes through a representative
-  bright nebula or signal feature (peak) and a dark background region (trough). Both images
-  are assumed to share the same sky coordinates. Region width is adjustable via the
-  &ldquo;XS SNR region width&rdquo; parameter.</p>
-  <p><strong>Relative exposure:</strong> Because SNR &prop; &radic;t, achieving equal SNR
-  requires (SNR<sub>higher</sub>&nbsp;/&nbsp;SNR<sub>lower</sub>)&sup2; more exposure
-  time on the lower-SNR image. Assumes identical sky conditions and read noise.</p>
-</div>
+{_info_box(f'<p><strong>Methodology:</strong> A {xs_width}-px sample window centred on the profile '
+           f'peak (bright region, gold band) and profile trough (dark region, grey band) is used '
+           f'to estimate signal-to-noise ratio from the raw ADU cross-section. Both images sample '
+           f'the same physical positions (determined from Image A\'s peak/trough) for a direct '
+           f'comparison.</p>'
+           f'<p><strong>SNR formula (std-based):</strong> '
+           f'SNR&nbsp;=&nbsp;(&mu;<sub>bright</sub>&nbsp;&minus;&nbsp;&mu;<sub>dark</sub>)&nbsp;/&nbsp;'
+           f'&radic;((&sigma;<sub>bright</sub>&sup2;&nbsp;+&nbsp;&sigma;<sub>dark</sub>&sup2;)&nbsp;/&nbsp;width), '
+           f'where &mu; and &sigma; are the mean and standard deviation within each sample window.</p>'
+           f'<p><strong>Assumptions:</strong> The cross-section line passes through a representative '
+           f'bright nebula or signal feature (peak) and a dark background region (trough). Both images '
+           f'are assumed to share the same sky coordinates. Region width is adjustable via the '
+           f'&ldquo;XS SNR region width&rdquo; parameter.</p>'
+           f'<p><strong>Relative exposure:</strong> Because SNR &prop; &radic;t, achieving equal SNR '
+           f'requires (SNR<sub>higher</sub>&nbsp;/&nbsp;SNR<sub>lower</sub>)&sup2; more exposure '
+           f'time on the lower-SNR image. Assumes identical sky conditions and read noise.</p>',
+           title="Cross-section SNR methodology")}
 {_hires_img_tag(_figs["xs_snr_profile"], "xs_snr_profile")}
 <p class="caption">Raw ADU cross-section with gold (bright) and grey (dark) shaded
 sample regions ({xs_width}&nbsp;px wide). Higher signal in the bright region and lower
@@ -3984,107 +3982,104 @@ signal in the dark region produce a higher SNR.</p>
 </table>
 <p>{exp_sentence}</p>"""
 
+        _snr_metrics_box = _info_box(
+            '<strong>Global SNR (sky-&sigma; units)</strong> &mdash; A single number summarising the '
+            'signal strength of the entire image relative to the sky noise floor. Computed as the median '
+            'pixel value of all background-subtracted pixels that lie above 3&times; the median sky RMS '
+            '(i.e. pixels that contain genuine emission rather than blank sky), divided by the median sky '
+            'noise (&sigma;<sub>sky</sub>). The sky noise estimate uses the 2D background RMS map produced '
+            'by photutils <code>Background2D</code> with <code>SExtractorBackground</code> (background '
+            'estimator) and <code>MADStdBackgroundRMS</code> (noise estimator), which partitions the image '
+            'into 64 &times; 64 px grid cells, sigma-clips stars within each cell, and interpolates a smooth '
+            '2D surface &mdash; the same estimate used throughout the analysis pipeline. <strong>Ideal: &gt; 10 &sigma; for nebula '
+            'targets; &gt; 30 &sigma; for rich star fields.</strong> Values are dimensionless '
+            '(sky-&sigma;) and directly comparable between the two images regardless of stretch or '
+            'scaling. Note that this method is sky-noise-dominated: it faithfully reflects how much of the '
+            'image is buried in background fluctuations but will underestimate total noise in saturated or '
+            'very bright regions where photon shot noise exceeds the sky floor.<br><br>'
+            '<strong>Median star SNR &plusmn; IQR</strong> &mdash; The median peak-to-noise ratio across '
+            'all catalogue stars detected with photutils <code>DAOStarFinder</code> that passed quality '
+            'filtering (non-saturated, isolated, minimum SNR threshold), plus the interquartile range as a '
+            'measure of spread. For each star, '
+            'SNR&thinsp;=&thinsp;(peak&thinsp;&minus;&thinsp;local sky)&thinsp;/&thinsp;local sky RMS, '
+            'using the per-image background grid. <strong>Ideal: median &gt; 20 for a well-exposed '
+            'session; IQR &lt; 15 indicates a uniform noise floor.</strong> A large IQR implies either '
+            'a wide dynamic range of star brightness or strong local sky variations across the field. A '
+            'lower median star SNR than the global image SNR can occur in narrowband imaging where the '
+            'continuum is suppressed relative to emission-line nebulosity.<br><br>'
+            '<strong>Local SNR Map</strong> &mdash; A per-pixel map of background-subtracted signal '
+            'divided by the local sky RMS: SNR(x,&thinsp;y)&thinsp;=&thinsp;(data&thinsp;&minus;&thinsp;background)(x,&thinsp;y)&thinsp;/&thinsp;background_rms(x,&thinsp;y). '
+            'Blank sky regions cluster near zero (&plusmn; 1&sigma; by definition); real emission appears '
+            'as islands of elevated SNR. The plasma colourmap is clipped to the 2nd&ndash;98th percentile '
+            'of positive pixels so that bright cores do not compress the dynamic range. '
+            '<strong>What to look for:</strong> In a deeper or better-stacked image the map should be '
+            'uniformly brighter across extended nebula regions. Patchwork patterns indicate residual '
+            'background gradients or flat-field errors. Field edges often show elevated noise from '
+            'vignetting and reduced flat-field accuracy. The spatial resolution of the noise estimate '
+            'equals the background grid cell size (typically 64 &times; 64 pixels).<br><br>'
+            '<strong>SNR Percentile Table</strong> &mdash; Reports the fraction of all image pixels that '
+            'exceed four SNR thresholds (3&sigma;, 5&sigma;, 10&sigma;, 20&sigma;). The 3-&sigma; '
+            'fraction is essentially the <em>detected area fraction</em> &mdash; the share of the field '
+            'that contains statistically significant emission above the noise floor. The 10-&sigma; and '
+            '20-&sigma; fractions indicate how much of the target is in the high-confidence regime where '
+            'structure can be reliably measured. <strong>Ideal: 3-&sigma; fraction &gt; 20% for a rich '
+            'nebula field; 10-&sigma; fraction &gt; 5% indicates strong central emission.</strong> A '
+            'higher percentage across all thresholds in one image directly translates to more usable '
+            'signal for further processing (deconvolution, colour mixing, detail extraction).<br><br>'
+            '<strong>Sky noise &sigma;<sub>sky</sub> and sky background &mu;<sub>sky</sub></strong> &mdash; '
+            'Two complementary sky characterisation metrics derived from the same photutils '
+            '<code>Background2D</code> model used throughout the SNR computation. The image is divided into '
+            '<strong>64 &times; 64 px grid cells</strong>; within each cell <code>SExtractorBackground</code> '
+            'iteratively sigma-clips pixels above 3&sigma; (approximating the SourceExtractor background '
+            'algorithm) and <code>MADStdBackgroundRMS</code> computes the cell noise from the median '
+            'absolute deviation &mdash; more robust than standard deviation for fields containing stars or '
+            'nebulosity. The resulting background mesh is interpolated into a smooth 2D surface covering '
+            'the entire frame. <strong>No specific sky region is drawn or required</strong> &mdash; stars '
+            'and bright nebula pixels are rejected automatically by sigma clipping, so &sigma;<sub>sky</sub> '
+            'and &mu;<sub>sky</sub> represent the whole-image sky floor.<br><br>'
+            '<em>&sigma;<sub>sky</sub></em> (Sky RMS noise, ADU) is the median of the 2D background RMS '
+            'map &mdash; the pixel-to-pixel scatter of the sky and the primary noise floor used throughout '
+            'this report. A lower &sigma;<sub>sky</sub> means a quieter sky; the image with the smaller '
+            'value will generally record fainter signals above 3&sigma;. Differences arise from read noise, '
+            'dark current, sky glow, and total integration time.<br><br>'
+            '<em>&mu;<sub>sky</sub></em> (Sky background level, ADU) is the median of the smooth background '
+            'model itself &mdash; how bright the blank sky is before any stretch. A higher '
+            '&mu;<sub>sky</sub> does not directly harm SNR (which depends on &sigma;, not &mu;), but it '
+            'reduces the dynamic range available before saturation and can indicate light pollution or short '
+            'sub-exposures. <strong>What to compare:</strong> Focus on &sigma;<sub>sky</sub> as the decisive '
+            'quality indicator. If &sigma;<sub>sky</sub> differs by more than &approx; 30% between the two '
+            'images, the integration depth or sky conditions were meaningfully different. &mu;<sub>sky</sub> '
+            'is useful context &mdash; a high background paired with low &sigma; means the sky was bright '
+            'but well-sampled; a high background paired with high &sigma; suggests insufficient exposure '
+            'time.<br><br>'
+            '<em>Noise factor (&sigma;<sub>sky</sub>&thinsp;/&thinsp;&radic;&mu;<sub>sky</sub>)</em> '
+            '&mdash; Compares the measured sky noise to the theoretical Poisson (shot-noise) floor. '
+            'For a purely sky-shot-noise-limited image the pixel variance equals the mean background, '
+            'so &sigma;&thinsp;=&thinsp;&radic;&mu; and the factor equals 1.0. Values above 1.0 indicate '
+            'additional noise contributions &mdash; read noise, dark current, or residual fixed-pattern '
+            'noise. <strong>Narrowband images in suppressed-sky conditions are commonly read-noise '
+            'dominated</strong> (factor 2&ndash;10 is normal for short subs through a 3&thinsp;nm filter), '
+            'because the filter reduces sky glow far more than it reduces the camera&rsquo;s read noise floor. '
+            'A noise factor close to 1.0 therefore indicates the sky is bright enough &mdash; long exposures, '
+            'or a broadband filter &mdash; that shot noise from sky glow dominates. <strong>When comparing two '
+            'images: the lower factor is closer to the Poisson ideal, but absolute values below 3 are '
+            'generally acceptable for narrowband work.</strong> A substantially higher factor in one image '
+            'can indicate shorter individual sub-exposures or higher read noise from a different gain '
+            'setting.<br><br>'
+            '<em>Sky background in electrons</em> &mdash; When the camera gain (e&sup2;/ADU) is recorded '
+            'in the FITS header (keyword <code>GAIN</code>, <code>EGAIN</code>, <code>CCDGAIN</code>, or '
+            '<code>GAINDB</code>), &mu;<sub>sky</sub> and &sigma;<sub>sky</sub> are converted to electrons. '
+            'This removes the camera-specific ADU offset and quantisation, placing both images on a '
+            'physical scale that is directly comparable even when captured with different gain settings or '
+            'cameras. A sky background of, say, 500&thinsp;e&sup2; per pixel indicates that 500 sky photons '
+            '(plus dark current) accumulated per pixel during the total exposure, regardless of camera model.',
+            title="Understanding the SNR metrics",
+        )
+
         return f"""
 <h2>3. Signal-to-Noise Ratio (SNR)</h2>
 {err}
-<div class="info-box">
-  <strong>Understanding the SNR metrics:</strong><br><br>
-
-  <strong>Global SNR (sky-&sigma; units)</strong> &mdash; A single number summarising the
-  signal strength of the entire image relative to the sky noise floor. Computed as the median
-  pixel value of all background-subtracted pixels that lie above 3&times; the median sky RMS
-  (i.e. pixels that contain genuine emission rather than blank sky), divided by the median sky
-  noise (&sigma;<sub>sky</sub>). The sky noise estimate uses the 2D background RMS map produced
-  by photutils <code>Background2D</code> with <code>SExtractorBackground</code> (background
-  estimator) and <code>MADStdBackgroundRMS</code> (noise estimator), which partitions the image
-  into 64 &times; 64 px grid cells, sigma-clips stars within each cell, and interpolates a smooth
-  2D surface &mdash; the same estimate used throughout the analysis pipeline. <strong>Ideal: &gt; 10 &sigma; for nebula
-  targets; &gt; 30 &sigma; for rich star fields.</strong> Values are dimensionless
-  (sky-&sigma;) and directly comparable between the two images regardless of stretch or
-  scaling. Note that this method is sky-noise-dominated: it faithfully reflects how much of the
-  image is buried in background fluctuations but will underestimate total noise in saturated or
-  very bright regions where photon shot noise exceeds the sky floor.<br><br>
-
-  <strong>Median star SNR &plusmn; IQR</strong> &mdash; The median peak-to-noise ratio across
-  all catalogue stars detected with photutils <code>DAOStarFinder</code> that passed quality
-  filtering (non-saturated, isolated, minimum SNR threshold), plus the interquartile range as a
-  measure of spread. For each star,
-  SNR&thinsp;=&thinsp;(peak&thinsp;&minus;&thinsp;local sky)&thinsp;/&thinsp;local sky RMS,
-  using the per-image background grid. <strong>Ideal: median &gt; 20 for a well-exposed
-  session; IQR &lt; 15 indicates a uniform noise floor.</strong> A large IQR implies either
-  a wide dynamic range of star brightness or strong local sky variations across the field. A
-  lower median star SNR than the global image SNR can occur in narrowband imaging where the
-  continuum is suppressed relative to emission-line nebulosity.<br><br>
-
-  <strong>Local SNR Map</strong> &mdash; A per-pixel map of background-subtracted signal
-  divided by the local sky RMS: SNR(x,&thinsp;y)&thinsp;=&thinsp;(data&thinsp;&minus;&thinsp;background)(x,&thinsp;y)&thinsp;/&thinsp;background_rms(x,&thinsp;y).
-  Blank sky regions cluster near zero (&plusmn; 1&sigma; by definition); real emission appears
-  as islands of elevated SNR. The plasma colourmap is clipped to the 2nd&ndash;98th percentile
-  of positive pixels so that bright cores do not compress the dynamic range.
-  <strong>What to look for:</strong> In a deeper or better-stacked image the map should be
-  uniformly brighter across extended nebula regions. Patchwork patterns indicate residual
-  background gradients or flat-field errors. Field edges often show elevated noise from
-  vignetting and reduced flat-field accuracy. The spatial resolution of the noise estimate
-  equals the background grid cell size (typically 64 &times; 64 pixels).<br><br>
-
-  <strong>SNR Percentile Table</strong> &mdash; Reports the fraction of all image pixels that
-  exceed four SNR thresholds (3&sigma;, 5&sigma;, 10&sigma;, 20&sigma;). The 3-&sigma;
-  fraction is essentially the <em>detected area fraction</em> &mdash; the share of the field
-  that contains statistically significant emission above the noise floor. The 10-&sigma; and
-  20-&sigma; fractions indicate how much of the target is in the high-confidence regime where
-  structure can be reliably measured. <strong>Ideal: 3-&sigma; fraction &gt; 20% for a rich
-  nebula field; 10-&sigma; fraction &gt; 5% indicates strong central emission.</strong> A
-  higher percentage across all thresholds in one image directly translates to more usable
-  signal for further processing (deconvolution, colour mixing, detail extraction).<br><br>
-
-  <strong>Sky noise &sigma;<sub>sky</sub> and sky background &mu;<sub>sky</sub></strong> &mdash;
-  Two complementary sky characterisation metrics derived from the same photutils
-  <code>Background2D</code> model used throughout the SNR computation. The image is divided into
-  <strong>64 &times; 64 px grid cells</strong>; within each cell <code>SExtractorBackground</code>
-  iteratively sigma-clips pixels above 3&sigma; (approximating the SourceExtractor background
-  algorithm) and <code>MADStdBackgroundRMS</code> computes the cell noise from the median
-  absolute deviation &mdash; more robust than standard deviation for fields containing stars or
-  nebulosity. The resulting background mesh is interpolated into a smooth 2D surface covering
-  the entire frame. <strong>No specific sky region is drawn or required</strong> &mdash; stars
-  and bright nebula pixels are rejected automatically by sigma clipping, so &sigma;<sub>sky</sub>
-  and &mu;<sub>sky</sub> represent the whole-image sky floor.<br><br>
-  <em>&sigma;<sub>sky</sub></em> (Sky RMS noise, ADU) is the median of the 2D background RMS
-  map &mdash; the pixel-to-pixel scatter of the sky and the primary noise floor used throughout
-  this report. A lower &sigma;<sub>sky</sub> means a quieter sky; the image with the smaller
-  value will generally record fainter signals above 3&sigma;. Differences arise from read noise,
-  dark current, sky glow, and total integration time.<br><br>
-  <em>&mu;<sub>sky</sub></em> (Sky background level, ADU) is the median of the smooth background
-  model itself &mdash; how bright the blank sky is before any stretch. A higher
-  &mu;<sub>sky</sub> does not directly harm SNR (which depends on &sigma;, not &mu;), but it
-  reduces the dynamic range available before saturation and can indicate light pollution or short
-  sub-exposures. <strong>What to compare:</strong> Focus on &sigma;<sub>sky</sub> as the decisive
-  quality indicator. If &sigma;<sub>sky</sub> differs by more than &approx; 30% between the two
-  images, the integration depth or sky conditions were meaningfully different. &mu;<sub>sky</sub>
-  is useful context &mdash; a high background paired with low &sigma; means the sky was bright
-  but well-sampled; a high background paired with high &sigma; suggests insufficient exposure
-  time.<br><br>
-  <em>Noise factor (&sigma;<sub>sky</sub>&thinsp;/&thinsp;&radic;&mu;<sub>sky</sub>)</em>
-  &mdash; Compares the measured sky noise to the theoretical Poisson (shot-noise) floor.
-  For a purely sky-shot-noise-limited image the pixel variance equals the mean background,
-  so &sigma;&thinsp;=&thinsp;&radic;&mu; and the factor equals 1.0. Values above 1.0 indicate
-  additional noise contributions &mdash; read noise, dark current, or residual fixed-pattern
-  noise. <strong>Narrowband images in suppressed-sky conditions are commonly read-noise
-  dominated</strong> (factor 2&ndash;10 is normal for short subs through a 3&thinsp;nm filter),
-  because the filter reduces sky glow far more than it reduces the camera&rsquo;s read noise floor.
-  A noise factor close to 1.0 therefore indicates the sky is bright enough &mdash; long exposures,
-  or a broadband filter &mdash; that shot noise from sky glow dominates. <strong>When comparing two
-  images: the lower factor is closer to the Poisson ideal, but absolute values below 3 are
-  generally acceptable for narrowband work.</strong> A substantially higher factor in one image
-  can indicate shorter individual sub-exposures or higher read noise from a different gain
-  setting.<br><br>
-  <em>Sky background in electrons</em> &mdash; When the camera gain (e&sup2;/ADU) is recorded
-  in the FITS header (keyword <code>GAIN</code>, <code>EGAIN</code>, <code>CCDGAIN</code>, or
-  <code>GAINDB</code>), &mu;<sub>sky</sub> and &sigma;<sub>sky</sub> are converted to electrons.
-  This removes the camera-specific ADU offset and quantisation, placing both images on a
-  physical scale that is directly comparable even when captured with different gain settings or
-  cameras. A sky background of, say, 500&thinsp;e&sup2; per pixel indicates that 500 sky photons
-  (plus dark current) accumulated per pixel during the total exposure, regardless of camera model.
-</div>
+{_snr_metrics_box}
 
 <table>
   <tr><th>Sky metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -4270,9 +4265,9 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   {rows}
 </table>
-<div class="info-box"><strong>How to read this table:</strong>
-Green cells indicate the better value for that metric.
-Red cells indicate the worse value. Metrics marked ⚠ may be influenced by the
-difference in filter bandwidth and should not be used as the sole basis for
-comparison.</div>
+{_info_box('Green cells indicate the better value for that metric. '
+           'Red cells indicate the worse value. Metrics marked ⚠ may be influenced by the '
+           'difference in filter bandwidth and should not be used as the sole basis for '
+           'comparison.',
+           title="How to read this table")}
 {retention_section}"""

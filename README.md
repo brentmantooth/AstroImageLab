@@ -56,17 +56,6 @@ pip install pyqt6 xisf
 
 > **Important:** Install PyQt6 via `pip`, not `conda install pyqt6`. The conda-forge PyQt6 package uses a different DLL layout that conflicts with PyInstaller's hook discovery and with the pip-installed Qt runtime. Using pip for PyQt6 avoids this conflict.
 
-### PDF report export (optional)
-
-The **PDF** format option requires a PDF renderer. Two options are supported — the app tries them in order and falls back to HTML if neither is available:
-
-| Renderer | Install | Notes |
-|----------|---------|-------|
-| **WeasyPrint** | `conda install -c conda-forge weasyprint` | Best layout fidelity. Requires GTK3/Pango native libraries. The conda-forge package bundles these automatically. On Windows with pip, the GTK3 runtime must be installed separately. |
-| **xhtml2pdf** | `pip install xhtml2pdf` | Pure-Python fallback. No native dependencies. Complex CSS (flexbox, grid) renders at reduced fidelity. |
-
-If neither renderer is installed, the report is saved as HTML and a warning is shown in the completion dialog.
-
 ---
 
 ## Installation

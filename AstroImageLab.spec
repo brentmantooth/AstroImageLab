@@ -66,12 +66,6 @@ a = Analysis(
     excludes=[
         "PySide6",
         "tkinter",
-        "weasyprint",
-        "cairocffi",
-        "cairosvg",
-        "tinycss2",
-        "pydyf",
-        "zopfli",
     ],
     noarchive=False,
     optimize=0,

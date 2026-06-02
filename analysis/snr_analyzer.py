@@ -83,15 +83,23 @@ class SNRAnalyzer:
                              if image.background is not None else None)
 
         # --- Camera gain from FITS header --------------------------------
-        # Try common keyword variants used by capture software (NINA, SGP, etc.)
+        # Try common keyword variants used by capture software (NINA, SGP, etc.).
+        # EGAIN is preferred: it is the FITS standard for the actual e⁻/ADU conversion
+        # factor. GAIN is ambiguous — many cameras write the gain mode index (0, 100,
+        # 200 …) there, not the physical conversion factor. Values ≤ 0 are always
+        # invalid for e⁻/ADU and are skipped so a zero gain mode index doesn't
+        # produce bogus 0.0 electron values in the SNR table.
         gain_e_per_adu: float | None = None
         hdr = getattr(image, 'header', None)
         if hdr is not None:
-            for kw in ("GAIN", "EGAIN", "CCDGAIN", "GAINDB"):
+            for kw in ("EGAIN", "GAIN", "CCDGAIN", "GAINDB"):
                 v = hdr.get(kw)
                 if v is not None:
                     try:
-                        gain_e_per_adu = float(v); break
+                        g = float(v)
+                        if g > 0:
+                            gain_e_per_adu = g
+                            break
                     except (TypeError, ValueError):
                         pass
 
