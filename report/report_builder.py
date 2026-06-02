@@ -4066,6 +4066,14 @@ signal in the dark region produce a higher SNR.</p>
             'generally acceptable for narrowband work.</strong> A substantially higher factor in one image '
             'can indicate shorter individual sub-exposures or higher read noise from a different gain '
             'setting.<br><br>'
+            '<strong>Values well below 1.0</strong> do not indicate a problem. For a <strong>stacked '
+            'image</strong>, averaging N sub-exposures reduces per-pixel noise by 1/&radic;N while the mean '
+            'sky background is unchanged, so the noise factor of the stack is roughly the single-sub value '
+            'divided by &radic;N. A 100-sub stack will therefore show a noise factor around 0.1 even if '
+            'each sub was perfectly sky-limited. Very heavily stacked or narrowband images can reach '
+            'values of 0.01 or lower. In this regime the metric no longer describes the camera noise '
+            'regime; treat it instead as an integration-depth indicator &mdash; a lower value means the '
+            'noise floor is smaller relative to the sky background, regardless of cause.<br><br>'
             '<em>Sky background in electrons</em> &mdash; When the camera gain (e&sup2;/ADU) is recorded '
             'in the FITS header (keyword <code>GAIN</code>, <code>EGAIN</code>, <code>CCDGAIN</code>, or '
             '<code>GAINDB</code>), &mu;<sub>sky</sub> and &sigma;<sub>sky</sub> are converted to electrons. '
@@ -4084,11 +4092,11 @@ signal in the dark region produce a higher SNR.</p>
 <table>
   <tr><th>Sky metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Sky RMS noise &sigma;<sub>sky</sub> (ADU) &mdash; lower is better</td>
-      <td class="{cn_a}">{_val(pa.get("noise_median"), ".4f")}</td>
-      <td class="{cn_b}">{_val(pb.get("noise_median"), ".4f")}</td></tr>
+      <td class="{cn_a}">{_val(pa.get("noise_median"), ".6g")}</td>
+      <td class="{cn_b}">{_val(pb.get("noise_median"), ".6g")}</td></tr>
   <tr><td>Sky background &mu;<sub>sky</sub> (ADU) &mdash; lower is better</td>
-      <td class="{cn_bg_a}">{_val(pa.get("background_median"), ".3f")}</td>
-      <td class="{cn_bg_b}">{_val(pb.get("background_median"), ".3f")}</td></tr>
+      <td class="{cn_bg_a}">{_val(pa.get("background_median"), ".6g")}</td>
+      <td class="{cn_bg_b}">{_val(pb.get("background_median"), ".6g")}</td></tr>
   <tr><td>Noise factor &sigma;/&radic;&mu; &mdash; lower = sky-limited (ideal &asymp;1.0)</td>
       <td class="{cn_nf_a}">{_val(nf_a, ".3f")}</td>
       <td class="{cn_nf_b}">{_val(nf_b, ".3f")}</td></tr>
@@ -4096,11 +4104,11 @@ signal in the dark region produce a higher SNR.</p>
       <td>{"—" if gain_a is None else _val(gain_a, ".2f")}</td>
       <td>{"—" if gain_b is None else _val(gain_b, ".2f")}</td></tr>
   <tr><td>Sky background &mu;<sub>sky</sub> (e&sup2;) &mdash; lower is better</td>
-      <td class="{cn_sky_e_a}">{"—" if sky_e_a is None else _val(sky_e_a, ".1f")}</td>
-      <td class="{cn_sky_e_b}">{"—" if sky_e_b is None else _val(sky_e_b, ".1f")}</td></tr>
+      <td class="{cn_sky_e_a}">{"—" if sky_e_a is None else _val(sky_e_a, ".3g")}</td>
+      <td class="{cn_sky_e_b}">{"—" if sky_e_b is None else _val(sky_e_b, ".3g")}</td></tr>
   <tr><td>Sky noise &sigma;<sub>sky</sub> (e&sup2;) &mdash; lower is better</td>
-      <td class="{cn_sky_ne_a}">{"—" if sky_ne_a is None else _val(sky_ne_a, ".2f")}</td>
-      <td class="{cn_sky_ne_b}">{"—" if sky_ne_b is None else _val(sky_ne_b, ".2f")}</td></tr>"""}
+      <td class="{cn_sky_ne_a}">{"—" if sky_ne_a is None else _val(sky_ne_a, ".3g")}</td>
+      <td class="{cn_sky_ne_b}">{"—" if sky_ne_b is None else _val(sky_ne_b, ".3g")}</td></tr>"""}
 </table>
 
 <table>
@@ -4231,7 +4239,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 
         snr_sky_rows = (
             row("Sky noise &sigma;<sub>sky</sub> (ADU)", snr_ma.get("noise_median"),
-                snr_mb.get("noise_median"), fmt=".4f", higher_is_better=False)
+                snr_mb.get("noise_median"), fmt=".6g", higher_is_better=False)
             + row("Noise factor (&sigma;/&radic;&mu;)", snr_ma.get("noise_factor"),
                   snr_mb.get("noise_factor"), fmt=".3f", higher_is_better=False)
         )
@@ -4239,11 +4247,11 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                 or snr_mb.get("sky_bg_electrons") is not None):
             snr_sky_rows += row(
                 "Sky background (e&sup2;)", snr_ma.get("sky_bg_electrons"),
-                snr_mb.get("sky_bg_electrons"), fmt=".1f", higher_is_better=False)
+                snr_mb.get("sky_bg_electrons"), fmt=".3g", higher_is_better=False)
             snr_sky_rows += row(
                 "Sky noise &sigma;<sub>sky</sub> (e&sup2;)",
                 snr_ma.get("sky_noise_electrons"), snr_mb.get("sky_noise_electrons"),
-                fmt=".2f", higher_is_better=False)
+                fmt=".3g", higher_is_better=False)
         rows += snr_sky_rows
 
         legend = ('<p><span class="metric-label-ok">✓</span> = bandwidth-independent '
