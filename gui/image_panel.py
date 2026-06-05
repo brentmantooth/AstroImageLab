@@ -503,6 +503,37 @@ class ImagePanel(QWidget):
         self.image_loaded.emit(img)
         self._ask_about_starless(img)
 
+    def load_path(self, path: str) -> None:
+        """Load an image directly from a file path (no file dialog, no starless prompt)."""
+        img = AstroImage(path)
+        try:
+            img.load()
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Load error", str(e))
+            return
+        self._image = img
+        self._starless_image = None
+        self._starless_lbl.setText("—")
+        self._starless_lbl.setStyleSheet("color: #666;")
+        self._populate_metadata(img)
+        self._refresh_display()
+        self.image_loaded.emit(img)
+
+    def set_starless_path(self, path: str) -> None:
+        """Attach a pre-generated starless image to the currently loaded main image."""
+        if not path or self._image is None:
+            return
+        sl = AstroImage(path)
+        try:
+            sl.load()
+        except Exception:
+            return
+        self._starless_image = sl
+        self._image.starless_image = sl      # mirrors _ask_about_starless behaviour
+        self._starless_lbl.setText(Path(path).name)
+        self._starless_lbl.setStyleSheet("color: #155724;")
+
     def _ask_about_starless(self, img: AstroImage) -> None:
         from PyQt6.QtWidgets import QMessageBox
         prefix = ""

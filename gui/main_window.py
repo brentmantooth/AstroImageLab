@@ -102,6 +102,11 @@ class MainWindow(QMainWindow):
         act_run.triggered.connect(lambda: self._control._on_run())
         analysis_menu.addAction(act_run)
 
+        tools_menu = mb.addMenu("&Tools")
+        act_synth = QAction("Synthetic &Data…", self)
+        act_synth.triggered.connect(self._open_synthetic_dialog)
+        tools_menu.addAction(act_synth)
+
         help_menu = mb.addMenu("&Help")
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._show_about)
@@ -110,6 +115,19 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _open_synthetic_dialog(self) -> None:
+        from gui.synthetic_dialog import SyntheticDialog
+        self._synth_dialog = SyntheticDialog(parent=self)
+        self._synth_dialog.image_generated.connect(self._on_synthetic_generated)
+        self._synth_dialog.show()
+
+    def _on_synthetic_generated(self, main_path: str, starless_path: str,
+                                panel: str) -> None:
+        target = self._panel_a if panel == "A" else self._panel_b
+        target.load_path(main_path)
+        if starless_path:
+            target.set_starless_path(starless_path)
 
     def _on_image_loaded(self, img) -> None:
         either_loaded = (self._panel_a.image is not None or
