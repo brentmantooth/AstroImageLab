@@ -62,6 +62,8 @@ class AstroImage:
             self._load_fits()
         elif suffix == ".xisf":
             self._load_xisf()
+        elif suffix in (".tiff", ".tif"):
+            self._load_tiff()
         else:
             raise ValueError(f"Unsupported file format: {suffix}")
 
@@ -133,6 +135,19 @@ class AstroImage:
             for key, entries in fk.items():
                 if entries:
                     self.header[key] = entries[0].get("value", "")
+
+    def _load_tiff(self) -> None:
+        from PIL import Image as _PILImage
+        img = _PILImage.open(self.path)
+        arr = np.asarray(img).copy()
+        if arr.ndim == 3:
+            if arr.shape[2] >= 3:
+                arr = 0.2126 * arr[:, :, 0] + 0.7152 * arr[:, :, 1] + 0.0722 * arr[:, :, 2]
+                self.is_color = True
+            else:
+                arr = arr[:, :, 0]
+        self.data = arr
+        self.header = None  # TIFF carries no FITS keywords
 
     # ------------------------------------------------------------------
     # Pixel scale
@@ -209,6 +224,46 @@ class AstroImage:
                 if kw in self.header:
                     self.meta[display_key] = str(self.header[kw]).strip()
                     break
+
+        # Focal ratio — prefer explicit keyword; fall back to FOCALLEN / APTDIA
+        fr: float | None = None
+        for kw in ("FOCRATIO", "FRATIO", "FNUMBER"):
+            if kw in self.header:
+                try:
+                    fr = float(self.header[kw])
+                    break
+                except (TypeError, ValueError):
+                    pass
+        if fr is None:
+            fl = self.header.get("FOCALLEN")
+            ap = self.header.get("APTDIA")
+            if fl is not None and ap is not None:
+                try:
+                    fl_f, ap_f = float(fl), float(ap)
+                    if ap_f > 0:
+                        fr = fl_f / ap_f
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+        if fr is not None:
+            self.meta["Focal ratio"] = f"f/{fr:.1f}"
+
+        # CCD sensor temperature
+        for kw in ("CCD-TEMP", "CCDTEMP"):
+            if kw in self.header:
+                try:
+                    self.meta["CCD temperature"] = f"{float(self.header[kw]):.1f} °C"
+                    break
+                except (TypeError, ValueError):
+                    pass
+
+        # Cooling set-point temperature
+        for kw in ("SET-TEMP", "SETTEMP"):
+            if kw in self.header:
+                try:
+                    self.meta["Cooling set-point"] = f"{float(self.header[kw]):.1f} °C"
+                    break
+                except (TypeError, ValueError):
+                    pass
 
     # ------------------------------------------------------------------
     # Background estimation

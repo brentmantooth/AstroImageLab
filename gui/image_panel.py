@@ -481,7 +481,7 @@ class ImagePanel(QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open image",
             last_dir,
-            "Astronomical images (*.fits *.fit *.fts *.xisf);;All files (*.*)",
+            "Astronomical images (*.fits *.fit *.fts *.xisf *.tiff *.tif);;All files (*.*)",
         )
         if not path:
             return
@@ -523,7 +523,7 @@ class ImagePanel(QWidget):
         last_dir = settings.value("last_data_dir", "")
         path, _ = QFileDialog.getOpenFileName(
             self, "Open starless image", last_dir,
-            "Astronomical images (*.fits *.fit *.fts *.xisf);;All files (*.*)",
+            "Astronomical images (*.fits *.fit *.fts *.xisf *.tiff *.tif);;All files (*.*)",
         )
         if not path:
             return
