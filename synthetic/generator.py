@@ -137,20 +137,23 @@ def _siemens_star(size_px: int, n_sectors: int = 36) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _star_psf(params: dict, nx: float, ny: float,
-              plate_scale: float, stamp_size: int) -> np.ndarray:
+              plate_scale: float, stamp_size: int,
+              px_scale: float = 1.0) -> np.ndarray:
     """Build a normalised PSF stamp for one star at normalised field position (nx, ny).
 
     nx, ny ∈ [-1, 1] where (0, 0) is the image centre.
-    plate_scale: arcsec per pixel.
+    plate_scale: arcsec per pixel (pass the effective preview plate_scale in preview mode).
+    px_scale: pixel-space scale relative to full resolution (e.g. 0.25 for 4× preview
+              downsample). All hardcoded pixel-unit constants are multiplied by px_scale
+              so the PSF appearance scales correctly with image resolution.
     Returns a float64 array of shape (stamp_size, stamp_size) that sums to 1.
     """
     r = math.sqrt(nx ** 2 + ny ** 2)   # 0 (centre) … ~1.41 (corner)
     theta = math.atan2(ny, nx)
 
-    # ── Base FWHM: user's seeing/star size (minimum 4.7 px so stars are
-    #    visible in the app's downsampled display panel)  ─────────────────
+    # ── Base FWHM: user's seeing/star size (minimum 4.7 px at full res) ──
     MOFFAT_BETA = float(params.get("moffat_beta", 4.77))
-    fwhm_px = max(params["fwhm_arcsec"] / plate_scale, 4.7)
+    fwhm_px = max(params["fwhm_arcsec"] / plate_scale, 4.7 * px_scale)
 
     # ── Field curvature: FWHM grows with r² ─────────────────────────────
     fc = params["field_curvature"]
@@ -167,8 +170,8 @@ def _star_psf(params: dict, nx: float, ny: float,
     else:
         fwhm_x = fwhm_y = fwhm_fc
 
-    fwhm_x = max(fwhm_x, 4.7)
-    fwhm_y = max(fwhm_y, 4.7)
+    fwhm_x = max(fwhm_x, 4.7 * px_scale)
+    fwhm_y = max(fwhm_y, 4.7 * px_scale)
 
     # ── Core Moffat stamp (matches the app's Moffat PSF fitting) ─────────
     alpha_x = _fwhm_to_alpha(fwhm_x, MOFFAT_BETA)
@@ -197,7 +200,7 @@ def _star_psf(params: dict, nx: float, ny: float,
     # ── Halo: very wide Gaussian (filter-reflection / scatter artefact) ──
     halo_str = params["halo"]
     if halo_str > 0:
-        halo_sigma = max(halo_str * 55.0, 3.0)
+        halo_sigma = max(halo_str * 55.0 * px_scale, 3.0 * px_scale)
         halo_kern = _gaussian_2d(stamp_size, halo_sigma)
         s = halo_kern.sum()
         if s > 0:
@@ -207,7 +210,7 @@ def _star_psf(params: dict, nx: float, ny: float,
     # ── Coma: radially-offset secondary lobe, magnitude ∝ r ─────────────
     coma = params["coma"]
     if coma > 0 and r > 0.05:
-        offset_px = coma * r * 10.0
+        offset_px = coma * r * 10.0 * px_scale
         ox = offset_px * math.cos(theta)
         oy = offset_px * math.sin(theta)
         secondary = _gaussian_2d(stamp_size, sigma_equiv * 1.4, cx=ox, cy=oy)
@@ -216,16 +219,16 @@ def _star_psf(params: dict, nx: float, ny: float,
     # ── Collimation: fixed-direction lobe (independent of field position) ─
     coll = params["collimation"]
     if coll > 0:
-        coll_offset = coll * 7.0
+        coll_offset = coll * 7.0 * px_scale
         secondary = _gaussian_2d(stamp_size, sigma_equiv * 1.4, cx=coll_offset, cy=0.0)
         stamp = stamp + coll * 0.35 * secondary
 
     # ── Defocus: poor_focus + magnitude of backfocus ─────────────────────
     defocus = params["poor_focus"] + abs(params["backfocus"])
     if defocus > 0:
-        ring_r = defocus * 12.0
-        ring_r = max(ring_r, 1.0)
-        ring = _ring_kernel(ring_r, stamp_size, thickness=max(2.0, ring_r * 0.25))
+        ring_r = defocus * 12.0 * px_scale
+        ring_r = max(ring_r, 1.0 * px_scale)
+        ring = _ring_kernel(ring_r, stamp_size, thickness=max(2.0 * px_scale, ring_r * 0.25))
         # Blend: light defocus preserves core; severe defocus → full ring
         blend = min(defocus, 1.0)
         stamp = (1.0 - blend) * stamp + blend * ring
@@ -287,9 +290,13 @@ class SyntheticGenerator:
             # 4× camera downsample — same star count, faithful scene representation
             width  = max(64, cam["width_px"]  // 4)
             height = max(64, cam["height_px"] // 4)
+            # px_scale < 1: corrects plate_scale and pixel-unit PSF constants so
+            # stars appear at the right angular size in the downsampled preview.
+            _preview_px_scale = width / cam["width_px"]
         else:
             width  = cam["width_px"]
             height = cam["height_px"]
+            _preview_px_scale = 1.0
         n_stars = int(params["n_stars"])
 
         # Star positions and magnitudes: seeded from n_stars so identical across
@@ -329,7 +336,9 @@ class SyntheticGenerator:
                 nx = (cx_neb - cx_img) / half_diag
                 ny = (cy_neb - cy_img) / half_diag
                 # Same field-position-dependent PSF as stars (coma, astigmatism, etc.)
-                psf = _star_psf(params_no_halo, nx, ny, plate_scale, 61)
+                psf = _star_psf(params_no_halo, nx, ny,
+                                plate_scale / _preview_px_scale, 61,
+                                px_scale=_preview_px_scale)
                 patch = _siemens_star(nebula_size_px)
                 convolved = fftconvolve(patch, psf, mode="same").astype(np.float64)
                 peak = convolved.max()
@@ -377,7 +386,9 @@ class SyntheticGenerator:
             sx, sy = star_xs[i], star_ys[i]
             nx = (sx - cx_img) / half_diag
             ny = (sy - cy_img) / half_diag
-            psf     = _star_psf(params, nx, ny, plate_scale, stamp_size)
+            psf     = _star_psf(params, nx, ny,
+                                plate_scale / _preview_px_scale, stamp_size,
+                                px_scale=_preview_px_scale)
             star_e  = _mag_to_electrons(mags[i], fratio, exposure_s)
             star_adu = star_e / gain_e_per_adu
             x0 = int(sx) - half_stamp;  y0 = int(sy) - half_stamp

@@ -324,6 +324,15 @@ class SyntheticDialog(QMainWindow):
         self._preview_timer.timeout.connect(self._run_preview)
 
         self._build_ui()
+        # Apply defaults that depend on widgets being fully constructed
+        self._nebula_cb.setChecked(True)       # enable nebula by default
+        self._preview_cb.setChecked(True)      # live preview on by default
+        # Restore persisted output directory
+        from PyQt6.QtCore import QSettings
+        _s = QSettings("FilterImageComparator", "FilterImageComparator")
+        saved_dir = _s.value("synth_output_dir", "")
+        if saved_dir and os.path.isdir(saved_dir):
+            self._outdir_lbl.setText(saved_dir)
         self._on_camera_changed(DEFAULT_CAMERA)
 
     # ------------------------------------------------------------------
@@ -525,64 +534,64 @@ class SyntheticDialog(QMainWindow):
             form.addRow(label, row)
             return row
 
-        self._focus_sl = _add("Poor focus", 0, 1, 0, 2,
+        self._focus_sl = _add("Poor focus", 0, 0.5, 0, 2,
             "Defocus — stars form disks or donut shapes instead of sharp points.\n"
-            "Slider 0 = perfect focus, 1 = severely defocused ring (~12 px radius).\n"
+            "Slider 0 = perfect focus, 0.5 = heavily defocused ring (~6 px radius).\n"
             "Model: ring/annulus kernel blended with core Gaussian.")
 
-        self._backfocus_sl = _SliderRow(-1, 1, 0, 2)
+        self._backfocus_sl = _SliderRow(-0.5, 0.5, 0, 2)
         self._backfocus_sl.setToolTip(
             "Backfocus error — camera sensor is not at the correct back-focal distance.\n"
-            "Slider 0 = correct distance, ±1 = maximum error (under- or over-focused).\n"
+            "Slider 0 = correct distance, ±0.5 = maximum error (under- or over-focused).\n"
             "Produces the same defocused PSF as Poor Focus; sign is recorded in the\n"
             "FITS header (SYN_BF) for traceability but the PSF shape is symmetric.")
         self._backfocus_sl.valueChanged.connect(self._schedule_preview)
         bf_row = QHBoxLayout()
-        bf_row.addWidget(QLabel("−1"))
+        bf_row.addWidget(QLabel("−0.5"))
         bf_row.addWidget(self._backfocus_sl)
-        bf_row.addWidget(QLabel("+1"))
+        bf_row.addWidget(QLabel("+0.5"))
         form.addRow("Backfocus error", bf_row)
 
-        self._guiding_sl = _add("Guiding error", 0, 1, 0, 2,
+        self._guiding_sl = _add("Guiding error", 0, 0.5, 0, 2,
             "Autoguider drift — stars are trailed in a consistent direction.\n"
-            "Slider 0 = perfect guiding, 1 = 20 px trail at a random angle.\n"
+            "Slider 0 = perfect guiding, 0.5 = 10 px trail at a random angle.\n"
             "Model: global motion-blur convolution applied after all stars are placed.")
 
-        self._coma_sl = _add("Coma", 0, 1, 0, 2,
+        self._coma_sl = _add("Coma", 0, 0.5, 0, 2,
             "Coma aberration — stars near edges develop comet-like tails pointing\n"
             "radially outward from the field centre.\n"
-            "Slider 0 = none, 1 = strong (up to 10 px offset at field corner).\n"
+            "Slider 0 = none, 0.5 = moderate (up to 5 px offset at field corner).\n"
             "Model: secondary Gaussian lobe shifted radially outward; magnitude ∝ slider × r.")
 
-        self._fc_sl = _add("Field curvature", 0, 1, 0, 2,
+        self._fc_sl = _add("Field curvature", 0, 0.5, 0, 2,
             "Field curvature — the focal surface is curved so stars at the edges\n"
             "are defocused even when the centre is sharp.\n"
-            "Slider 0 = flat field, 1 = strong curvature (edge FWHM ~3× centre).\n"
+            "Slider 0 = flat field, 0.5 = moderate curvature (edge FWHM ~2× centre).\n"
             "Model: effective σ scaled by (1 + slider × r²) per field position.")
 
-        self._ast_sl = _add("Astigmatism", 0, 1, 0, 2,
+        self._ast_sl = _add("Astigmatism", 0, 0.5, 0, 2,
             "Astigmatism — stars away from centre appear elongated; the elongation\n"
             "axis rotates with field angle (tangential vs radial).\n"
-            "Slider 0 = none, 1 = strong (axis ratio up to ~2.5:1 at field edge).\n"
+            "Slider 0 = none, 0.5 = moderate (axis ratio up to ~1.75:1 at field edge).\n"
             "Model: elliptical Gaussian with orientation and ratio varying by field angle.")
 
-        self._sph_sl = _add("Spherical aberration", 0, 1, 0, 2,
+        self._sph_sl = _add("Spherical aberration", 0, 0.5, 0, 2,
             "Spherical aberration — stars have a bright core with a low-level halo.\n"
             "Uniform across the entire field.\n"
-            "Slider 0 = none, 1 = severe (wide halo carries 65 % of star flux).\n"
+            "Slider 0 = none, 0.5 = moderate (wide halo carries ~33 % of star flux).\n"
             "Model: blend of narrow core Gaussian + wide Gaussian (3× core σ).")
 
-        self._coll_sl = _add("Poor collimation", 0, 1, 0, 2,
+        self._coll_sl = _add("Poor collimation", 0, 0.5, 0, 2,
             "Collimation error — all stars show an elongation in the same direction.\n"
             "Unlike coma, this is field-position independent.\n"
-            "Slider 0 = perfect collimation, 1 = severe (7 px fixed-direction lobe).\n"
+            "Slider 0 = perfect collimation, 0.5 = moderate (3.5 px fixed-direction lobe).\n"
             "Model: secondary Gaussian lobe in a fixed direction added to every star.")
 
-        self._halo_sl = _add("Halo", 0, 1, 0, 2,
+        self._halo_sl = _add("Halo", 0, 0.5, 0, 2,
             "Filter-reflection halo — a wide faint halo around each star,\n"
             "common in narrowband images caused by internal filter reflections.\n"
             "This directly exercises the Halo Analyzer metric.\n"
-            "Slider 0 = no halo, 1 = strong halo (σ ≈ 55 px, ~8 % of star flux).\n"
+            "Slider 0 = no halo, 0.5 = moderate halo (σ ≈ 28 px, ~4 % of star flux).\n"
             "Model: very wide Gaussian added to each star's PSF uniformly.")
 
         self._bortle_sl = _SliderRow(1, 9, 5, 0)
@@ -615,7 +624,7 @@ class SyntheticDialog(QMainWindow):
 
         self._nebula_brightness_spin = QDoubleSpinBox()
         self._nebula_brightness_spin.setRange(0.10, 10.0)
-        self._nebula_brightness_spin.setValue(1.0)
+        self._nebula_brightness_spin.setValue(3.0)
         self._nebula_brightness_spin.setSingleStep(0.1)
         self._nebula_brightness_spin.setDecimals(2)
         self._nebula_brightness_spin.setSuffix(" × sky")
@@ -627,12 +636,12 @@ class SyntheticDialog(QMainWindow):
         self._nebula_brightness_spin.valueChanged.connect(self._schedule_preview)
         form.addRow("Brightness", self._nebula_brightness_spin)
 
-        self._nebula_size_sl = _SliderRow(0.05, 0.50, 0.15, 2)
+        self._nebula_size_sl = _SliderRow(0.05, 1.0, 0.50, 2)
         self._nebula_size_sl.setEnabled(False)
         self._nebula_size_sl.setToolTip(
             "Diameter of each Siemens-star patch as a fraction of the shorter\n"
-            "image dimension.  0.15 = 15 % (≈626 px on ASI2600MM at 4176 px height).\n"
-            "Range 0.05–0.50.")
+            "image dimension.  0.50 = 50 % (≈2088 px on ASI2600MM at 4176 px height).\n"
+            "Range 0.05–1.0.")
         self._nebula_size_sl.valueChanged.connect(self._schedule_preview)
         form.addRow("Size (fraction)", self._nebula_size_sl)
 
@@ -767,6 +776,9 @@ class SyntheticDialog(QMainWindow):
             self, "Select output directory", self._outdir_lbl.text())
         if d:
             self._outdir_lbl.setText(d)
+            from PyQt6.QtCore import QSettings
+            QSettings("FilterImageComparator", "FilterImageComparator").setValue(
+                "synth_output_dir", d)
 
     def _show_info(self) -> None:
         dlg = _InfoDialog(self)
@@ -777,6 +789,9 @@ class SyntheticDialog(QMainWindow):
             return
         params = self._collect_params()
         os.makedirs(params["output_dir"], exist_ok=True)
+        from PyQt6.QtCore import QSettings
+        QSettings("FilterImageComparator", "FilterImageComparator").setValue(
+            "synth_output_dir", params["output_dir"])
         self._gen_btn.setEnabled(False)
         self._status_lbl.setText("Generating…")
         self._gen_thread = _GeneratorThread(params, self)
