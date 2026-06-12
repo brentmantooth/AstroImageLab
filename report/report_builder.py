@@ -1353,6 +1353,10 @@ Higher curve = better contrast preservation at fine scales.</p>
         cs_b  = ab_b.get("collimation_circstd_deg")
         cc_a  = ab_a.get("corner_centre_ratio")
         cc_b  = ab_b.get("corner_centre_ratio")
+        qa_a  = ab_a.get("fwhm_radial_quadratic")   # quadratic coefficient a
+        qa_b  = ab_b.get("fwhm_radial_quadratic")
+        li_a  = ab_a.get("fwhm_radial_linear")      # linear coefficient b
+        li_b  = ab_b.get("fwhm_radial_linear")
 
         na_lbl = f"{ra.label} ({n_a} stars)"
         nb_lbl = f"{rb.label} ({n_b} stars)"
@@ -1362,6 +1366,8 @@ Higher curve = better contrast preservation at fine scales.</p>
   <tr><td>Radial elongation fraction</td>{_score_td(rf_a,0.3,0.5)}{_score_td(rf_b,0.3,0.5)}</tr>
   <tr><td>Orientation circular std (°)</td>{_score_td(cs_a,20.0,45.0,higher_is_bad=False,fmt=".1f")}{_score_td(cs_b,20.0,45.0,higher_is_bad=False,fmt=".1f")}</tr>
   <tr><td>Corner/centre FWHM ratio</td>{_score_td(cc_a,1.2,1.5,fmt=".3f")}{_score_td(cc_b,1.2,1.5,fmt=".3f")}</tr>
+  <tr><td>FWHM gradient — quadratic (a)</td>{_score_td(qa_a,0.5,1.5,fmt=".3f")}{_score_td(qa_b,0.5,1.5,fmt=".3f")}</tr>
+  <tr><td>FWHM gradient — linear (b)</td><td>{_val(li_a,".3f")}</td><td>{_val(li_b,".3f")}</td></tr>
 </table>
 <p class="footnote">Colour coding — green: no significant signal; yellow: mild; red: significant. Thresholds are heuristic. Lower orientation circular std = more uniform elongation direction. All findings should be read as &ldquo;patterns consistent with&rdquo;, not definitive diagnoses.</p>\n"""
 

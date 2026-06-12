@@ -341,6 +341,7 @@ class SyntheticGenerator:
                                 px_scale=_preview_px_scale)
                 patch = _siemens_star(nebula_size_px)
                 convolved = fftconvolve(patch, psf, mode="same").astype(np.float64)
+                convolved = np.maximum(convolved, 0.0)  # prevent negative FFT ringing
                 peak = convolved.max()
                 if peak > 0:
                     convolved *= nebula_peak_adu / peak
