@@ -8,14 +8,15 @@ import numpy as np
 from astropy.modeling import fitting
 from astropy.modeling.models import Moffat2D
 import matplotlib
+import matplotlib.patches
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QPointF
-from PyQt6.QtGui import QPainter, QPen, QColor
+from PyQt6.QtGui import QImage, QPainter, QPen, QColor, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
-    QHeaderView, QWidget,
+    QCheckBox, QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QProgressBar, QSpinBox, QSplitter, QTableWidget,
+    QTableWidgetItem, QHeaderView, QWidget,
 )
 
 from core.astro_image import AstroImage
@@ -60,6 +61,30 @@ class _StarImageLabel(ZoomableImageLabel):
 
     def clear_star_circle(self) -> None:
         self._star_circle = None
+        self.update()
+
+    def set_image_array(self, arr: np.ndarray) -> None:
+        """Override to store the full-resolution pixmap — no downsampling.
+
+        The base class caps the stored pixmap at 1024 px (MAX_DISPLAY_PX) for
+        speed in the main image panels.  Here we need native resolution so that
+        zooming in stays sharp rather than upscaling a thumbnail.
+        """
+        self._full_image_shape = arr.shape[:2]
+        self._roi_norm = None
+        self._zoom = 1.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        h, w = arr.shape[:2]
+        if arr.ndim == 2:
+            self._display_arr = np.ascontiguousarray(arr.astype(np.uint8))
+            qimg = QImage(self._display_arr.data, w, h, w,
+                          QImage.Format.Format_Grayscale8)
+        else:
+            self._display_arr = np.ascontiguousarray(arr.astype(np.uint8))
+            qimg = QImage(self._display_arr.data, w, h, w * 3,
+                          QImage.Format.Format_RGB888)
+        self._pixmap_orig = QPixmap.fromImage(qimg)
         self.update()
 
     def mousePressEvent(self, event) -> None:
@@ -228,6 +253,40 @@ def _refine_star_center(data: np.ndarray, sat_threshold: float,
     return float(np.mean(xs)) + x0, float(np.mean(ys)) + y0
 
 
+def _rdf_bg_level(rdf_m: np.ndarray) -> float | None:
+    """Log10 background noise floor = mean of the outermost 20 % of the RDF profile."""
+    if rdf_m is None or len(rdf_m) < 5:
+        return None
+    n_tail = max(3, len(rdf_m) // 5)
+    return float(np.mean(rdf_m[-n_tail:]))
+
+
+def _xs_bg_level(xs: np.ndarray) -> float | None:
+    """Background level in a normalised cross-section = mean of the outer edge bins."""
+    if xs is None or len(xs) < 6:
+        return None
+    n = max(2, len(xs) // 8)
+    return float(np.mean(np.concatenate([xs[:n], xs[-n:]])))
+
+
+def _compute_bg_ring_radius(rdf_r: np.ndarray,
+                             rdf_m: np.ndarray) -> float | None:
+    """Return the first pixel radius where the RDF drops to the background noise floor.
+
+    The background level is estimated as the mean of the outermost 20 % of the
+    profile (the plateau where the star's contribution is negligible).  The ring
+    radius is the smallest r at which the normalised log10 profile first falls to
+    that level — i.e. the inner edge of the noise floor.
+    """
+    bg_level = _rdf_bg_level(rdf_m)
+    if bg_level is None or rdf_r is None:
+        return None
+    for r_val, m_val in zip(rdf_r, rdf_m):
+        if m_val <= bg_level:
+            return float(r_val)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # _AnalyzeThread — per-click PSF fit + RDF computation
 # ---------------------------------------------------------------------------
@@ -382,7 +441,10 @@ class _AnalyzeThread(QThread):
         lf       = float(np.percentile(_pos, 1)) if _pos.size > 0 else 1.0
         log_data = np.log10(np.clip(bgsub, lf, None))
         rdf      = _annular_rdf(log_data, xc, yc, r)
-        disp     = normalize_for_display(cut.astype(np.float32))
+        # Display cutout from raw data so the ROI shows the actual image appearance;
+        # all analysis (fit, shape, RDF, cross-section) remains on bgsub
+        raw_cut  = _extract_cutout(img.data, xc, yc, r)
+        disp     = normalize_for_display(raw_cut.astype(np.float32))
         # Sub-pixel centroid position within the 2r×2r cutout (imshow data coords)
         cx_cut   = xc - (round(xc) - r)
         cy_cut   = yc - (round(yc) - r)
@@ -521,6 +583,7 @@ class HaloAnalyzerDialog(QDialog):
         self._display_img: str = "A"
         self._detect_thread: _DetectThread | None = None
         self._analyze_thread: _AnalyzeThread | None = None
+        self._last_result: dict | None = None
 
         self.setWindowTitle("Halo Analyzer")
         self.resize(1200, 850)
@@ -577,6 +640,12 @@ class HaloAnalyzerDialog(QDialog):
 
         self._status_lbl = QLabel("Detecting stars…")
         toolbar.addWidget(self._status_lbl)
+        toolbar.addSpacing(16)
+
+        self._bg_ring_chk = QCheckBox("Draw Background Ring")
+        self._bg_ring_chk.setChecked(True)
+        self._bg_ring_chk.stateChanged.connect(self._on_bg_ring_toggled)
+        toolbar.addWidget(self._bg_ring_chk)
         toolbar.addStretch()
         main.addLayout(toolbar)
 
@@ -707,6 +776,10 @@ class HaloAnalyzerDialog(QDialog):
         self._draw_circle(sx, sy, value)
         self._run_analysis(sx, sy)
 
+    def _on_bg_ring_toggled(self) -> None:
+        if self._last_result is not None:
+            self._update_figure(self._last_result)
+
     def _on_display_changed(self, idx: int) -> None:
         self._display_img = "B" if idx == 1 else "A"
         img = self._img_b if self._display_img == "B" else self._img_a
@@ -756,6 +829,7 @@ class HaloAnalyzerDialog(QDialog):
 
     def _on_analysis_done(self, result: dict) -> None:
         self._analyze_thread = None
+        self._last_result = result
         self._progress_bar.setVisible(False)
         n = len(self._stars_a) if self._stars_a is not None else 0
         self._status_lbl.setText(f"{n} stars found — click to select")
@@ -842,6 +916,23 @@ class HaloAnalyzerDialog(QDialog):
                          color=orig_color)
             ax1.axis("off")
 
+            # --- Background ring overlays ---
+            if self._bg_ring_chk.isChecked():
+                bg_r_a = _compute_bg_ring_radius(
+                    result.get("rdf_r_a"), result.get("rdf_m_a"))
+                if bg_r_a is not None and cx_a is not None and cy_a is not None:
+                    ax0.add_patch(matplotlib.patches.Circle(
+                        (cx_a, cy_a), bg_r_a,
+                        fill=False, edgecolor="magenta", linewidth=1.5,
+                        alpha=0.6, zorder=6))
+                bg_r_b = _compute_bg_ring_radius(
+                    result.get("rdf_r_b"), result.get("rdf_m_b"))
+                if bg_r_b is not None and cx_b is not None and cy_b is not None:
+                    ax1.add_patch(matplotlib.patches.Circle(
+                        (cx_b, cy_b), bg_r_b,
+                        fill=False, edgecolor="magenta", linewidth=1.5,
+                        alpha=0.6, zorder=6))
+
             # --- Cross-section ---
             xs_px = result.get("xs_px")
             xs_a  = result.get("xs_a")
@@ -854,6 +945,12 @@ class HaloAnalyzerDialog(QDialog):
                     b_lbl = self._img_b.label if self._img_b else "B"
                     ax2.semilogy(xs_px, xs_b, color="tomato", linewidth=1.2,
                                  label=b_lbl)
+                # Background level lines
+                for _xs in [xs_a, xs_b]:
+                    _lvl = _xs_bg_level(_xs)
+                    if _lvl is not None and _lvl > 0:
+                        ax2.axhline(_lvl, color="magenta", linestyle="--",
+                                    linewidth=1.0, alpha=0.6)
                 ax2.set_xlabel("px from centre", fontsize=7, color=orig_color)
                 ax2.set_ylabel("Norm. intensity", fontsize=7, color=orig_color)
                 ax2.tick_params(labelsize=6, colors=orig_color)
@@ -879,6 +976,11 @@ class HaloAnalyzerDialog(QDialog):
                                      10 ** (rdf_m_a - rdf_s_a),
                                      10 ** (rdf_m_a + rdf_s_a),
                                      color="steelblue", alpha=0.2)
+                # Background level line for Image A
+                _rdf_bg_a = _rdf_bg_level(rdf_m_a)
+                if _rdf_bg_a is not None:
+                    ax3.axhline(10 ** _rdf_bg_a, color="magenta", linestyle="--",
+                                linewidth=1.0, alpha=0.6)
 
                 rdf_r_b = result.get("rdf_r_b")
                 rdf_m_b = result.get("rdf_m_b")
@@ -893,6 +995,11 @@ class HaloAnalyzerDialog(QDialog):
                                          10 ** (rdf_m_b - rdf_s_b),
                                          10 ** (rdf_m_b + rdf_s_b),
                                          color="tomato", alpha=0.2)
+                    # Background level line for Image B
+                    _rdf_bg_b = _rdf_bg_level(rdf_m_b)
+                    if _rdf_bg_b is not None:
+                        ax3.axhline(10 ** _rdf_bg_b, color="magenta", linestyle="--",
+                                    linewidth=1.0, alpha=0.6)
 
                 ax3.set_xlabel("Radius (px)", fontsize=7, color=orig_color)
                 ax3.set_ylabel("Relative intensity", fontsize=7, color=orig_color)
