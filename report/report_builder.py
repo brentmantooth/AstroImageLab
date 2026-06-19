@@ -251,6 +251,7 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
         ("beta",         "Moffat β"),
         ("ellipticity",  "Ellipticity"),
         ("eccentricity", "Eccentricity"),
+        ("snr",          "Star SNR (ePSF sample)"),
     ]
     # Theoretically ideal or physically expected reference values per metric.
     # FWHM has no universal ideal (seeing-dependent), so it is omitted.
@@ -270,7 +271,7 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
     if not has_data:
         return "", ""
 
-    fig, axes = plt.subplots(5, 1, figsize=(7, 7 if has_b else 5))
+    fig, axes = plt.subplots(6, 1, figsize=(7, 8.5 if has_b else 6))
     fig.subplots_adjust(hspace=0.55, left=0.18, right=0.97, top=0.95, bottom=0.06)
     palette = {label_a: "steelblue", label_b: "tomato"}
     order = [label_a, label_b] if has_b else [label_a]
@@ -395,7 +396,9 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
         f"A <span style='color:red'><b>red dashed line</b></span> marks the theoretically ideal "
         f"or physically expected reference value where applicable: Moffat&nbsp;&beta;&nbsp;=&nbsp;4.77 "
         f"(Kolmogorov atmospheric turbulence); Ellipticity&nbsp;=&nbsp;Eccentricity&nbsp;=&nbsp;0 "
-        f"(perfectly round stars)."
+        f"(perfectly round stars). "
+        f"<b>Star SNR</b> is peak&nbsp;ADU&nbsp;/&nbsp;median&nbsp;background&nbsp;RMS for each "
+        f"ePSF-fitted star; compare with the aggregate median&nbsp;&plusmn;&nbsp;IQR in Section&nbsp;3."
         f"</p>"
     )
 
@@ -893,8 +896,8 @@ class ReportBuilder:
                 counts, edges = np.histogram(positive, bins=bins)
                 centers = np.sqrt(edges[:-1] * edges[1:])
                 ax.step(centers, counts, where="mid", color=color,
-                        alpha=0.85, linewidth=1.4, label=label)
-                ax.axvline(float(np.median(positive)), color=color, linestyle=":", linewidth=1.5)
+                        alpha=0.90, linewidth=1.5, label=label)
+                ax.axvline(float(np.median(positive)), color=color, linestyle="-", linewidth=1.5, alpha=0.75)
 
                 sl = getattr(img, "starless_image", None)
                 if sl is not None and getattr(sl, "data", None) is not None:
@@ -1075,29 +1078,30 @@ class ReportBuilder:
         (sig_ell,         p_ell)          = _sig("ellipticity")
         (sig_ecc,         p_ecc)          = _sig("eccentricity")
 
-        _ref_psf_box = (_info_box(
-            f'The reference curve is a <em>synthetic</em> Moffat profile &mdash; not measured from data. '
-            f'A Moffat PSF has the form 1&thinsp;/&thinsp;(1&thinsp;+&thinsp;r&#x00B2;/&gamma;&#x00B2;)&#x03B2;, '
-            f'where &gamma; is derived from the specified FWHM. The shape parameter '
-            f'&beta;&thinsp;=&thinsp;{REF_SEEING_BETA} is the Kolmogorov atmospheric turbulence value, '
-            f'appropriate for diffraction-limited ground-based seeing. '
-            f'The FWHM ({self._ref_seeing_arcsec:.2f}&Prime;) converts to pixels using the plate scale '
-            f'derived from the measured ePSFs of Images A/B; if the plate scale cannot be determined '
-            f'the reference is omitted. This reference is a benchmark for typical good seeing, not a '
-            f'theoretical maximum &mdash; shorter wavelengths, larger apertures, or adaptive optics '
-            f'can all exceed it.',
-            title="About the reference PSF",
-        ) if img_epsf_ref else "")
+        _ref_seeing_note = (
+            f'<strong>Reference curve:</strong> the green dashed line is a <em>synthetic</em> Moffat '
+            f'profile at {self._ref_seeing_arcsec:.1f}&Prime; seeing (&beta;&thinsp;=&thinsp;{REF_SEEING_BETA}, '
+            f'Kolmogorov turbulence). It is a benchmark for typical good atmospheric conditions, not a '
+            f'theoretical maximum. FWHM converts to pixels via the plate scale from the measured ePSFs; '
+            f'if the plate scale is unknown the reference is omitted.<br><br>'
+        ) if img_epsf_ref else ""
+
+        _compare_box = _info_box(
+            'A smaller FWHM (arcsec) and higher MTF50 indicate sharper resolution &mdash; '
+            'these are the primary quality indicators for filter comparison. A higher '
+            'Moffat &beta; indicates less scattered light in the wings. Ellipticity should be '
+            'similar between filters; a large difference suggests filter tilt, substrate '
+            'wedge, or different seeing conditions between sessions. If the ePSFs show '
+            'the same asymmetric tail in both images, the cause is common to both (optics '
+            'or tracking) and does not reflect a filter quality difference &mdash; what matters '
+            'for comparison is whether the tail is <em>more pronounced</em> in one image.',
+            title="How to compare these images", open=True,
+        )
 
         return f"""
 <h2>4. PSF / MTF &nbsp;<span class="metric-label-ok">✓ bandwidth-independent</span></h2>
 {err}
-{_info_box('The Point Spread Function (PSF) describes how a point source '
-           '(star) is rendered. FWHM measures the core width; smaller FWHM = sharper stars. '
-           'The Modulation Transfer Function (MTF) shows how well contrast is preserved at each '
-           'spatial frequency; MTF50 is the frequency at which contrast falls to 50%. '
-           'These metrics are normalised to unit amplitude and are valid regardless of filter bandwidth.',
-           title="About PSF &amp; MTF")}
+{_compare_box}
 {_info_box('<strong>Star quality pipeline &mdash; how the table counts are derived</strong><br><br>'
            'Stars pass through a two-stage quality pipeline before any metric or ePSF is computed. '
            'All five metrics (FWHM, &beta;, ellipticity, eccentricity) and the ePSF are computed from '
@@ -1126,13 +1130,13 @@ class ReportBuilder:
   <tr><td>Candidate PSF stars</td><td>{_val(pa.get("n_psf_candidates"), "d")}</td><td>{_val(pb.get("n_psf_candidates"), "d")}</td><td></td></tr>
   <tr><td>Outliers rejected</td><td>{_val(pa.get("n_outliers_rejected"), "d")}</td><td>{_val(pb.get("n_outliers_rejected"), "d")}</td><td></td></tr>
   <tr><td>Stars used for PSF</td><td>{_val(pa.get("n_stars_used"), "d")}</td><td>{_val(pb.get("n_stars_used"), "d")}</td><td></td></tr>
-  <tr><td>FWHM (px)</td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td>{_sig_td(sig_fwhm_px, p_fwhm_px)}</tr>
-  <tr><td>FWHM (arcsec)</td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td>{_sig_td(sig_fwhm_arcsec, p_fwhm_arcsec)}</tr>
-  <tr><td>Moffat β</td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td>{_sig_td(sig_beta, p_beta)}</tr>
-  <tr><td>Ellipticity</td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td>{_sig_td(sig_ell, p_ell)}</tr>
-  <tr><td>Eccentricity</td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td>{_sig_td(sig_ecc, p_ecc)}</tr>
-  <tr><td>MTF50 (cyc/px)</td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td><td></td></tr>
-  <tr><td>MTF @ Nyquist</td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td><td></td></tr>
+  <tr><td>FWHM (px) <small style="color:#555">↓ smaller = sharper</small></td><td class="{ca}">{_val_pm(pa.get("fwhm_px"), pa.get("fwhm_px_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_px"), pb.get("fwhm_px_mad"))}</td>{_sig_td(sig_fwhm_px, p_fwhm_px)}</tr>
+  <tr><td>FWHM (arcsec) <small style="color:#555">↓ smaller = sharper</small></td><td class="{ca}">{_val_pm(pa.get("fwhm_arcsec"), pa.get("fwhm_arcsec_mad"))}</td><td class="{cb}">{_val_pm(pb.get("fwhm_arcsec"), pb.get("fwhm_arcsec_mad"))}</td>{_sig_td(sig_fwhm_arcsec, p_fwhm_arcsec)}</tr>
+  <tr><td>Moffat &beta; <small style="color:#555">↑ higher = tighter wings</small></td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td>{_sig_td(sig_beta, p_beta)}</tr>
+  <tr><td>Ellipticity <small style="color:#555">↓ lower = rounder stars</small></td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td>{_sig_td(sig_ell, p_ell)}</tr>
+  <tr><td>Eccentricity <small style="color:#555">↓ lower = rounder stars</small></td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td>{_sig_td(sig_ecc, p_ecc)}</tr>
+  <tr><td>MTF50 (cyc/px) <small style="color:#555">↑ higher = sharper</small></td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td><td></td></tr>
+  <tr><td>MTF @ Nyquist <small style="color:#555">ideal ≈ 0</small></td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td><td></td></tr>
   <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td><td></td></tr>
 </table>
 <p class="footnote">&#9733;&nbsp;small (|&delta;|&ge;0.147),&nbsp;&nbsp;&#9733;&#9733;&nbsp;medium (|&delta;|&ge;0.33),&nbsp;&nbsp;&#9733;&#9733;&#9733;&nbsp;large (|&delta;|&ge;0.474);&nbsp;&nbsp;n.s.&nbsp;= p&ge;0.05;&nbsp;&nbsp;&delta;&gt;0 means {ra.label} values tend higher.</p>
@@ -1266,50 +1270,26 @@ two images to distinguish session-specific from system-wide causes.
 {img_mtf}
 <p class="caption">MTF curves for both filters overlaid, derived from the ePSF shown above.
 Higher curve = better contrast preservation at fine scales.</p>
-{_ref_psf_box}
-{_info_box('<strong>From ePSF to MTF:</strong> '
-           'The empirical PSF is first normalised to unit sum so that it represents a probability '
-           'distribution of where a point source&rsquo;s photons land on the detector. '
-           'A 2-D Fast Fourier Transform (FFT) is then applied, producing the complex-valued '
-           '<em>Optical Transfer Function</em> (OTF). The MTF is the magnitude of the OTF: '
-           'MTF(f<sub>x</sub>, f<sub>y</sub>) = |OTF(f<sub>x</sub>, f<sub>y</sub>)|, normalised '
-           'so that MTF(0, 0) = 1. Because the ePSF is built at 2&times; oversampling, the '
-           'frequency axes are divided by the oversampling factor so that the final MTF is '
-           'expressed in <strong>cycles per native image pixel</strong>, with the Nyquist limit '
-           'at exactly 0.5 cyc/px.<br><br>'
-           '<strong>Radial average:</strong> '
-           'The 2-D MTF is isotropically averaged into a 1-D curve by computing the mean MTF '
-           'value within concentric annular bins of width 1 sample, centred on the zero-frequency '
-           'origin. This azimuthal average assumes the PSF is roughly circular; if the ePSF '
-           'shows significant ellipticity, the radial curve represents the geometric mean of the '
-           'MTF along the major and minor axes and will understate the best-case resolution in '
-           'one direction.<br><br>'
-           '<strong>Interpreting the curve:</strong> '
-           'An ideal MTF starts at 1.0 (zero frequency) and decreases monotonically to 0 at '
-           'the Nyquist frequency (0.5 cycles/pixel). Optical aberrations, atmospheric seeing, '
-           'and focus errors lower the curve &mdash; especially at higher spatial frequencies. '
-           '<strong>MTF50</strong> is the spatial frequency where contrast falls to 50% &mdash; '
-           'analogous to a half-power point; higher MTF50 = sharper images. '
-           'If one filter&rsquo;s curve lies consistently above the other it delivers better '
-           'sharpness at all scales. If the curves cross, one filter is sharper at fine scales '
-           'while the other preserves mid-scale contrast better.<br><br>'
-           '<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset, '
-           'filter tilt, or optical aberrations introduced by the filter glass. A significant '
-           'MTF difference between filters that should be optically identical warrants checking '
-           'filter flatness and seating.',
-           title="Reading the MTF plot")}
+{_info_box(
+    _ref_seeing_note +
+    '<strong>From ePSF to MTF:</strong> '
+    'The ePSF is normalised to unit sum, then a 2-D FFT produces the Optical Transfer Function (OTF). '
+    'The MTF is the magnitude of the OTF, normalised to 1.0 at zero frequency. Because the ePSF is '
+    'built at 2&times; oversampling, the frequency axis is scaled so the MTF is expressed in '
+    '<strong>cycles per native image pixel</strong> with Nyquist at 0.5 cyc/px. '
+    'The 2-D MTF is then radially averaged into the 1-D curve shown; if the ePSF is elliptical the '
+    'curve represents the geometric mean of the two axes.<br><br>'
+    '<strong>Interpreting the curve:</strong> '
+    'An ideal MTF starts at 1.0 and falls monotonically to 0 at the Nyquist limit. '
+    'MTF50 (the frequency where contrast drops to 50%) is the single most useful sharpness number &mdash; '
+    'higher is sharper. If one filter&rsquo;s curve lies consistently above the other it delivers better '
+    'contrast at all spatial scales. If the curves cross, one filter is sharper at fine detail while '
+    'the other preserves broader structures better. '
+    '<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset, filter tilt, or '
+    'optical aberrations in the filter glass.',
+    title="How the MTF is derived")}
 
-{self._psf_simulation_html(ra, rb)}
-
-{_info_box('A smaller FWHM (arcsec) and higher MTF50 indicate sharper resolution &mdash; '
-           'these are the primary quality indicators for filter comparison. A higher '
-           'Moffat &beta; indicates less scattered light in the wings. Ellipticity should be '
-           'similar between filters; a large difference suggests filter tilt, substrate '
-           'wedge, or different seeing conditions between sessions. If the ePSFs show '
-           'the same asymmetric tail in both images, the cause is common to both (optics '
-           'or tracking) and does not reflect a filter quality difference &mdash; what matters '
-           'for comparison is whether the tail is <em>more pronounced</em> in one image.',
-           title="Comparing the two images")}""" + self._section_psf_aberration(ra, rb, img_a, img_b)
+{self._psf_simulation_html(ra, rb)}""" + self._section_psf_aberration(ra, rb, img_a, img_b)
 
     def _section_psf_aberration(self, ra: AnalysisResult, rb: AnalysisResult,
                                   img_a: AstroImage, img_b: AstroImage | None) -> str:
@@ -1327,6 +1307,35 @@ Higher curve = better contrast preservation at fine scales.</p>
         n_a = ab_a.get("n_stars_used", 0)
         n_b = ab_b.get("n_stars_used", 0)
 
+        def _interpret(ab: dict, label: str) -> str:
+            ci = ab.get("coma_index")
+            rf = ab.get("radial_frac")
+            cs = ab.get("collimation_circstd_deg")
+            cc = ab.get("corner_centre_ratio")
+            if ci is None:
+                return ""
+            findings = []
+            if ci is not None and rf is not None and ci > 0.5 and rf > 0.5:
+                findings.append(
+                    "pattern consistent with <strong>off-axis coma</strong> "
+                    "(elongation grows with field radius and points radially outward)")
+            if cs is not None and rf is not None and cs < 20.0 and rf > 0.4:
+                findings.append(
+                    "pattern consistent with <strong>collimation error / tilt coma</strong> "
+                    "(stars elongated in a near-uniform direction across the field)")
+            if cc is not None and cc > 1.3 and (ci is None or ci < 0.3):
+                findings.append(
+                    "pattern consistent with <strong>field curvature or defocus</strong> "
+                    "(FWHM grows toward corners without radial elongation direction)")
+            if not findings:
+                return f"<p><strong>{label}:</strong> No dominant aberration signature detected.</p>\n"
+            bullets = "".join(f"<li>{f}</li>" for f in findings)
+            return (f"<p><strong>{label}:</strong></p>"
+                    f"<ul style='margin:0.3em 0 0.8em 1.2em;padding:0;'>{bullets}</ul>\n")
+
+        interp_a = _interpret(ab_a, ra.label)
+        interp_b = _interpret(ab_b, rb.label)
+
         html = "\n<h3>Field Aberration Analysis</h3>\n"
 
         if warn_a and warn_b:
@@ -1335,6 +1344,9 @@ Higher curve = better contrast preservation at fine scales.</p>
                 title="Insufficient star coverage for aberration analysis",
                 open=True,
             )
+
+        if interp_a or interp_b:
+            html += "<h4>Interpretation</h4>\n" + interp_a + interp_b
 
         def _score_td(val, lo, hi, higher_is_bad: bool = True, fmt: str = ".3f") -> str:
             if val is None:
@@ -1438,37 +1450,6 @@ Higher curve = better contrast preservation at fine scales.</p>
                      'dependence. The Pearson&nbsp;r value shown is the coma index in the '
                      'score table above.</p>\n')
 
-        def _interpret(ab: dict, label: str) -> str:
-            ci = ab.get("coma_index")
-            rf = ab.get("radial_frac")
-            cs = ab.get("collimation_circstd_deg")
-            cc = ab.get("corner_centre_ratio")
-            if ci is None:
-                return ""
-            findings = []
-            if ci is not None and rf is not None and ci > 0.5 and rf > 0.5:
-                findings.append(
-                    "pattern consistent with <strong>off-axis coma</strong> "
-                    "(elongation grows with field radius and points radially outward)")
-            if cs is not None and rf is not None and cs < 20.0 and rf > 0.4:
-                findings.append(
-                    "pattern consistent with <strong>collimation error / tilt coma</strong> "
-                    "(stars elongated in a near-uniform direction across the field)")
-            if cc is not None and cc > 1.3 and (ci is None or ci < 0.3):
-                findings.append(
-                    "pattern consistent with <strong>field curvature or defocus</strong> "
-                    "(FWHM grows toward corners without radial elongation direction)")
-            if not findings:
-                return f"<p><strong>{label}:</strong> No dominant aberration signature detected.</p>\n"
-            bullets = "".join(f"<li>{f}</li>" for f in findings)
-            return (f"<p><strong>{label}:</strong></p>"
-                    f"<ul style='margin:0.3em 0 0.8em 1.2em;padding:0;'>{bullets}</ul>\n")
-
-        interp_a = _interpret(ab_a, ra.label)
-        interp_b = _interpret(ab_b, rb.label)
-        if interp_a or interp_b:
-            html += "<h4>Interpretation</h4>\n" + interp_a + interp_b
-
         vec_fig = self._plot_aberration_vector_field(
             ab_a, ab_b, ra.label, rb.label, img_h_a, img_w_a, img_h_b, img_w_b)
         er_fig = self._plot_radial_elongation_map(
@@ -1515,6 +1496,13 @@ Higher curve = better contrast preservation at fine scales.</p>
             img_h_b: int, img_w_b: int,
     ) -> "plt.Figure | None":
         """FWHM and eccentricity vs radial distance from field centre (1 row × 2 cols)."""
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        _FIT_COLOR = {
+            "steelblue": "lightskyblue" if _is_dark else "navy",
+            "tomato":    "lightsalmon"  if _is_dark else "firebrick",
+        }
+
         def _extract(stars, img_h, img_w):
             cx, cy = img_w / 2.0, img_h / 2.0
             ri, fwhm, ecc = [], [], []
@@ -1549,7 +1537,8 @@ Higher curve = better contrast preservation at fine scales.</p>
                     order = np.argsort(ri)
                     coeffs = np.polyfit(ri[order], vals[order], 2)
                     r_fit = np.linspace(ri.min(), ri.max(), 200)
-                    ax.plot(r_fit, np.polyval(coeffs, r_fit), color=col, lw=1.8,
+                    ax.plot(r_fit, np.polyval(coeffs, r_fit),
+                            color=_FIT_COLOR.get(col, col), lw=2.0,
                             label=f"{lbl} fit")
             if yref is not None:
                 ax.axhline(yref, color="gray", lw=1.0, ls="--", alpha=0.7,
@@ -2046,7 +2035,7 @@ Higher curve = better contrast preservation at fine scales.</p>
                             label=sim["label_b"])
             if ref_arr is not None:
                 ax_raw.plot(x, ref_arr, color="forestgreen", linewidth=1.0,
-                            linestyle="--", alpha=XS_LINE_ALPHA, label=ref_label)
+                            linestyle="-", alpha=XS_LINE_ALPHA, label=ref_label)
             if strip is None:
                 ax_raw.set_title(f"{title}  (y = {d['y_px']} px)", fontsize=9)
             ax_raw.set_ylabel("Intensity [0–1]", fontsize=8)
@@ -2064,7 +2053,7 @@ Higher curve = better contrast preservation at fine scales.</p>
                             alpha=XS_LINE_ALPHA, label=sim["label_b"])
             if ref_arr is not None:
                 ax_env.plot(x, _envelope(ref_arr), color="forestgreen", linewidth=1.4,
-                            linestyle="--", alpha=XS_LINE_ALPHA, label=ref_label)
+                            linestyle="-", alpha=XS_LINE_ALPHA, label=ref_label)
             ax_env.set_ylabel("Local contrast\n(peak − valley)", fontsize=8)
             ax_env.set_xlabel(
                 "Distance from finest bars (px, √ scale)  —  fine ← | → coarse", fontsize=8)
@@ -2660,51 +2649,36 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
             'is a more filter-specific quality indicator than the raw halo size.',
             title="What causes halos?",
         )
-        _halo_computation_box = _info_box(
-            f'For each bright unsaturated star, the background-subtracted radial intensity profile '
-            f'(median-binned in 0.5&thinsp;px annuli out to {HALO_FIT_RADIUS_PX}&thinsp;px) is fitted '
-            f'with a <em>two-component Moffat model</em>:<br>'
-            f'<code>I(r) = A<sub>core</sub> &middot; Moffat(r; &gamma;<sub>core</sub>, &alpha;<sub>core</sub>)'
-            f'             + A<sub>halo</sub> &middot; Moffat(r; &gamma;<sub>halo</sub>, &alpha;<sub>halo</sub>)</code><br>'
-            f'The fit is performed in log<sub>10</sub> space so the profile&rsquo;s wide dynamic range is '
-            f'weighted uniformly rather than being dominated by the bright core.<br><br>'
-            f'<strong>Halo / core ratio</strong> = A<sub>halo</sub> / A<sub>core</sub> &mdash; the '
-            f'amplitude of the wide Moffat component relative to the core peak. A value of 0 means no '
-            f'detectable halo; values above 0.15 indicate significant internal reflection. Because both '
-            f'amplitudes are normalised to the same star, the ratio is independent of absolute brightness '
-            f'and directly comparable between filters.<br><br>'
-            f'<strong>Halo radius</strong> = HWHM of the halo Moffat component: '
-            f'R&thinsp;=&thinsp;&gamma;<sub>halo</sub>&thinsp;&middot;&thinsp;&radic;(2<sup>1/&alpha;<sub>halo</sub></sup>&thinsp;&minus;&thinsp;1). '
-            f'If this value exceeds the {HALO_FIT_RADIUS_PX}&thinsp;px fit window it is marked '
-            f'<em>N/A</em> — the data do not yet show the halo half-power point, so the width cannot '
-            f'be reliably measured. In that case the halo/core ratio is the more reliable indicator. '
-            f'For strongly saturated stars the core is clipped and no Moffat fit is attempted; their '
-            f'halo structure is visible in the cross-sections and RDF plots instead.',
-            title="How halo/core ratio and halo radius are computed",
-        )
-        _halo_rdf_box = _info_box(
-            'For each star, the background-subtracted image is log<sub>10</sub>-transformed (compressing '
-            'the 3&ndash;5 decade dynamic range of a stellar halo into a manageable linear scale) and then '
-            'binned into concentric 1-pixel-wide annuli centred on the detected star centre. The '
-            '<em>mean</em> and <em>standard deviation</em> of the log-transformed pixel values in each '
-            'annulus are recorded, normalised so the profile starts at 1.0 (log<sub>10</sub> = 0 at '
-            'r&thinsp;=&thinsp;0), and then inverse-transformed (10<sup>x</sup>) for display on a '
-            'logarithmic intensity axis. Individual per-star profiles are stacked and averaged to produce '
-            'the aggregate curves shown below. The shaded band shows the ±1&sigma; within-annulus spread — '
-            'a wide band at a given radius means the halo is angularly asymmetric at that distance '
-            '(not a perfect ring).<br><br>'
-            '<strong>How to interpret the profile.</strong> '
-            'For an ideal star with no halo the profile follows a smooth, monotonically decreasing curve '
-            'set by the PSF shape: a Gaussian gives a downward-curving parabola on the log intensity axis; '
-            'a Moffat (more realistic for astronomical seeing) gives a gentler, power-law-like tail. '
-            'The key indicator of a halo is a <em>shoulder</em> — a point where the profile levels off, '
-            'rises slightly, or decays noticeably more slowly than the extrapolated core trend at '
-            'intermediate radii (typically 10&ndash;60 px from the star centre). This shoulder represents '
-            'the reflected light that forms the circular glow around bright stars. A profile that tracks '
-            'a smooth, featureless decay with no shoulder indicates little or no halo contribution. '
-            'Comparing the two overlaid profiles shows which filter produces more halo light at each '
-            'radius, independent of the absolute brightness of the stars used.',
-            title="Radial Distribution Function (RDF) — how it is computed and how to read it",
+        _halo_method_box = _info_box(
+            f'<strong>Fitting method.</strong> '
+            f'For each bright unsaturated star, the radial intensity profile (median-binned in '
+            f'0.5&thinsp;px annuli out to {HALO_FIT_RADIUS_PX}&thinsp;px) is fitted in '
+            f'log<sub>10</sub>&thinsp;space with a two-component Moffat model: '
+            f'<code>I(r) = A<sub>core</sub>&thinsp;&middot;&thinsp;Moffat<sub>core</sub> '
+            f'+ A<sub>halo</sub>&thinsp;&middot;&thinsp;Moffat<sub>halo</sub></code>. '
+            f'Log-space fitting weights the wide dynamic range of the profile uniformly.<br><br>'
+            f'<strong>Halo/core ratio</strong> = A<sub>halo</sub>&thinsp;/&thinsp;A<sub>core</sub>. '
+            f'A value of 0 means no detectable halo; &gt;&thinsp;0.15 indicates significant internal '
+            f'reflection. Because both amplitudes are normalised to the same star, the ratio is '
+            f'independent of brightness and directly comparable between filters. '
+            f'<strong>Halo radius</strong> is the HWHM of the halo component; if it exceeds the '
+            f'{HALO_FIT_RADIUS_PX}&thinsp;px window it is shown as <em>N/A</em> and the ratio is '
+            f'the more reliable indicator. Saturated stars are excluded from the fit but are shown '
+            f'in the cross-sections and RDF plots.<br><br>'
+            f'<strong>Radial Distribution Function (RDF) plots.</strong> '
+            f'The background-subtracted image around each star is log<sub>10</sub>-transformed, '
+            f'binned into 1-px concentric annuli, normalised to 1.0 at r&thinsp;=&thinsp;0, then '
+            f'averaged across all fitted stars. The shaded band is ±1&sigma; within each annulus '
+            f'(a wide band means the halo is asymmetric, not a perfect ring). '
+            f'<strong>How to read it:</strong> a clean filter produces a smooth, monotonically '
+            f'decreasing profile. A <em>shoulder</em> — where the curve levels off or decays '
+            f'more slowly than the core trend at 10&ndash;60&thinsp;px — indicates halo light '
+            f'from internal reflections. The filter with the lower profile at any radius produces '
+            f'less scattered light at that distance from the star.<br><br>'
+            f'<strong>Ideal values:</strong> halo/core ratio &lt;&thinsp;0.05 is excellent; '
+            f'&gt;&thinsp;0.15 indicates significant internal reflection that will reduce contrast '
+            f'on bright stars.',
+            title="Measurement methodology",
         )
 
         return f"""
@@ -2712,7 +2686,7 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
 {err}
 {_halo_causes_box}
 {optics_note}
-{_halo_computation_box}
+{_halo_method_box}
 
 <table>
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -2727,8 +2701,6 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
 </div>
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
 filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
-
-{_halo_rdf_box}
 
 {rdf_unsat_fig}
 <p class="caption">Aggregate RDF — unsaturated halo stars. Mean normalised intensity vs. radius
@@ -2756,11 +2728,7 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
 
 {sat_grid_tag}
 {"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped.</p>'}
-
-{_info_box('Halo/core ratio &lt; 0.05 is excellent; '
-           '&gt; 0.15 indicates significant internal reflection that will reduce contrast on '
-           'bright stars.',
-           title="Ideal values")}"""
+"""
 
     def _extract_cutout(self, data: np.ndarray,
                          xc: float, yc: float, half: int) -> np.ndarray:
@@ -3841,10 +3809,10 @@ The difference panel (right) shows where fine structure differs between the two 
                     f"<td class='{cpb}'>{_val(vb, '.4f')} %</td></tr>")
 
         pct_rows = "".join([
-            pct_row("Pixels &gt; 3 σ",  "pct_above_3"),
+            pct_row("Pixels &gt; 3 σ <small style='color:#555'>(detected signal)</small>",  "pct_above_3"),
             pct_row("Pixels &gt; 5 σ",  "pct_above_5"),
-            pct_row("Pixels &gt; 10 σ", "pct_above_10"),
-            pct_row("Pixels &gt; 20 σ", "pct_above_20"),
+            pct_row("Pixels &gt; 10 σ <small style='color:#555'>(reliable detail)</small>", "pct_above_10"),
+            pct_row("Pixels &gt; 20 σ <small style='color:#555'>(bright structure)</small>", "pct_above_20"),
         ])
 
         star_snr_a = _val(pa.get("star_snr_median"), ".4f")
@@ -3875,14 +3843,14 @@ The difference panel (right) shows where fine structure differs between the two 
                         f"<td class='{cpa}'>{_val(va, '.4f')} %</td>"
                         f"<td class='{cpb}'>{_val(vb, '.4f')} %</td></tr>")
             sl_pct_rows = "".join([
-                sl_pct_row("Pixels &gt; 3 σ",  "pct_above_3"),
+                sl_pct_row("Pixels &gt; 3 σ <small style='color:#555'>(detected signal)</small>",  "pct_above_3"),
                 sl_pct_row("Pixels &gt; 5 σ",  "pct_above_5"),
-                sl_pct_row("Pixels &gt; 10 σ", "pct_above_10"),
-                sl_pct_row("Pixels &gt; 20 σ", "pct_above_20"),
+                sl_pct_row("Pixels &gt; 10 σ <small style='color:#555'>(reliable detail)</small>", "pct_above_10"),
+                sl_pct_row("Pixels &gt; 20 σ <small style='color:#555'>(bright structure)</small>", "pct_above_20"),
             ])
             sl_pair_html = _img_tag(sl_pair_fig, "Starless SNR map comparison")
             starless_html = f"""
-<h3>3c. SNR — Starless Images</h3>
+<h3>3b. SNR — Starless Images</h3>
 {_info_box('★ SNR analysis repeated on the starless image(s). Stars inflate the '
            'global SNR and above-threshold percentages because bright star cores contribute many '
            'high-SNR pixels unrelated to the nebula emission. The starless values below reflect '
@@ -3907,7 +3875,7 @@ depth drives the color scale. Both images share the same scale for direct compar
         _has_xs = _sm.get("crosshair") is not None
         if _has_xs and "xs_context" in _figs:
             xs_crosshair_html = f"""
-<h3>3b. Image Cross-Section</h3>
+<h3>3c. Image Cross-Section</h3>
 {_info_box('The cross-section extracts a 1-D brightness profile along the '
            'line drawn in the viewer. The normalised profile shows relative brightness scaled to the '
            'mean signal level — use it to compare which filter captures more emission or suppresses '
@@ -3953,7 +3921,7 @@ Use this to assess absolute signal levels and dynamic range between filters.</p>
                 exp_sentence = "Relative exposure factor could not be computed (one or both SNR values invalid)."
 
             xs_snr_html = f"""
-<h3>3c. Cross-Section SNR</h3>
+<h3>3d. Cross-Section SNR</h3>
 {_info_box(f'<p><strong>Methodology:</strong> A {xs_width}-px sample window centred on the profile '
            f'peak (bright region, gold band) and profile trough (dark region, grey band) is used '
            f'to estimate signal-to-noise ratio from the raw ADU cross-section. Both images sample '
@@ -4072,20 +4040,16 @@ signal in the dark region produce a higher SNR.</p>
             'generally acceptable for narrowband work.</strong> A substantially higher factor in one image '
             'can indicate shorter individual sub-exposures or higher read noise from a different gain '
             'setting.<br><br>'
-            '<strong>Values well below 1.0</strong> do not indicate a problem. For a <strong>stacked '
-            'image</strong>, averaging N sub-exposures reduces per-pixel noise by 1/&radic;N while the mean '
-            'sky background is unchanged, so the noise factor of the stack is roughly the single-sub value '
-            'divided by &radic;N. A 100-sub stack will therefore show a noise factor around 0.1 even if '
-            'each sub was perfectly sky-limited. Very heavily stacked or narrowband images can reach '
-            'values of 0.01 or lower. In this regime the metric no longer describes the camera noise '
-            'regime; treat it instead as an integration-depth indicator &mdash; a lower value means the '
-            'noise floor is smaller relative to the sky background, regardless of cause.<br><br>'
-            '<em>Sky background in electrons</em> &mdash; When the camera gain (e&sup2;/ADU) is recorded '
+            '<strong>Values well below 1.0</strong> are normal for stacked images: stacking N frames '
+            'reduces noise by 1/&radic;N while sky background is unchanged, so the noise factor of the '
+            'stack scales accordingly. Treat very low values as an integration-depth indicator rather '
+            'than a noise-regime metric.<br><br>'
+            '<em>Sky background in electrons</em> &mdash; When the camera gain (e<sup>&minus;</sup>/ADU) is recorded '
             'in the FITS header (keyword <code>GAIN</code>, <code>EGAIN</code>, <code>CCDGAIN</code>, or '
             '<code>GAINDB</code>), &mu;<sub>sky</sub> and &sigma;<sub>sky</sub> are converted to electrons. '
             'This removes the camera-specific ADU offset and quantisation, placing both images on a '
             'physical scale that is directly comparable even when captured with different gain settings or '
-            'cameras. A sky background of, say, 500&thinsp;e&sup2; per pixel indicates that 500 sky photons '
+            'cameras. A sky background of, say, 500&thinsp;e<sup>&minus;</sup> per pixel indicates that 500 sky photons '
             '(plus dark current) accumulated per pixel during the total exposure, regardless of camera model.',
             title="Understanding the SNR metrics",
         )
@@ -4106,13 +4070,13 @@ signal in the dark region produce a higher SNR.</p>
   <tr><td>Noise factor &sigma;/&radic;&mu; &mdash; lower = sky-limited (ideal &asymp;1.0)</td>
       <td class="{cn_nf_a}">{_val(nf_a, ".3f")}</td>
       <td class="{cn_nf_b}">{_val(nf_b, ".3f")}</td></tr>
-{"" if not either_gain else f"""  <tr><td>Gain (e&sup2;/ADU, from FITS header)</td>
+{"" if not either_gain else f"""  <tr><td>Gain (e<sup>&minus;</sup>/ADU, from FITS header)</td>
       <td>{"—" if gain_a is None else _val(gain_a, ".2f")}</td>
       <td>{"—" if gain_b is None else _val(gain_b, ".2f")}</td></tr>
-  <tr><td>Sky background &mu;<sub>sky</sub> (e&sup2;) &mdash; lower is better</td>
+  <tr><td>Sky background &mu;<sub>sky</sub> (e<sup>&minus;</sup>) &mdash; lower is better</td>
       <td class="{cn_sky_e_a}">{"—" if sky_e_a is None else _val(sky_e_a, ".3g")}</td>
       <td class="{cn_sky_e_b}">{"—" if sky_e_b is None else _val(sky_e_b, ".3g")}</td></tr>
-  <tr><td>Sky noise &sigma;<sub>sky</sub> (e&sup2;) &mdash; lower is better</td>
+  <tr><td>Sky noise &sigma;<sub>sky</sub> (e<sup>&minus;</sup>) &mdash; lower is better</td>
       <td class="{cn_sky_ne_a}">{"—" if sky_ne_a is None else _val(sky_ne_a, ".3g")}</td>
       <td class="{cn_sky_ne_b}">{"—" if sky_ne_b is None else _val(sky_ne_b, ".3g")}</td></tr>"""}
 </table>
@@ -4140,9 +4104,9 @@ signal in the dark region produce a higher SNR.</p>
 Both images share the same color scale (P2&ndash;P98 of the higher-SNR image) for direct
 comparison. Bright regions have high SNR; blank sky clusters near zero.
 A uniformly brighter map indicates deeper, more signal-rich data.</p>
+{starless_html}
 {xs_crosshair_html}
-{xs_snr_html}
-{starless_html}"""
+{xs_snr_html}"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
 
@@ -4252,10 +4216,10 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         if (snr_ma.get("sky_bg_electrons") is not None
                 or snr_mb.get("sky_bg_electrons") is not None):
             snr_sky_rows += row(
-                "Sky background (e&sup2;)", snr_ma.get("sky_bg_electrons"),
+                "Sky background (e<sup>&minus;</sup>)", snr_ma.get("sky_bg_electrons"),
                 snr_mb.get("sky_bg_electrons"), fmt=".3g", higher_is_better=False)
             snr_sky_rows += row(
-                "Sky noise &sigma;<sub>sky</sub> (e&sup2;)",
+                "Sky noise &sigma;<sub>sky</sub> (e<sup>&minus;</sup>)",
                 snr_ma.get("sky_noise_electrons"), snr_mb.get("sky_noise_electrons"),
                 fmt=".3g", higher_is_better=False)
         rows += snr_sky_rows

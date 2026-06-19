@@ -35,6 +35,7 @@ gui/
   image_panel.py       Image display panel; load_path() / set_starless_path() for programmatic load
   report_inspector.py  Interactive side-by-side figure viewer
   synthetic_dialog.py  Synthetic Data Generator dialog (QMainWindow)
+  halo_dialog.py       Halo Analyzer interactive tool (QDialog); click-a-star PSF/RDF inspector
 report/
   report_builder.py    HTML report generator; consumes AnalysisResult objects
 synthetic/
@@ -55,6 +56,8 @@ synthetic/
 | `stf_stretch(data)` | `core/stretch.py` | STF midtone-balance stretch → float32 [0,1]; maps sky to ~20 % grey |
 | `load_path(path)` | `gui/image_panel.py` | Load image by path with no dialog and no starless prompt |
 | `set_starless_path(path)` | `gui/image_panel.py` | Attach a pre-generated starless FITS to the loaded main image |
+| `_extract_cutout(data, xc, yc, radius)` | `gui/halo_dialog.py` | 2r×2r patch centred on star, zero-padded at image edges |
+| `_annular_rdf(log_data, xc, yc, radius)` | `gui/halo_dialog.py` | 1-px annular mean/std in log10 space; mirrors `HaloAnalyzer._annular_stats` |
 
 ---
 
@@ -72,6 +75,20 @@ Place this **before** any loop that references `orig_color`. Dark mode is applie
 globally in `analysis_thread.run()` via `plt.style.use("dark_background")` and
 restored with `rcParams.update(_saved_params)` in the `finally` block. Never apply
 dark mode at module import time — it bleeds into unrelated figure generation.
+
+For dialogs that own a long-lived `Figure` (created at `__init__` time and reused across
+redraws), `plt.style.use("dark_background")` does **not** recolor the existing figure
+patch. After `fig.clear()` inside the dark-mode `try` block, explicitly set the patch:
+
+```python
+if _is_dark:
+    bg = matplotlib.rcParams.get("figure.facecolor", "#121212")
+    self._fig.patch.set_facecolor(bg)
+    self._canvas.setStyleSheet(f"background-color: {bg};")
+else:
+    self._fig.patch.set_facecolor("white")
+    self._canvas.setStyleSheet("")
+```
 
 ### Python string encoding — no CSS/HTML hex escapes
 
@@ -176,6 +193,10 @@ uses a different DLL layout that breaks PyInstaller hook discovery on Windows.
 | `pyqtSignal` arity mismatch silently compiles | `pyqtSignal(str, str)` vs `.emit(a, b, c)` crashes at runtime only — py_compile passes. Count signal args carefully. |
 | Single RNG shifts star positions when params change | Use a dedicated `star_rng` seeded from `n_stars`; separate `noise_rng` for sky/read noise |
 | Preview PSF too large when image is downsampled | `_star_psf` uses pixel-unit constants (coma offset, halo sigma, etc.). Pass `plate_scale / px_scale` and `px_scale=<downsample_fraction>` so all pixel constants scale correctly with the preview resolution. |
+| `secondary_xaxis` accumulates across redraws | `ax.cla()` does not remove secondary axes — always use `fig.clear()` + `fig.subplots(1, N)` when any axis has a secondary x-axis. |
+| Pre-created `Figure` stays white in dark mode | `plt.style.use("dark_background")` updates rcParams but does **not** recolor an already-constructed `Figure` object. After `fig.clear()`, explicitly set `fig.patch.set_facecolor(matplotlib.rcParams.get("figure.facecolor", "#121212"))` and `canvas.setStyleSheet(f"background-color: {bg};")` when dark mode is active; reset both to `"white"` / `""` in light mode. |
+| Circle overlay after `super().paintEvent()` needs a fresh QPainter | Calling `super().paintEvent(event)` ends the parent's painter. Create `p = QPainter(self)` on the next line to draw custom overlays; do not attempt to reuse the parent's painter object. |
+| Closure capture in `secondary_xaxis` lambdas | `lambda x: x * ps` inside a loop captures `ps` by reference. Use default-arg capture: `lambda x, p=ps: x * p` to freeze the value at definition time. |
 
 ---
 
@@ -244,6 +265,83 @@ Persistent UI state uses `QSettings("FilterImageComparator", "FilterImageCompara
 Keys in use: `last_output_dir` (main control panel), `last_data_dir` (image panel),
 `synth_output_dir` (synthetic dialog). Always save on user action (browse / generate),
 load on widget init after `_build_ui()` completes.
+
+---
+
+## Halo Analyzer Tool — Key Patterns
+
+### Thread architecture
+
+Two background threads are used; they run sequentially (detect → analyze):
+
+```text
+_DetectThread   (runs once on dialog open)
+  StarCatalogBuilder.build(img_a)  → stores Nx3 ndarray (x, y, peak)
+  StarCatalogBuilder.build(img_b)  → same for Image B (if loaded)
+  → _on_detect_done: sets self._stars_a / _stars_b, enables clicking
+
+_AnalyzeThread  (runs on each star click or radius change)
+  _fit_moffat(bgsub, xc, yc)       → Moffat2D on 25-px core (matches PSFAnalyzer size)
+  _shape_metrics(bgsub, xc, yc)    → data_properties: ecc, ell, orientation
+  _outer_stats(bgsub, xc, yc, r)   → background, SNR, peak from outer annulus
+  _annular_rdf(log_bgsub, xc, yc, r) → 1-px annular mean/std in log10 space
+  → _on_analysis_done: updates table + redraws figure
+```
+
+When a new analysis request arrives before the previous thread finishes, disconnect
+its signals then call `.quit()` — do **not** call `.wait()`, which would block the GUI.
+The old thread finishes silently; its result is discarded.
+
+### ZoomableImageLabel subclassing
+
+`_StarImageLabel` extends `ZoomableImageLabel` to add star-click selection and a circle
+overlay. Key rules:
+
+- Override `mousePressEvent`: check `not self._roi_mode and not self._line_mode` before
+  intercepting left-click; pass everything else to `super().mousePressEvent(event)`.
+- Override `paintEvent`: call `super().paintEvent(event)` first, then create a new
+  `QPainter(self)` to draw the circle — the parent's painter is already ended.
+- Store the circle in normalised coordinates `(xn, yn, rn)` so it scales correctly
+  through zoom and pan without any extra math.
+
+### Matplotlib figure in a dialog
+
+Use `matplotlib.figure.Figure()` directly (not `plt.subplots()`) to avoid touching
+global pyplot state. Redraw by clearing the whole figure each time:
+
+```python
+self._fig = Figure(figsize=(12, 3))
+self._canvas = FigureCanvasQTAgg(self._fig)
+# ...on each update:
+self._fig.clear()
+axes = self._fig.subplots(1, 4)
+# draw into axes[0..3]
+self._fig.tight_layout(pad=1.0)
+self._canvas.draw_idle()
+```
+
+`fig.clear()` is required (not `ax.cla()`) because secondary x-axes are separate
+`Axes` objects that `cla()` does not remove.
+
+### Dual x-axis (pixels + arcseconds)
+
+```python
+ps = img_a.pixel_scale   # arcsec/px; always > 0 (DEFAULT_PIXEL_SCALE if no WCS)
+if ps > 0:
+    ax_top = ax.secondary_xaxis(
+        "top",
+        functions=(lambda x, p=ps: x * p, lambda x, p=ps: x / p))
+    ax_top.set_xlabel('"', fontsize=7)
+```
+
+Use default-arg capture (`p=ps`) to freeze the plate-scale value — bare `lambda x: x * ps`
+captures `ps` by reference and breaks when used inside loops.
+
+### Star matching between A and B
+
+Images are assumed to be co-registered. The nearest star in Image B's catalog within
+50 px of the clicked A star is used. 50 px is intentionally generous — tighter thresholds
+reject valid matches when residual alignment offset exists.
 
 ---
 

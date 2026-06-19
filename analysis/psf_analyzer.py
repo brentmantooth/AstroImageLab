@@ -99,6 +99,10 @@ class PSFAnalyzer:
         ell_mad = float(mad(ell_values)) if len(ell_values) > 1 else 0.0
         ecc_mad = float(mad(ecc_values)) if len(ecc_values) > 1 else 0.0
 
+        _rms = image.background_rms
+        _noise = float(np.median(_rms)) if _rms is not None else 1.0
+        _noise = max(_noise, 1e-9)
+
         result.update({
             "n_psf_candidates":    n_psf_candidates,
             "n_outliers_rejected": n_psf_candidates - len(moffat_fits),
@@ -120,6 +124,7 @@ class PSFAnalyzer:
                     "eccentricity": ecc_by_pos.get((f["x"], f["y"])),
                     "ellipticity":  ell_by_pos.get((f["x"], f["y"])),
                     "orientation":  orient_by_pos.get((f["x"], f["y"])),  # radians, photutils convention
+                    "snr":          f["peak"] / _noise,
                 }
                 for f in moffat_fits
             ],
@@ -198,7 +203,8 @@ class PSFAnalyzer:
             fwhm = _moffat_fwhm(gamma, alpha)
             if fwhm < 0.5 or fwhm > CUTOUT_SIZE:
                 continue
-            results.append({"x": xc, "y": yc, "fwhm": fwhm, "alpha": alpha, "gamma": gamma})
+            results.append({"x": xc, "y": yc, "fwhm": fwhm, "alpha": alpha, "gamma": gamma,
+                            "peak": float(amp)})
 
         return results
 

@@ -79,6 +79,7 @@ exe = EXE(
     a.datas,
     [],
     name='AstroImageLab',
+    icon='resources/icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

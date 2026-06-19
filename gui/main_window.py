@@ -107,6 +107,10 @@ class MainWindow(QMainWindow):
         act_synth.triggered.connect(self._open_synthetic_dialog)
         tools_menu.addAction(act_synth)
 
+        act_halo = QAction("&Halo Analyzer…", self)
+        act_halo.triggered.connect(self._open_halo_dialog)
+        tools_menu.addAction(act_halo)
+
         help_menu = mb.addMenu("&Help")
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._show_about)
@@ -115,6 +119,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Slots
     # ------------------------------------------------------------------
+
+    def _open_halo_dialog(self) -> None:
+        if self._panel_a.image is None:
+            QMessageBox.information(self, "Halo Analyzer",
+                                    "Please load Image A first.")
+            return
+        from gui.halo_dialog import HaloAnalyzerDialog
+        dark = self._control.settings().get("dark_mode_graphics", False)
+        dlg = HaloAnalyzerDialog(self._panel_a.image, self._panel_b.image,
+                                  dark_mode=dark, parent=self)
+        dlg.show()
 
     def _open_synthetic_dialog(self) -> None:
         from gui.synthetic_dialog import SyntheticDialog
