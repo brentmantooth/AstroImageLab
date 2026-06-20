@@ -82,10 +82,11 @@ class TestFitsOutput:
         for kw in ("SYN_FWHM", "SYN_NSED", "SYN_SSED"):
             assert kw in hdr, f"Missing keyword {kw}"
 
-    def test_main_strl_is_false(self, synth_fits_path):
+    def test_main_strl_absent_or_false(self, synth_fits_path):
         from astropy.io import fits
         hdr = fits.getheader(synth_fits_path[0])
-        assert hdr["SYN_STRL"] == False
+        # SYN_STRL is written only on the starless companion; main file omits it
+        assert hdr.get("SYN_STRL", False) == False
 
     def test_starless_strl_is_true(self, synth_fits_path):
         from astropy.io import fits
