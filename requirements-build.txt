@@ -1,0 +1,17 @@
+# Full runtime dependencies + PyInstaller for binary builds.
+# PyQt6 must be installed via pip (not conda) — see CLAUDE.md.
+pyinstaller>=6.0
+numpy
+scipy
+matplotlib
+astropy
+photutils
+PyWavelets
+Pillow
+lz4
+zstandard
+xisf
+seaborn
+pandas
+PyQt6
+astroalign

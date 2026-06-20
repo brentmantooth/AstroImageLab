@@ -97,12 +97,44 @@ If not found, a dialog prompts you to locate one manually.
 
 ---
 
+## Getting the Application
+
+### Option A — Download a pre-built binary (no Python required)
+
+Pre-built binaries for Windows, macOS, and Linux are produced automatically by GitHub
+Actions on every push to `main`. Download the latest artifact from the
+[Actions tab](../../actions) → most recent **CI** run → **Artifacts** section.
+
+| Platform | File | How to run |
+| -------- | ---- | ---------- |
+| **Windows** | `AstroImageLab-win64.zip` | Unzip and double-click `AstroImageLab.exe` |
+| **macOS** | `AstroImageLab-macos.zip` | Unzip, then see the Gatekeeper note below |
+| **Linux** | `AstroImageLab-linux.zip` | Unzip and run `./AstroImageLab` from a terminal |
+
+**macOS — Gatekeeper:** the binary is not code-signed, so macOS will block it on first
+launch. Use either method to open it once:
+
+- Right-click the binary → **Open** → click **Open** in the security dialog, **or**
+- In Terminal: `xattr -dr com.apple.quarantine AstroImageLab`
+
+### Option B — Run from source (Python / conda)
+
+```bash
+git clone https://github.com/<your-username>/AstroImageLab.git
+cd AstroImageLab
+conda env create -f environment.yml
+conda activate astrolab
+python AstroImageLab.py
+```
+
+---
+
 ## Step-by-Step Workflow
 
 ### Step 1 — Launch the Application
 
-Run `python main.py` (or the packaged executable) from the project directory. The main
-window opens with two empty image panels side by side and the control panel below.
+Run `python AstroImageLab.py` (or the packaged executable) from the project directory.
+The main window opens with two empty image panels side by side and the control panel below.
 
 ![Application at startup with both image panels empty](resources/01_main_window.png)
 *Application at startup. Image A is on the left, Image B on the right.* Pink arrows show where to load each image. 

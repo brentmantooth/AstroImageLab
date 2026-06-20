@@ -173,11 +173,22 @@ convolved = fftconvolve(patch, psf_kernel, mode="same").astype(np.float64)
 ```bash
 conda activate astrolab
 python AstroImageLab.py          # run from source
-pyinstaller AstroImageLab.spec   # build standalone .exe
+pyinstaller AstroImageLab.spec   # build standalone binary
 ```
+
+Output binary names: `AstroImageLab.exe` (Windows), `AstroImageLab` (macOS / Linux).
+The spec post-build step automatically creates a platform-labelled zip:
+`AstroImageLab-win64.zip`, `AstroImageLab-macos.zip`, or `AstroImageLab-linux.zip`.
 
 PyQt6 **must** be installed via `pip`, not `conda` — the conda-forge PyQt6 package
 uses a different DLL layout that breaks PyInstaller hook discovery on Windows.
+
+For CI builds use `requirements-build.txt` (full runtime deps + PyInstaller + PyQt6).
+The Linux runner needs system Qt libraries before pip:
+
+```bash
+sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
+```
 
 ---
 
@@ -202,13 +213,10 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 
 ### CI
 
-`.github/workflows/ci.yml` — triggers on push/PR to `main`, runs on `windows-latest`, uses `requirements-test.txt` (no PyQt6). Add `CODECOV_TOKEN` to repo secrets to enable coverage upload.
+`.github/workflows/ci.yml` — triggers on push/PR to `main`. Two jobs:
 
-```bash
-# Expand to Mac + Linux when building those binaries:
-# Add matrix: [windows-latest, ubuntu-latest, macos-latest]
-# Add a build job: pyinstaller AstroImageLab.spec (after test job passes)
-```
+- **test** — matrix across `windows-latest`, `ubuntu-latest`, `macos-latest`; uses `requirements-test.txt` (no PyQt6). Add `CODECOV_TOKEN` to repo secrets to enable Codecov upload; coverage is flagged per OS.
+- **build** — runs after all test jobs pass (`needs: test`); same OS matrix; uses `requirements-build.txt`; uploads `AstroImageLab-{win64,macos,linux}.zip` as workflow artifacts downloadable from the Actions tab.
 
 ### Test fixture pitfalls
 
@@ -238,6 +246,8 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Pre-created `Figure` stays white in dark mode | `plt.style.use("dark_background")` updates rcParams but does **not** recolor an already-constructed `Figure` object. After `fig.clear()`, explicitly set `fig.patch.set_facecolor(matplotlib.rcParams.get("figure.facecolor", "#121212"))` and `canvas.setStyleSheet(f"background-color: {bg};")` when dark mode is active; reset both to `"white"` / `""` in light mode. |
 | Circle overlay after `super().paintEvent()` needs a fresh QPainter | Calling `super().paintEvent(event)` ends the parent's painter. Create `p = QPainter(self)` on the next line to draw custom overlays; do not attempt to reuse the parent's painter object. |
 | Closure capture in `secondary_xaxis` lambdas | `lambda x: x * ps` inside a loop captures `ps` by reference. Use default-arg capture: `lambda x, p=ps: x * p` to freeze the value at definition time. |
+| macOS binary blocked by Gatekeeper | CI-built binaries are unsigned. Users must right-click → Open, or run `xattr -dr com.apple.quarantine AstroImageLab` in Terminal. Code signing requires an Apple Developer certificate ($99/year). |
+| Linux build needs system Qt libraries | PyInstaller must be able to import PyQt6 during analysis. On `ubuntu-latest` run `sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0` before `pip install -r requirements-build.txt`. |
 
 ---
 

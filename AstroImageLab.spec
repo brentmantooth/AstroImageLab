@@ -72,6 +72,12 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+import sys as _sys
+
+# .ico is Windows-only; macOS uses .icns (only relevant for BUNDLE target),
+# and Linux ELF binaries don't embed icons at all.
+_icon = 'resources/icon.ico' if _sys.platform == 'win32' else None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -79,7 +85,7 @@ exe = EXE(
     a.datas,
     [],
     name='AstroImageLab',
-    icon='resources/icon.ico',
+    icon=_icon,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -94,17 +100,27 @@ exe = EXE(
     entitlements_file=None,
 )
 
-# Post-build: create a zip for distribution.
+# Post-build: create a platform-labelled zip for distribution.
 import os
 import shutil
-import sys
 
-spec_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv else os.getcwd()
+spec_dir = os.path.dirname(os.path.abspath(_sys.argv[0])) if _sys.argv else os.getcwd()
 dist_dir = os.path.join(spec_dir, "dist")
-exe_path = os.path.join(dist_dir, "AstroImageLab.exe")
-zip_path = os.path.join(dist_dir, "AstroImageLab-win64.zip")
 
-if os.path.exists(exe_path):
-    if os.path.exists(zip_path):
-        os.remove(zip_path)
-    shutil.make_archive(zip_path[:-4], "zip", dist_dir, "AstroImageLab.exe")
+if _sys.platform == "win32":
+    _exe_name  = "AstroImageLab.exe"
+    _zip_label = "win64"
+elif _sys.platform == "darwin":
+    _exe_name  = "AstroImageLab"
+    _zip_label = "macos"
+else:
+    _exe_name  = "AstroImageLab"
+    _zip_label = "linux"
+
+_exe_path = os.path.join(dist_dir, _exe_name)
+_zip_base = os.path.join(dist_dir, f"AstroImageLab-{_zip_label}")
+
+if os.path.exists(_exe_path):
+    if os.path.exists(_zip_base + ".zip"):
+        os.remove(_zip_base + ".zip")
+    shutil.make_archive(_zip_base, "zip", dist_dir, _exe_name)

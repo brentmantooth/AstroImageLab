@@ -28,6 +28,29 @@ All analysis runs on linear (unstretched) calibrated image data. Images with dif
 
 ---
 
+## Download
+
+Pre-built binaries are produced automatically by GitHub Actions on every push to `main` — no Python or conda required to run them.
+
+| Platform | Artifact | How to run |
+| -------- | -------- | ---------- |
+| **Windows** | `AstroImageLab-win64.zip` | Unzip and double-click `AstroImageLab.exe` |
+| **macOS** | `AstroImageLab-macos.zip` | Unzip, then see the [macOS note](#macos-gatekeeper-note) below |
+| **Linux** | `AstroImageLab-linux.zip` | Unzip and run `./AstroImageLab` from a terminal |
+
+Download the latest artifact from the [Actions tab](../../actions) → most recent **CI** run → **Artifacts** section at the bottom of the page.
+
+### macOS Gatekeeper note
+
+CI-built binaries are not code-signed. macOS Gatekeeper will block the app on first launch. To open it, use **either** of these methods:
+
+- Right-click the binary → **Open** → click **Open** in the security dialog, **or**
+- Run in Terminal: `xattr -dr com.apple.quarantine AstroImageLab`
+
+This is a one-time step per download. Code signing for seamless distribution requires an Apple Developer Program membership ($99/year) and is not currently configured.
+
+---
+
 ## Requirements
 
 ### Python
