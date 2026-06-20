@@ -1,0 +1,16 @@
+# Headless test dependencies — no PyQt6 required
+pytest>=8.0
+pytest-cov>=5.0
+pytest-timeout>=2.3
+numpy
+scipy
+matplotlib
+astropy
+photutils
+PyWavelets
+Pillow
+lz4
+zstandard
+xisf
+seaborn
+pandas

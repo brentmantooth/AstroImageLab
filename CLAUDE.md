@@ -181,6 +181,47 @@ uses a different DLL layout that breaks PyInstaller hook discovery on Windows.
 
 ---
 
+## Testing
+
+### Running tests
+
+```bash
+conda activate astrolab
+pip install pytest pytest-cov pytest-timeout   # one-time setup; not in environment.yml
+pytest tests/ -m "not slow"                   # fast suite (~90 s, 202 tests)
+pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
+pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
+```
+
+### Design principles
+
+- **Headless only** — no PyQt6 dependency in tests. Covers `analysis/`, `core/`, `synthetic/`, `report/`.
+- **Generated fixtures** — `tests/conftest.py` writes a 512×512 hand-crafted FITS (30 Gaussian stars, ~1 s) as the session fixture for all analysis tests. No binary fixtures committed to git.
+- **Slow marker** — `@pytest.mark.slow` gates tests that call `SyntheticGenerator.generate(preview=False)` (full 1920×1080 FITS, ~30 s). CI runs with `-m "not slow"`.
+- **Smallest camera for generator tests** — `"Player One — Mercury-M"` (1920×1080 full-res; 480×270 in preview mode) is the lightest camera in `synthetic/cameras.py`.
+
+### CI
+
+`.github/workflows/ci.yml` — triggers on push/PR to `main`, runs on `windows-latest`, uses `requirements-test.txt` (no PyQt6). Add `CODECOV_TOKEN` to repo secrets to enable coverage upload.
+
+```bash
+# Expand to Mac + Linux when building those binaries:
+# Add matrix: [windows-latest, ubuntu-latest, macos-latest]
+# Add a build job: pyinstaller AstroImageLab.spec (after test job passes)
+```
+
+### Test fixture pitfalls
+
+| Pitfall | Rule |
+| --- | --- |
+| Inline FITS too small to load | `_load_fits` skips HDUs where `max(shape) <= 100`. Test FITS must be at least 101×101; use 128×128 for safety. |
+| `float(mtf(array, m))` raises TypeError | `mtf()` returns a same-shape array, not a scalar. Index with `[0]` or pass a scalar input. |
+| `PSFAnalyzer.analyze()["figures"]` KeyError | `figures` is only added when `n_stars_used > 0`. Guard with `if result["n_stars_used"] > 0`. |
+| `contrast_ratios_b` always present | `SpatialDetailAnalyzer.analyze()` always includes `contrast_ratios_b: {}` even in single-image mode. It is never `None` or absent — check `not b_ratios` instead. |
+| Background2D fails on tiny images | `estimate_background()` with default `box_size=64` needs the image to be larger than the box. Any image used in analysis tests should be at least 128×128. |
+
+---
+
 ## Known Pitfalls
 
 | Pitfall | Rule |
