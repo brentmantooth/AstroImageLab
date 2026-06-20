@@ -534,8 +534,38 @@ class ImagePanel(QWidget):
         self._starless_lbl.setText(Path(path).name)
         self._starless_lbl.setStyleSheet("color: #155724;")
 
+    def _auto_detect_starless(self, img_path: Path) -> "Path | None":
+        stem = img_path.stem
+        parent = img_path.parent
+        candidates = [img_path.suffix] + [
+            e for e in (".fits", ".fit", ".fts", ".xisf", ".tiff", ".tif")
+            if e != img_path.suffix
+        ]
+        for ext in candidates:
+            p = parent / f"{stem}_starless{ext}"
+            if p.exists():
+                return p
+        return None
+
     def _ask_about_starless(self, img: AstroImage) -> None:
         from PyQt6.QtWidgets import QMessageBox
+        auto = self._auto_detect_starless(img.path)
+        if auto is not None:
+            sl = AstroImage(str(auto))
+            try:
+                sl.load()
+            except Exception as e:
+                QMessageBox.critical(self, "Load error", f"Starless auto-load failed:\n{e}")
+            else:
+                self._starless_image = sl
+                img.starless_image = sl
+                self._starless_lbl.setText(auto.name)
+                self._starless_lbl.setStyleSheet("color: #155724;")
+                QMessageBox.information(
+                    self, "Starless image auto-loaded",
+                    f"A starless version was detected and loaded automatically:\n{auto.name}",
+                )
+            return
         prefix = ""
         if img.is_color:
             prefix = ("This is a color (RGB) image. It has been converted to "

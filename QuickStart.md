@@ -77,7 +77,8 @@ contamination.
 **How to generate a starless image:**
 - Run **StarNet2**, **GraXpert** (star removal mode), or PixInsight's **StarXTerminator**
   on the final registered, calibrated stack.
-- Save with a recognisable suffix such as `_starless.fits` in the same folder as the main stack.
+- Save with a `_starless` suffix in the same folder as the main stack
+  (e.g. `image_starless.fits`). The app detects this naming pattern automatically on load.
 
 **What starless images are used for in the report:**
 | Analysis | Starless benefit |
@@ -87,8 +88,9 @@ contamination.
 | SNR Section | Side-by-side histogram comparison (dashed overlay) |
 | Edge Analysis | Optional — uses starless if loaded, otherwise main image |
 
-The app prompts you to load a starless version immediately after each main image loads —
-have the file ready in the same folder before you start.
+After each main image loads, the app automatically searches the same folder for a file
+named `<stem>_starless.<ext>`. If found, it loads silently and a confirmation appears.
+If not found, a dialog prompts you to locate one manually.
 
 ![Narrowband image with stars (left) and its starless version (right)](resources/00b_starless_example.png)
 *A narrowband image alongside its starless counterpart.*
@@ -115,18 +117,20 @@ window opens with two empty image panels side by side and the control panel belo
    `.fts`, `.xisf`
 3. The image loads and displays with an auto-stretch applied.
 
-**Starless version prompt**
+#### Starless version (automatic detection)
 
-Immediately after loading, a dialog asks:
+Immediately after loading, the app searches the same folder for a companion file named
+`<stem>_starless.<ext>` (e.g. `NGC6992_Ha_starless.fits` alongside `NGC6992_Ha.fits`).
 
-> *"Do you have a starless version of this image?"*
-
-- Click **Yes** → a second file dialog opens; select the starless stack.
-- Click **No** → starless analysis is skipped for this image (Power Spectrum and Spatial
-  Detail will still run using the main image, but star contamination will be present).
+- **Found automatically** → the starless image loads silently and a brief confirmation
+  dialog appears. The starless filename turns green in the panel header.
+- **Not found** → a dialog asks *"Do you have a starless version of this image?"*
+  Click **Yes** to browse for one manually, or **No** to skip starless for this image
+  (Power Spectrum and Spatial Detail will still run using the main image, but star
+  contamination will be present).
 
 ![Starless version prompt](resources/03_starless_prompt.png)
-*The starless prompt appears immediately after the main image loads.*
+*The manual prompt appears only when no _starless companion file is found automatically.*
 
 After loading (with or without a starless version), Image A is displayed. The panel header
 shows the filename and starless status (cyan arrows).
