@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import matplotlib.figure
 
+
+APP_VERSION = "0.0.6"       # semver string; bump on each GitHub release tag
+
 # === CONSTANTS ===
 
 MIN_STAR_SNR = 30.0
@@ -23,7 +26,7 @@ EDGE_ROI_MAP_INDICATOR_PX = 500   # px; full width of the ROI indicator box draw
 FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); default for UI
 GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
 RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation
-POWER_SPECTRUM_NPIX = 256
+POWER_SPECTRUM_NPIX = 1024
 
 STD_KERNEL_SIZES = (5, 15, 31)
 LOG_SIGMAS = (1.5, 3.0, 6.0)
@@ -32,12 +35,12 @@ WAVELET_LEVELS = 4
 
 XS_LINE_ALPHA = 0.8   # alpha for all cross-section profile lines in reports
 XS_SNR_REGION_WIDTH = 15   # px; width of bright/dark sample region for cross-section SNR
-EPSF_MAX_STARS = 500   # maximum candidate stars passed to EPSFBuilder; limits computation time
+EPSF_MAX_STARS = 600   # maximum candidate stars passed to EPSFBuilder; limits computation time
 SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension cropped from perimeter in Section 8 display maps
 SECTION8_ANALYSIS_CMAP = "viridis"     # colormap for Section 8 A/B analysis map panels (std, LoG, wavelet)
 
 PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
-PSF_SPATIAL_MAP_SMOOTH_SIGMA = 2.0   # Gaussian smoothing sigma (px) applied to spatial maps before display
+PSF_SPATIAL_MAP_SMOOTH_SIGMA = 5.0   # Gaussian smoothing sigma (px) applied to spatial maps before display
 LABEL_MAX_LEN = 30   # characters; filenames longer than this are replaced with "Image A"/"Image B" in all plots and legends
 SPLASH_DURATION_MS = 4000   # ms; minimum time the splash screen stays visible on startup
 REF_SEEING_ARCSEC = 3.0     # arcsec; reference "good seeing" FWHM for the benchmark PSF in PSF/MTF reports

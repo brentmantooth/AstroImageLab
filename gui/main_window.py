@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QMessageBox, QFileDialog, QPushButton,
@@ -26,6 +26,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        self._start_update_check()
 
     # ------------------------------------------------------------------
     # UI layout
@@ -112,6 +113,10 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(act_halo)
 
         help_menu = mb.addMenu("&Help")
+        act_quickstart = QAction("&Quick Start Guide", self)
+        act_quickstart.triggered.connect(self._open_quickstart)
+        help_menu.addAction(act_quickstart)
+        help_menu.addSeparator()
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
@@ -352,14 +357,32 @@ class MainWindow(QMainWindow):
         self._control.set_run_enabled(True)
         QMessageBox.critical(self, "Analysis error", msg)
 
+    def _start_update_check(self) -> None:
+        from core.update_checker import UpdateCheckerThread
+        from core.models import APP_VERSION
+        self._update_thread = UpdateCheckerThread(APP_VERSION, parent=self)
+        self._update_thread.update_available.connect(self._on_update_available)
+        self._update_thread.start()
+
+    def _on_update_available(self, current: str, latest: str) -> None:
+        self.statusBar().showMessage(
+            f"Update available: v{latest}  (you have v{current})  —  "
+            f"github.com/brentmantooth/AstroImageLab/releases",
+            0,  # 0 = persistent until cleared
+        )
+
+    def _open_quickstart(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://github.com/brentmantooth/AstroImageLab/blob/main/QuickStart.md"))
+
     def _show_about(self) -> None:
+        from core.models import APP_VERSION
         QMessageBox.about(
             self,
-            "Filter Image Comparator",
-            "<b>Filter Image Comparator</b><br>"
-            "Astrophotography narrowband filter characterisation tool.<br><br>"
+            "Astro Image Lab",
+            f"<b>Astro Image Lab</b> v{APP_VERSION}<br>"
+            "Astrophotography Image characterisation tool to compare images.<br><br>"
             "Metrics: PSF/MTF · Halo · Ghost · Edge · Power spectrum · "
             "Spatial detail (std / LoG / wavelet)<br><br>"
-            "Supports FITS and XISF input formats.<br><br>"
+            "Supports FITS, XISF, TIFF input formats.<br><br>"
             "Developed by: Brent Mantooth (bmantooth@gmail.com)",
         )

@@ -2,10 +2,9 @@
 
 ## Overview
 
-Astro Image Lab is a dual-image narrowband filter characterisation tool for astrophotography.
+Astro Image Lab is a dual-image characterisation tool for astrophotography.
 Load two calibrated image stacks of the same sky target (captured through different filters,
-different cameras, or different conditions), and the tool produces a side-by-side comparison
-report covering:
+different cameras, or different conditions), and the tool produces a side-by-side comparison report covering:
 
 - **PSF / MTF** — star size, shape, and resolution limit
 - **Halo analysis** — scattering around bright stars
@@ -20,11 +19,11 @@ Output is an HTML or PDF report and an interactive Report Inspector window.
 
 ## Prerequisites
 
-- Two FITS or XISF image stacks (`.fits`, `.fit`, `.fts`, `.xisf`) of the **same sky target**,
+- Two FITS, XISF, TIFF image stacks (`.fits`, `.fit`, `.fts`, `.xisf`, `.tiff`, `.tif`) of the **same sky target**,
   registered and cropped to a common frame — see [Image Preparation](#image-preparation-before-you-open-the-app) below
 - **Highly recommended:** starless versions of each image (generated with StarNet2,
-  GraXpert, StarXTerminator, or similar)
-- Filter bandwidth in nm for each image (from the filter spec sheet — e.g. `3` for a 3 nm Hα filter)
+  GraXpert, StarXTerminator, SyQon Starless, or similar)
+- If this is comparing two narrowband filters, the bandwidth in nm for each image (from the filter spec sheet — e.g. `3` for a 3 nm Hα filter)
 - Filter thickness in mm for each image (from the filter spec sheet — typically 1–3 mm)
 - An output folder with write access
 
@@ -75,7 +74,7 @@ to compare filter performance on the nebula itself. Starless images remove this
 contamination.
 
 **How to generate a starless image:**
-- Run **StarNet2**, **GraXpert** (star removal mode), or PixInsight's **StarXTerminator**
+- Run **StarNet2**, **GraXpert** (star removal mode), or **StarXTerminator**, or SyQon Starless on each of your final registered stacks.
   on the final registered, calibrated stack.
 - Save with a `_starless` suffix in the same folder as the main stack
   (e.g. `image_starless.fits`). The app detects this naming pattern automatically on load.

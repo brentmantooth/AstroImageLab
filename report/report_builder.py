@@ -2546,6 +2546,17 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
+<p style="border-left:4px solid #e6a817;background:#fdf6e3;padding:0.6em 0.9em;margin-bottom:1em;border-radius:3px;">
+  <strong>Note on deconvolution tools:</strong> The ePSF and detail analysis in this section
+  are derived from star shape. If you applied deconvolution software such as
+  <em>BlurXTerminator</em>, <em>SyQon Parallax</em>, or similar tools, be aware that some of
+  these modify star shape independently of how they sharpen diffuse structure like nebula detail.
+  The convolved test-chart simulation below therefore reflects the measured star-based PSF and
+  may not accurately represent the sharpness of extended nebula structure in your image.
+  <strong>Section&nbsp;8 — Spatial Detail Comparison</strong> provides metrics that are
+  independent of star shape and will give a more accurate picture of diffuse-detail contrast and
+  resolution.
+</p>
 <p>
   <strong>How this simulation works:</strong> During PSF analysis, the empirical Point Spread
   Function (ePSF) is built by aligning and stacking the pixel profiles of the brightest, most
