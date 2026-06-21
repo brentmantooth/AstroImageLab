@@ -16,12 +16,27 @@ from PyQt6.QtGui import QImage, QPainter, QPen, QColor, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QProgressBar, QSpinBox, QSplitter, QTableWidget,
-    QTableWidgetItem, QHeaderView, QWidget,
+    QTableWidgetItem, QHeaderView, QTextEdit, QWidget,
 )
 
 from core.astro_image import AstroImage
 from core.stretch import normalize_for_display
 from gui.image_panel import ZoomableImageLabel
+
+
+_PROCESSING_NOTES_HTML = """
+<b>Processing notes</b>
+<p style="margin:2px 0 3px 0"><b>Image panels</b> show a raw (non-background-subtracted)
+cutout. All quantitative analysis uses a global 2D background map (photutils
+<i>Background2D</i>, 64×64 px mesh) subtracted from the full image first.</p>
+<p style="margin:2px 0 3px 0"><b>PSF fit &amp; shape metrics</b> use a fixed 25×25 px
+window regardless of sample radius. An additional local correction (median of the
+outer 3-px border ring) is subtracted before fitting to remove nebula gradients.</p>
+<p style="margin:2px 0 0px 0"><b>Background (ADU)</b> is the median of the outer
+annulus (r ≥ 70% of sample radius) on the <i>background-subtracted</i> image —
+a residual, not the raw sky level. It will differ from sky values in the main report.
+SNR = peak (r &lt; 30%) ÷ σ(outer annulus).</p>
+"""
 
 
 def _moffat_fwhm(gamma: float, alpha: float) -> float:
@@ -553,7 +568,7 @@ class _AnalyzeThread(QThread):
             return {
                 "ecc":    float(props.eccentricity.value),
                 "ell":    float(props.ellipticity.value),
-                "orient": float(props.orientation.value),   # degrees in photutils 3.x
+                "orient": float(props.orientation.value) % 180,   # degrees in photutils 3.x; normalised to [0, 180)
             }
         except Exception:
             return None
@@ -662,7 +677,20 @@ class HaloAnalyzerDialog(QDialog):
         mid_splitter.addWidget(img_container)
 
         self._table = self._build_table()
-        mid_splitter.addWidget(self._table)
+
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
+        right_layout.addWidget(self._table, stretch=1)
+
+        self._method_box = QTextEdit()
+        self._method_box.setReadOnly(True)
+        self._method_box.setHtml(_PROCESSING_NOTES_HTML)
+        self._method_box.setMaximumHeight(150)
+        right_layout.addWidget(self._method_box, stretch=0)
+
+        mid_splitter.addWidget(right_widget)
         mid_splitter.setSizes([750, 350])
 
         # --- Vertical splitter: middle area above, matplotlib figure below ---
