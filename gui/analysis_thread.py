@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import base64 as _base64
+import numpy as np
 import concurrent.futures
 from datetime import datetime as _dt
 import time
@@ -406,7 +407,10 @@ class AnalysisThread(QThread):
                 result: AnalysisResult) -> bool:
         try:
             import astroalign as aa
-            aligned_data, _ = aa.register(img_a.data, img_b.data)
+            aligned_data, _ = aa.register(
+                np.ascontiguousarray(img_a.data, dtype=np.float64),
+                np.ascontiguousarray(img_b.data, dtype=np.float64),
+            )
             img_a.data = aligned_data
             return True
         except Exception as e:
