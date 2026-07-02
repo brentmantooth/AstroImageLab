@@ -36,6 +36,29 @@ def _inspector_display(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
     return arr
 
 
+def _inspector_linear(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
+    """Return pre-stretch linear data as float32 [0, 1], downsampled so max dimension ≤ max_dim.
+
+    Integer data (uint16 ADUs) is divided by the dtype's max representable value.
+    PixInsight float32 output is already in [0, 1] and is clipped but not rescaled.
+    Stored as [0, 1] so the inspector's existing >1.5 guard never fires.
+    """
+    arr = img.data.astype(np.float32)
+    if img.original_dtype is not None and np.issubdtype(img.original_dtype, np.integer):
+        arr = arr / float(np.iinfo(img.original_dtype).max)
+    else:
+        hi = float(arr.max())
+        if hi > 1.0:
+            arr = arr / hi
+    arr = np.clip(arr, 0.0, 1.0)
+    h, w = arr.shape[:2]
+    scale = min(1.0, max_dim / max(h, w))
+    if scale < 1.0:
+        pil = _PILImage.fromarray(arr)   # PIL infers mode='F' for float32 2-D arrays
+        arr = np.asarray(pil.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS))
+    return arr
+
+
 
 def _make_moffat_kernel(fwhm_px: float, beta: float = REF_SEEING_BETA,
                          size: int | None = None) -> np.ndarray:
@@ -594,6 +617,14 @@ class ReportBuilder:
             orig_opts["Image B"] = "display_b"
         _add_options_entry("Input Images", "Original", orig_opts)
 
+        # Linear (pre-stretch) counterparts — float32 [0, 1]
+        _add("linear_a", _inspector_linear(image_a))
+        lin_opts: dict[str, str] = {"Image A": "linear_a"}
+        if image_b is not None:
+            _add("linear_b", _inspector_linear(image_b))
+            lin_opts["Image B"] = "linear_b"
+        _add_options_entry("Input Images", "Original (linear)", lin_opts)
+
         sl_opts: dict[str, str] = {}
         if image_a.starless_image is not None:
             _add("display_sl_a", _inspector_display(image_a.starless_image))
@@ -603,6 +634,16 @@ class ReportBuilder:
             sl_opts["Image B"] = "display_sl_b"
         if sl_opts:
             _add_options_entry("Input Images", "Starless", sl_opts)
+
+        lin_sl_opts: dict[str, str] = {}
+        if image_a.starless_image is not None:
+            _add("linear_sl_a", _inspector_linear(image_a.starless_image))
+            lin_sl_opts["Image A"] = "linear_sl_a"
+        if image_b is not None and image_b.starless_image is not None:
+            _add("linear_sl_b", _inspector_linear(image_b.starless_image))
+            lin_sl_opts["Image B"] = "linear_sl_b"
+        if lin_sl_opts:
+            _add_options_entry("Input Images", "Starless (linear)", lin_sl_opts)
 
         # ── PSF / MTF ─────────────────────────────────────────────────────────
         pa = result_a.psf_metrics or {}

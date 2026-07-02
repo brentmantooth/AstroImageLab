@@ -537,20 +537,22 @@ class _ProfileCanvas(QWidget):
                          dist_b: np.ndarray | None, prof_b: np.ndarray | None,
                          label_a: str, label_b: str,
                          normalized: bool = True,
-                         subtract_median: bool = False) -> None:
+                         subtract_median: bool = False,
+                         is_linear: bool = False) -> None:
         self._ax.cla()
         self._ax.plot(dist_a, prof_a, color="steelblue", lw=1.2, label=label_a)
         if dist_b is not None and prof_b is not None:
             self._ax.plot(dist_b, prof_b, color="tomato", lw=1.2, label=label_b)
         self._ax.set_xlabel("Distance (px)", fontsize=8)
+        lin = " (linear)" if is_linear else ""
         if normalized and subtract_median:
-            ylabel = "Normalized, bg-subtracted"
+            ylabel = f"Normalized, bg-subtracted{lin}"
         elif normalized:
-            ylabel = "Normalized intensity"
+            ylabel = f"Normalized{lin}"
         elif subtract_median:
-            ylabel = "Background-subtracted"
+            ylabel = f"Background-subtracted{lin}"
         else:
-            ylabel = "Value"
+            ylabel = f"Linear value [0–1]" if is_linear else "Value"
         self._ax.set_ylabel(ylabel, fontsize=8)
         self._ax.legend(fontsize=7, loc="upper right")
         self._ax.grid(True, alpha=0.25)
@@ -584,6 +586,7 @@ class ReportInspector(QMainWindow):
         self._current_arr_a: np.ndarray | None = None
         self._current_arr_b: np.ndarray | None = None
         self._current_shape: tuple | None = None
+        self._current_is_linear: bool = False
 
         self._build_ui()
         self._populate_section_combo()
@@ -846,6 +849,7 @@ class ReportInspector(QMainWindow):
             return
         normalized      = self._normalize_check.isChecked()
         subtract_median = self._subtract_median_check.isChecked()
+        is_linear       = self._current_is_linear
 
         dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1, normalize=False)
         if subtract_median:
@@ -859,7 +863,8 @@ class ReportInspector(QMainWindow):
             self._profile_canvas.update_profiles(
                 dist_a, prof_a, None, None,
                 self._left_combo.currentText(), "",
-                normalized=normalized, subtract_median=subtract_median)
+                normalized=normalized, subtract_median=subtract_median,
+                is_linear=is_linear)
             return
 
         # Scale line coordinates to the right panel's pixel space if sizes differ.
@@ -884,7 +889,8 @@ class ReportInspector(QMainWindow):
             dist_a, prof_a, dist_b, prof_b,
             self._left_combo.currentText(),
             self._right_combo.currentText(),
-            normalized=normalized, subtract_median=subtract_median)
+            normalized=normalized, subtract_median=subtract_median,
+            is_linear=is_linear)
 
     def _on_normalize_changed(self, _state: int) -> None:
         if self._image_canvas._p0 is not None and self._image_canvas._p1 is not None:
@@ -913,6 +919,7 @@ class ReportInspector(QMainWindow):
         if key_left is None or key_right is None:
             return
 
+        self._current_is_linear = key_left.startswith("linear_")
         raw_left = _get_array(self._npz, key_left)
         if raw_left is None:
             return
