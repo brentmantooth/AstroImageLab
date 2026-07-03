@@ -12,6 +12,7 @@ dependencies:
     - matplotlib
     - astropy
     - photutils
+    - bottleneck
     - PyWavelets
     - astroalign
     - Pillow

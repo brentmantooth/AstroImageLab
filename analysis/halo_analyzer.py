@@ -3,6 +3,10 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+try:
+    import bottleneck as bn
+except ImportError:
+    bn = np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -92,7 +96,7 @@ class HaloAnalyzer:
             result["star_data"] = per_star
 
             common_r = profiles[0][0]
-            stacked = np.median(
+            stacked = bn.median(
                 np.array([np.interp(common_r, p[0], p[1]) for p in profiles]),
                 axis=0
             )
@@ -327,9 +331,9 @@ class HaloAnalyzer:
         all_stds  = np.array(stacked_stds)
         return {
             "rdf_radii":    r_ref,
-            "rdf_mean":     np.nanmean(all_means, axis=0),
-            "rdf_std":      np.nanmean(all_stds,  axis=0),   # avg per-bin σ
-            "rdf_star_std": np.nanstd(all_means,  axis=0),   # star-to-star σ
+            "rdf_mean":     bn.nanmean(all_means, axis=0),
+            "rdf_std":      bn.nanmean(all_stds,  axis=0),   # avg per-bin σ
+            "rdf_star_std": bn.nanstd(all_means,  axis=0),   # star-to-star σ
             "rdf_n_stars":  len(stacked_means),
         }
 

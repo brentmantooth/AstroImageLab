@@ -5,6 +5,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+try:
+    import bottleneck as bn
+except ImportError:
+    bn = np
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64
@@ -79,7 +83,7 @@ class SNRAnalyzer:
 
         # --- Sky background level ----------------------------------------
         # Median of the 2D background model in ADU; lower = darker sky.
-        background_median = (float(np.median(image.background.background))
+        background_median = (float(bn.median(image.background.background))
                              if image.background is not None else None)
 
         # --- Camera gain from FITS header --------------------------------

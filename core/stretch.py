@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+try:
+    import bottleneck as bn
+except ImportError:
+    bn = np
 
 
 def normalize_unit_interval(data: np.ndarray) -> np.ndarray:
@@ -44,8 +48,8 @@ def stf_stretch(data: np.ndarray,
     finite = norm[np.isfinite(norm)]
     if finite.size == 0:
         return np.zeros_like(norm, dtype=np.float32)
-    med = float(np.median(finite))
-    mad = float(np.median(np.abs(finite - med)))
+    med = float(bn.median(finite))
+    mad = float(bn.median(np.abs(finite - med)))
     c = med + shadow_clip * 1.4826 * mad
     c = float(np.clip(c, 0.0, 1.0))
     if not np.isfinite(c):
@@ -87,8 +91,8 @@ def stf_stretch_matched(data: np.ndarray, ref: np.ndarray) -> np.ndarray:
     finite_ref = norm_ref[np.isfinite(norm_ref)]
     if finite_ref.size == 0:
         return norm_data
-    med = float(np.median(finite_ref))
-    mad = float(np.median(np.abs(finite_ref - med)))
+    med = float(bn.median(finite_ref))
+    mad = float(bn.median(np.abs(finite_ref - med)))
     c = float(np.clip(med - 2.8 * 1.4826 * mad, 0.0, 1.0 - 1e-6))
     denom = 1.0 - c
     if denom <= 0.0:
