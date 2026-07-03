@@ -156,6 +156,40 @@ from scipy.signal import fftconvolve
 convolved = fftconvolve(patch, psf_kernel, mode="same").astype(np.float64)
 ```
 
+### Large-array reductions — prefer bottleneck
+
+`bottleneck` (conda-forge) provides drop-in replacements for the numpy NaN-aware
+and median functions that are substantially faster on large arrays (full-image or
+background-map sized). Use it for any reduction that operates on arrays with
+`size > ~10 000` elements. Always import with a transparent fallback:
+
+```python
+try:
+    import bottleneck as bn
+except ImportError:
+    bn = np   # transparent fallback; bn = np must come after import numpy as np
+```
+
+**Use `bn.*` instead of `np.*` for these functions on large arrays:**
+
+| numpy | bottleneck | Notes |
+| --- | --- | --- |
+| `np.median(a)` | `bn.median(a)` | Supports `axis=` parameter |
+| `np.nanmedian(a)` | `bn.nanmedian(a)` | Supports `axis=` parameter |
+| `np.nanmean(a, axis=)` | `bn.nanmean(a, axis=)` | NaN-aware row/col aggregation |
+| `np.nanstd(a, axis=)` | `bn.nanstd(a, axis=)` | Same default `ddof=0` as numpy |
+| `np.nansum(a)` | `bn.nansum(a)` | Only worthwhile when NaNs are actually present |
+
+**Do not replace:**
+
+- `np.nanpercentile` / `np.percentile` — bottleneck has no equivalent.
+- Any reduction on arrays with fewer than ~1 000 elements — call overhead dominates.
+
+**Currently in use:** `core/stretch.py` (stf_stretch, stf_stretch_matched),
+`analysis/snr_analyzer.py` (background model median),
+`analysis/halo_analyzer.py` (stacked radial profiles, RDF nanmean/nanstd),
+`analysis/image_filters.py` (wavelet MAD noise estimate).
+
 ---
 
 ## Collaboration Rules
@@ -248,6 +282,8 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Closure capture in `secondary_xaxis` lambdas | `lambda x: x * ps` inside a loop captures `ps` by reference. Use default-arg capture: `lambda x, p=ps: x * p` to freeze the value at definition time. |
 | macOS binary blocked by Gatekeeper | CI-built binaries are unsigned. Users must right-click → Open, or run `xattr -dr com.apple.quarantine AstroImageLab` in Terminal. Code signing requires an Apple Developer certificate ($99/year). |
 | Linux build needs system Qt libraries | PyInstaller must be able to import PyQt6 during analysis. On `ubuntu-latest` run `sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0` before `pip install -r requirements-build.txt`. |
+| `PowerSpectrumAnalyzer` crashes on images smaller than 1024 px | `POWER_SPECTRUM_NPIX = 1024`. The auto-select loop is empty when `min(h, w) < 1024`; the fallback produces negative slice indices → non-square region → `_apply_window` shape mismatch. Fix: `N = min(N, h, w)` before the loop, add `+1` to loop upper bounds, clamp fallback with `max(0, ...)`. |
+| `sigma_clip` mask is scalar `False` when nothing is clipped | `clipped.mask` is `np.ma.nomask` (== `False`) when no values are clipped. `region[False]` silently writes only the first row. Use `np.ma.getmaskarray(clipped)` to get a full bool array, then guard with `.any()`. |
 
 ---
 
@@ -393,6 +429,72 @@ captures `ps` by reference and breaks when used inside loops.
 Images are assumed to be co-registered. The nearest star in Image B's catalog within
 50 px of the clicked A star is used. 50 px is intentionally generous — tighter thresholds
 reject valid matches when residual alignment offset exists.
+
+---
+
+## Spatial Target Generator — Key Patterns
+
+### Purpose and workflow
+
+`gui/spatial_target_dialog.py` + `synthetic/target_generator.py`
+
+Generates a 4-column × 3-row grid of calibrated test zones at known spatial frequencies,
+always as a clean/degraded FITS pair. Load clean → Image A and degraded → Image B to
+calibrate the spatial-detail metrics against known inputs.
+
+### Target signal chain
+
+```text
+SpatialTargetDialog.targets_generated = pyqtSignal(str, str, str)  # clean_path, degraded_path, mode
+  → MainWindow._on_target_generated(clean_path, degraded_path, mode)
+      # mode: "clean_a_deg_b" | "deg_a_clean_b" | "deg_a" | "deg_b" | ""
+```
+
+`_TargetThread.finished = pyqtSignal(str, str)` (clean, degraded) feeds `_on_gen_done`
+which then emits the three-arg `targets_generated` signal.
+
+### Target return types
+
+`SpatialTargetGenerator.generate(params, preview=False)`:
+
+- `preview=True` → `np.ndarray` (float32, degraded image at reduced resolution)
+- `preview=False` → `tuple[str, str]` (clean_path, degraded_path)
+
+### Zone layout
+
+```text
+Row 0: Sine H  f=0.04 | Sine H  f=0.08 | Sine H  f=0.16 | Sine H  f=0.32  (c/px)
+Row 1: Square H  0.04 | Square H  0.08 | Square H  0.16 | Square H  0.32
+Row 2: Sine V  0.08  | Sine 45°  0.08 | Siemens star   | Slant edge ~5°
+```
+
+Column frequencies align with wavelet levels: 0.04→L4, 0.08→L3, 0.16→L2, 0.32→L1.
+
+### Contrast ramp
+
+Each zone ramps Michelson contrast linearly from `contrast_min` (top edge) to
+`contrast_max` (bottom edge). At any horizontal strip, all four columns share
+the same contrast — enabling direct cross-frequency comparison. Params:
+`contrast_min`, `contrast_max` (both 0–1, default 0.02 / 0.50).
+
+### FITS keywords
+
+`INSTRUME="SpatialTarget"`, `EGAIN=1.0`, `GAIN=1.0`, `TGT_TYPE`, `TGT_ROWS`,
+`TGT_COLS`, `TGT_CMIN`, `TGT_CMAX`, `TGT_SKY`, `TGT_CLEN` (bool: clean flag),
+per-zone `TGT_{r}{c}F` / `TGT_{r}{c}W`. Optional: `TGT_FWHM`, `TGT_BETA`, `TGT_RN`.
+No `FOCALLEN`, `APTDIA`, `FOCRATIO`, `XPIXSZ`, `EXPTIME` — these are set from
+`AstroImage` defaults (pixel scale = `DEFAULT_PIXEL_SCALE`).
+
+### Power spectrum on spatial target images
+
+The power spectrum auto-selects one square ROI — not the whole zone grid. The result
+reflects whichever zone(s) fall inside that square. Use the explicit crosshair ROI
+(user-drawn in the image panel) to target a specific zone for a focused power spectrum.
+The frequency axis is always cycles/pixel regardless of ROI size.
+
+### QSettings key
+
+`"target_output_dir"` (separate from the synthetic dialog's `"synth_output_dir"`).
 
 ---
 

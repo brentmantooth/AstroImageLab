@@ -3624,6 +3624,18 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
                         f"<td class='{ca}'>{_val(va)}</td>"
                         f"<td class='{cb}'>{_val(vb)}</td></tr>")
 
+        # Michelson contrast table
+        mc_a = sm.get("michelson_contrast_a", {})
+        mc_b = sm.get("michelson_contrast_b", {})
+        mc_rows = ""
+        for ks in sorted(set(list(mc_a.keys()) + list(mc_b.keys()))):
+            va = mc_a.get(ks)
+            vb = mc_b.get(ks)
+            ca, cb = _better_worse_class(va, vb)
+            mc_rows += (f"<tr><td>{ks} px</td>"
+                        f"<td class='{ca}'>{_val(va, '.4f')}</td>"
+                        f"<td class='{cb}'>{_val(vb, '.4f')}</td></tr>")
+
         # Wavelet SNR table
         snr_a = sm.get("wavelet_snr_a", {})
         snr_b = sm.get("wavelet_snr_b", {})
@@ -3790,7 +3802,41 @@ A filter preserving more fine detail shows brighter, more defined boundaries at 
 {paired_figs_for("wavelet_level", "xs_wavelet_level")}
 <p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
 diverging colourmap), each followed by its cross-section profile.
-The difference panel (right) shows where fine structure differs between the two filters.</p>"""
+The difference panel (right) shows where fine structure differs between the two filters.</p>
+
+<h3>8e. Michelson Contrast Maps</h3>
+{_info_box(
+    '<p><strong>Formula:</strong> '
+    'C(x, y) = (I<sub>max</sub> − I<sub>min</sub>)'
+    ' / (I<sub>max</sub> + I<sub>min</sub> + ε), '
+    'where I<sub>max</sub> and I<sub>min</sub> are the maximum and minimum pixel values '
+    'within a K × K local neighbourhood. '
+    'Output is bounded in [0, 1]: 0 = flat region (no local contrast), '
+    '1 = maximum local contrast.</p>'
+    '<p><strong>Scalar metric (table below):</strong> The maximum Michelson value '
+    'within the analysis region. This captures the finest local contrast the image achieves '
+    '— a higher maximum indicates finer structure survives at that scale.</p>'
+    '<p><strong>Kernel sizes:</strong> Small kernels (3 px) are sensitive to '
+    'sub-pixel-scale contrast and noise. Medium kernels (5 px) reflect fine nebula '
+    'filaments and thread-like structure. Large kernels (9 px) capture coarser '
+    'structural contrast such as knots and shell edges.</p>'
+    '<p><strong>Interpreting filter comparisons:</strong> '
+    'A narrowband filter preserving fine emission filaments will show higher Michelson '
+    'contrast in nebula regions at small kernel sizes. If both images show max values near '
+    '1.0 at all scales, the ROI likely contains stars — select a star-free nebula region '
+    'for a more discriminating comparison. Maps use a starless image when one is available. '
+    'Colour maps are displayed on a linear [0, 1] scale; no gamma compression is applied '
+    'because the values are already bounded.</p>',
+    title="Michelson contrast")}
+<table>
+  <tr><th>Kernel size</th><th>{ra.label} (max C)</th><th>{rb.label} (max C)</th></tr>
+  {mc_rows}
+</table>
+{figs_for("michelson_")}
+<p class="caption">Per-pixel Michelson contrast maps at each kernel size (linear colour
+scale, viridis, shared across both panels). Brighter regions have higher local contrast at
+that neighbourhood scale. The difference panel (A−B) highlights where one image
+achieves greater local contrast. Values near 1.0 indicate strong brightness transitions.</p>"""
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
@@ -4189,6 +4235,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         cr_b = sm_b.get("contrast_ratios_b", {}) if sm_b else {}
         snr_wav_a = sm_a.get("wavelet_snr_a", {})
         snr_wav_b = sm_b.get("wavelet_snr_b", {}) if sm_b else {}
+        mc_a_s = sm_a.get("michelson_contrast_a", {})
+        mc_b_s = sm_b.get("michelson_contrast_b", {}) if sm_b else {}
         snr_ma = ra.snr_metrics or {}
         snr_mb = rb.snr_metrics or {}
 
@@ -4246,6 +4294,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
             row("Std contrast ratio (15px)", cr_a.get(15), cr_b.get(15)),
             row("Wavelet SNR level 2", snr_wav_a.get(2), snr_wav_b.get(2)),
             row("Wavelet SNR level 3", snr_wav_a.get(3), snr_wav_b.get(3)),
+            row("Michelson contrast max (5px)", mc_a_s.get(5), mc_b_s.get(5), fmt=".4f"),
             *([row(
                 "Global SNR — starless (σ) ★",
                 (snr_ma.get("starless") or {}).get("snr_global"),

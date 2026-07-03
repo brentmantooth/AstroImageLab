@@ -26,10 +26,11 @@ EDGE_ROI_MAP_INDICATOR_PX = 500   # px; full width of the ROI indicator box draw
 FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); default for UI
 GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
 RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation
-POWER_SPECTRUM_NPIX = 1024
+POWER_SPECTRUM_NPIX = 2048   # px; size of square power spectrum maps (must be 2^n)
 
-STD_KERNEL_SIZES = (5, 15, 31)
+STD_KERNEL_SIZES = (3, 5, 10)  #originally (5, 10, 15)   # px; Gaussian kernel sizes for std dev maps
 LOG_SIGMAS = (1.5, 3.0, 6.0)
+MICHELSON_KERNEL_SIZES = (3, 5, 9)   # px; local max/min neighbourhood for Michelson contrast (odd values required)
 WAVELET_NAME = "db4"
 WAVELET_LEVELS = 4
 
