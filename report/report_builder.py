@@ -649,8 +649,8 @@ class ReportBuilder:
         pa = result_a.psf_metrics or {}
         pb = result_b.psf_metrics or {}
         if pa.get("epsf_data") is not None and pb.get("epsf_data") is not None:
-            ea = pa["epsf_data"].astype(np.float64)
-            eb = pb["epsf_data"].astype(np.float64)
+            ea = pa["epsf_data"].astype(np.float32)
+            eb = pb["epsf_data"].astype(np.float32)
             _add("epsf_a", np.log1p(ea - ea.min()).astype(np.float32))
             _add("epsf_b", np.log1p(eb - eb.min()).astype(np.float32))
             ref_fwhm = _ref_fwhm_px(pa, pb, self._ref_seeing_arcsec)
@@ -2786,7 +2786,7 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                          xc: float, yc: float, half: int) -> np.ndarray:
         h, w = data.shape
         size = 2 * half + 1
-        cut = np.zeros((size, size), dtype=np.float64)
+        cut = np.zeros((size, size), dtype=np.float32)
         x0_src = max(0, int(xc) - half)
         x1_src = min(w, int(xc) + half + 1)
         y0_src = max(0, int(yc) - half)
@@ -2849,7 +2849,7 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
 
         bgsub = img_a.background_subtracted() if img_a.background is not None else img_a.data
         from core.stretch import stf_stretch
-        display = stf_stretch(bgsub).astype(np.float64)
+        display = stf_stretch(bgsub)
 
         h, w = display.shape
         if max(h, w) > 1200:

@@ -133,7 +133,7 @@ class EdgeAnalyzer:
         from core.stretch import stf_stretch
         sigma = _gradient_sigma(image.pixel_scale)
         gm_full = gaussian_gradient_magnitude(
-            stf_stretch(bgsub).astype(np.float64), sigma=sigma
+            stf_stretch(bgsub), sigma=sigma
         )
         gradient_fig = self._plot_gradient_map(gm_full, image.label, rois_used)
 
@@ -178,7 +178,7 @@ class EdgeAnalyzer:
                                ) -> list[tuple[np.ndarray, tuple]]:
         """Find n well-separated patches centred on the strongest gradients."""
         from core.stretch import stf_stretch
-        stretched = stf_stretch(bgsub).astype(np.float64)
+        stretched = stf_stretch(bgsub)
         sigma = _gradient_sigma(image.pixel_scale)
         gm = gaussian_gradient_magnitude(stretched, sigma=sigma)
 
@@ -431,7 +431,7 @@ class EdgeAnalyzer:
         n = max(20, int(length))
         cols = np.linspace(c0, c1, n)
         rows = np.linspace(r0, r1, n)
-        profile = map_coordinates(bgsub.astype(np.float64), [rows, cols],
+        profile = map_coordinates(bgsub.astype(np.float32), [rows, cols],
                                   order=1, mode="nearest")
         positions = np.linspace(0.0, length, n)
         lo, hi = profile.min(), profile.max()

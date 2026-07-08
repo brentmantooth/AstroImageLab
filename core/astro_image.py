@@ -42,7 +42,7 @@ class AstroImage:
         self.pixel_scale_is_estimated: bool = False
         self.bandwidth_nm: float | None = None
         self.filter_thickness_mm: float = FILTER_THICKNESS_MM
-        self.original_dtype: np.dtype | None = None   # dtype before float64 conversion
+        self.original_dtype: np.dtype | None = None   # dtype before float32 conversion
         self.background: Background2D | None = None
         self.background_rms: np.ndarray | None = None
         self._load_error: str | None = None
@@ -68,8 +68,8 @@ class AstroImage:
             raise ValueError(f"Unsupported file format: {suffix}")
 
         if self.data is not None:
-            self.original_dtype = self.data.dtype   # capture before float64 conversion
-            self.data = self.data.astype(np.float64)
+            self.original_dtype = self.data.dtype   # capture before float32 conversion
+            self.data = self.data.astype(np.float32)
             self.pixel_scale = self._extract_pixel_scale()
             self.bandwidth_nm = self._extract_bandwidth()
             self._extract_metadata()
