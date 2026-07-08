@@ -153,8 +153,32 @@ O(N² log N) and handles any kernel size without performance degradation:
 
 ```python
 from scipy.signal import fftconvolve
-convolved = fftconvolve(patch, psf_kernel, mode="same").astype(np.float64)
+convolved = fftconvolve(patch, psf_kernel, mode="same").astype(np.float32)
 ```
+
+### Working dtype — always float32
+
+All image data is converted to `np.float32` at load time (`core/astro_image.py:72`).
+This is the single working dtype throughout the pipeline — `self.data`, `background_subtracted()`,
+background maps from photutils, and all intermediate analysis arrays.
+
+**float32 is sufficient:** source data is at most 16-bit integer before stacking; float32
+(24-bit mantissa, ~7 significant digits) represents every possible value exactly. The
+switch from float64 halves memory footprint and yields ~1.5–2× faster element-wise
+operations through better cache utilisation and wider SIMD lanes.
+
+**Byte order is handled automatically.** FITS `BITPIX=-32` images arrive from astropy as
+big-endian `>f4`; `astype(np.float32)` always produces native-endian output, so there is
+no need for `.byteswap()` or `.newbyteorder()`.
+
+**Do not add float64 casts in analysis code.** The only legitimate exception in the entire
+codebase is the `astroalign` registration call in `gui/analysis_thread.py`, which requires
+float64 internally. That explicit cast is already in place and must stay.
+
+**Synthetic generator internals stay float64.** `synthetic/generator.py` and
+`synthetic/target_generator.py` accumulate many PSF stamps with `+=` across hundreds of
+operations; float64 prevents rounding drift during synthesis. Both generators cast their
+output to float32 before writing to FITS.
 
 ### Large-array reductions — prefer bottleneck
 
@@ -233,7 +257,7 @@ sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 ```bash
 conda activate astrolab
 pip install pytest pytest-cov pytest-timeout   # one-time setup; not in environment.yml
-pytest tests/ -m "not slow"                   # fast suite (~90 s, 202 tests)
+pytest tests/ -m "not slow"                   # fast suite (~120 s, 205 tests)
 pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
 pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 ```
@@ -284,6 +308,8 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Linux build needs system Qt libraries | PyInstaller must be able to import PyQt6 during analysis. On `ubuntu-latest` run `sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0` before `pip install -r requirements-build.txt`. |
 | `PowerSpectrumAnalyzer` crashes on images smaller than 1024 px | `POWER_SPECTRUM_NPIX = 1024`. The auto-select loop is empty when `min(h, w) < 1024`; the fallback produces negative slice indices → non-square region → `_apply_window` shape mismatch. Fix: `N = min(N, h, w)` before the loop, add `+1` to loop upper bounds, clamp fallback with `max(0, ...)`. |
 | `sigma_clip` mask is scalar `False` when nothing is clipped | `clipped.mask` is `np.ma.nomask` (== `False`) when no values are clipped. `region[False]` silently writes only the first row. Use `np.ma.getmaskarray(clipped)` to get a full bool array, then guard with `.any()`. |
+| Adding a float64 cast in analysis code | Don't. All image data is float32 after `AstroImage.load()`. The only float64 exception is `astroalign` in `gui/analysis_thread.py`. Redundant float64 casts waste memory and defeat the float32 performance gains. |
+| Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
 
 ---
 
