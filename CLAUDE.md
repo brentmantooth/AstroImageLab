@@ -14,7 +14,7 @@ images. It produces a self-contained HTML report with embedded matplotlib figure
 
 ## Architecture
 
-```
+```text
 AstroImageLab.py       PyQt6 app + animated splash screen
 analysis/              Metric engines — each returns a plain dict
   psf_analyzer.py      Moffat/ePSF fitting, MTF via FFT
@@ -336,7 +336,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | `sigma_clip` mask is scalar `False` when nothing is clipped | `clipped.mask` is `np.ma.nomask` (== `False`) when no values are clipped. `region[False]` silently writes only the first row. Use `np.ma.getmaskarray(clipped)` to get a full bool array, then guard with `.any()`. |
 | Adding a float64 cast in analysis code | Don't. All image data is float32 after `AstroImage.load()`. The only float64 exception is `astroalign` in `gui/analysis_thread.py`. Redundant float64 casts waste memory and defeat the float32 performance gains. |
 | Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
-| `_section_snr` crashes when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) calls `plt.subplots(1, len(panels), ...)`. If `snr_metrics` is `None` (SNR unchecked while another metric, e.g. Power Spectrum, is run) `panels` is empty and matplotlib raises `ValueError: Number of columns must be a positive integer, not 0`. All metric checkboxes default to checked, so this only bites a deliberately partial run. Discovered during Section 7 ratio-curve verification, not yet fixed — needs the same `metrics or {}` guard pattern used everywhere else in this file. |
+| `_section_snr` crashed when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) built a `panels` list filtered to non-`None` entries but never checked whether it was empty before calling `plt.subplots(1, len(panels), ...)` — 0 columns raised `ValueError: Number of columns must be a positive integer, not 0`. Hit whenever SNR is unchecked while another metric (e.g. Power Spectrum) is run. Fixed with an early `if not panels: return None` guard, matching `_plot_radial_overlay`/`_plot_radial_ratio_db`; both call sites already pipe the result through `_img_tag`, which turns `None` into `""`. |
 
 ---
 

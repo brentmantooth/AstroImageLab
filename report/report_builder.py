@@ -3925,10 +3925,12 @@ expected; use a nebula ROI for meaningful filter comparison.</p>"""
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
     def _plot_snr_pair(self, disp_a, label_a, disp_b, label_b,
-                        vmin: float, vmax: float) -> plt.Figure:
+                        vmin: float, vmax: float) -> plt.Figure | None:
         """Render both SNR maps side-by-side with a shared plasma color scale."""
         panels = [(d, lbl) for d, lbl in [(disp_a, label_a), (disp_b, label_b)]
                   if d is not None]
+        if not panels:
+            return None
         fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
         if len(panels) == 1:
             axes = [axes]
