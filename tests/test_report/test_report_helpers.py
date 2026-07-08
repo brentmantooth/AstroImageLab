@@ -16,6 +16,7 @@ from report.report_builder import (
     _arr_to_b64_png,
     _fig_to_b64,
     _psf_stat_test,
+    _power_ratio_db,
 )
 
 EM_DASH = "—"
@@ -182,3 +183,48 @@ class TestFigToB64:
         lo = _fig_to_b64(self._make_fig(), dpi=72)
         hi = _fig_to_b64(self._make_fig(), dpi=200)
         assert len(base64.b64decode(hi)) > len(base64.b64decode(lo))
+
+
+class TestPowerRatioDb:
+    def test_known_ratio_in_db(self):
+        freq = np.linspace(0.0, 0.5, 10)
+        rp_b = np.full(10, 1.0)
+        rp_a = rp_b * 2.0
+        result = _power_ratio_db(freq, rp_a, freq, rp_b)
+        assert result is not None
+        _, ratio_db = result
+        assert ratio_db == pytest.approx(10.0 * np.log10(2.0), abs=1e-6)
+
+    def test_identical_curves_zero_db(self):
+        freq = np.linspace(0.0, 0.5, 10)
+        rp = np.linspace(1.0, 5.0, 10)
+        _, ratio_db = _power_ratio_db(freq, rp, freq, rp)
+        assert ratio_db == pytest.approx(0.0, abs=1e-6)
+
+    def test_zero_bins_stay_finite(self):
+        freq = np.linspace(0.0, 0.5, 5)
+        rp_a = np.array([0.0, 1.0, 0.0, 2.0, 0.0])
+        rp_b = np.array([1.0, 0.0, 0.0, 1.0, 1.0])
+        _, ratio_db = _power_ratio_db(freq, rp_a, freq, rp_b)
+        assert np.all(np.isfinite(ratio_db))
+
+    def test_none_inputs_return_none(self):
+        freq = np.linspace(0.0, 0.5, 5)
+        rp = np.ones(5)
+        assert _power_ratio_db(None, rp, freq, rp) is None
+        assert _power_ratio_db(freq, None, freq, rp) is None
+        assert _power_ratio_db(freq, rp, None, rp) is None
+        assert _power_ratio_db(freq, rp, freq, None) is None
+
+    def test_mismatched_length_returns_none(self):
+        freq_a = np.linspace(0.0, 0.5, 5)
+        freq_b = np.linspace(0.0, 0.5, 8)
+        rp_a = np.ones(5)
+        rp_b = np.ones(8)
+        assert _power_ratio_db(freq_a, rp_a, freq_b, rp_b) is None
+
+    def test_same_length_different_values_returns_none(self):
+        freq_a = np.linspace(0.0, 0.5, 5)
+        freq_b = np.linspace(0.0, 0.4, 5)
+        rp = np.ones(5)
+        assert _power_ratio_db(freq_a, rp, freq_b, rp) is None

@@ -58,6 +58,7 @@ synthetic/
 | `set_starless_path(path)` | `gui/image_panel.py` | Attach a pre-generated starless FITS to the loaded main image |
 | `_extract_cutout(data, xc, yc, radius)` | `gui/halo_dialog.py` | 2r×2r patch centred on star, zero-padded at image edges |
 | `_annular_rdf(log_data, xc, yc, radius)` | `gui/halo_dialog.py` | 1-px annular mean/std in log10 space; mirrors `HaloAnalyzer._annular_stats` |
+| `_power_ratio_db(freq_a, rp_a, freq_b, rp_b)` | `report_builder.py` | 10·log10 dB ratio between two radial power curves; returns `None` on missing data or misaligned frequency bins |
 
 ---
 
@@ -214,6 +215,31 @@ except ImportError:
 `analysis/halo_analyzer.py` (stacked radial profiles, RDF nanmean/nanstd),
 `analysis/image_filters.py` (wavelet MAD noise estimate).
 
+### Ratio/comparison curves in report figures — dB convention, avoid twinx()
+
+When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_ratio_db` /
+`_plot_radial_ratio_db` in `report_builder.py`, Section 7's power-spectrum ratio):
+
+- **dB convention depends on quantity type.** Power quantities (e.g. `radial_power` in
+  `analysis/power_spectrum.py`, `= abs(fft2d)**2 / N**2`) use `10 * np.log10(ratio)`.
+  Amplitude-like quantities (e.g. SNR in `analysis/snr_analyzer.py`) use
+  `20 * np.log10(ratio)`. Using the wrong constant is silently off by 2× in dB — no
+  exception, no obviously-wrong output, just a subtly incorrect number.
+- **Don't add the ratio via `ax.twinx()`** onto the existing absolute-value plot unless
+  both axes are the same kind of quantity (linear-vs-linear, as in
+  `analysis/image_filters.py::_plot_cross_section`'s A−B difference line). A linear,
+  zero-centered ratio next to a log-scale absolute axis has no principled vertical
+  alignment between the two scales — matplotlib's independent autoscaling invents a
+  relationship that isn't in the data. Build a separate, dedicated figure/panel instead.
+- **Guard bin alignment before dividing two arrays from different analyses.** Two
+  per-image radial/frequency arrays are only safely divisible bin-for-bin when they
+  share the same shape *and* values (`freq_a.shape == freq_b.shape and
+  np.allclose(freq_a, freq_b)` — check shape first, since `np.allclose` raises
+  `ValueError` on mismatched shapes rather than returning `False`). This is not
+  guaranteed whenever an auto-selected ROI is involved (`_extract_roi` in
+  `analysis/power_spectrum.py` computes `N` independently per image when no explicit
+  ROI is set). Degrade gracefully — return `None` / skip the curve — rather than crash.
+
 ---
 
 ## Collaboration Rules
@@ -306,10 +332,11 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Closure capture in `secondary_xaxis` lambdas | `lambda x: x * ps` inside a loop captures `ps` by reference. Use default-arg capture: `lambda x, p=ps: x * p` to freeze the value at definition time. |
 | macOS binary blocked by Gatekeeper | CI-built binaries are unsigned. Users must right-click → Open, or run `xattr -dr com.apple.quarantine AstroImageLab` in Terminal. Code signing requires an Apple Developer certificate ($99/year). |
 | Linux build needs system Qt libraries | PyInstaller must be able to import PyQt6 during analysis. On `ubuntu-latest` run `sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0` before `pip install -r requirements-build.txt`. |
-| `PowerSpectrumAnalyzer` crashes on images smaller than 1024 px | `POWER_SPECTRUM_NPIX = 1024`. The auto-select loop is empty when `min(h, w) < 1024`; the fallback produces negative slice indices → non-square region → `_apply_window` shape mismatch. Fix: `N = min(N, h, w)` before the loop, add `+1` to loop upper bounds, clamp fallback with `max(0, ...)`. |
+| `PowerSpectrumAnalyzer` crashes on images smaller than 2048 px | `POWER_SPECTRUM_NPIX = 2048`. The auto-select loop is empty when `min(h, w) < 2048`; the fallback produces negative slice indices → non-square region → `_apply_window` shape mismatch. Fix: `N = min(N, h, w)` before the loop, add `+1` to loop upper bounds, clamp fallback with `max(0, ...)`. |
 | `sigma_clip` mask is scalar `False` when nothing is clipped | `clipped.mask` is `np.ma.nomask` (== `False`) when no values are clipped. `region[False]` silently writes only the first row. Use `np.ma.getmaskarray(clipped)` to get a full bool array, then guard with `.any()`. |
 | Adding a float64 cast in analysis code | Don't. All image data is float32 after `AstroImage.load()`. The only float64 exception is `astroalign` in `gui/analysis_thread.py`. Redundant float64 casts waste memory and defeat the float32 performance gains. |
 | Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
+| `_section_snr` crashes when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) calls `plt.subplots(1, len(panels), ...)`. If `snr_metrics` is `None` (SNR unchecked while another metric, e.g. Power Spectrum, is run) `panels` is empty and matplotlib raises `ValueError: Number of columns must be a positive integer, not 0`. All metric checkboxes default to checked, so this only bites a deliberately partial run. Discovered during Section 7 ratio-curve verification, not yet fixed — needs the same `metrics or {}` guard pattern used everywhere else in this file. |
 
 ---
 

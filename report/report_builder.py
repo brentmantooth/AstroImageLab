@@ -461,6 +461,27 @@ def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[st
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
 
 
+def _power_ratio_db(freq_a, rp_a, freq_b, rp_b) -> tuple[np.ndarray, np.ndarray] | None:
+    """10*log10(P_A/P_B) per frequency bin. Returns None if data is missing or the
+    two frequency axes are not bin-for-bin aligned."""
+    if freq_a is None or rp_a is None or freq_b is None or rp_b is None:
+        return None
+    freq_a = np.asarray(freq_a, dtype=float)
+    freq_b = np.asarray(freq_b, dtype=float)
+    # Shape check MUST precede allclose: np.allclose raises ValueError on
+    # incompatible shapes rather than returning False.
+    if freq_a.shape != freq_b.shape or not np.allclose(freq_a, freq_b):
+        return None
+    rp_a = np.asarray(rp_a, dtype=float)
+    rp_b = np.asarray(rp_b, dtype=float)
+    positive = np.concatenate([rp_a[rp_a > 0], rp_b[rp_b > 0]])
+    # Relative epsilon, mirroring the existing precedent at
+    # power_spectrum.py:199 (`ps2d[ps2d > 0].min() * 0.01`).
+    eps = float(positive.min()) * 0.01 if positive.size > 0 else 1e-12
+    ratio_db = 10.0 * np.log10(np.clip(rp_a, eps, None) / np.clip(rp_b, eps, None))
+    return freq_a, ratio_db
+
+
 def _focal_ratio(img: AstroImage) -> float | None:
     hdr = img.header
     if hdr is None:
@@ -3518,6 +3539,53 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
         fig.tight_layout()
         return fig
 
+    def _plot_radial_ratio_db(self, ra: AnalysisResult, rb: AnalysisResult,
+                               star_pa: dict | None = None,
+                               star_pb: dict | None = None) -> plt.Figure | None:
+        """dB ratio of A's to B's radial power spectrum. Solid = primary/starless pair;
+        dashed = with-stars pair (only when both images have star_power data)."""
+        pa = ra.power_metrics or {}
+        pb = rb.power_metrics or {}
+        primary = _power_ratio_db(pa.get("freq_axis"), pa.get("radial_power"),
+                                   pb.get("freq_axis"), pb.get("radial_power"))
+        star = None
+        if star_pa and star_pb:
+            star = _power_ratio_db(star_pa.get("freq_axis"), star_pa.get("radial_power"),
+                                    star_pb.get("freq_axis"), star_pb.get("radial_power"))
+        if primary is None and star is None:
+            return None   # neither pair usable — degrade gracefully, no image, no crash
+
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        all_vals = []
+        if primary is not None:
+            freq, ratio_db = primary
+            ax.plot(freq, ratio_db, color="mediumpurple", linewidth=2, label="Ratio (starless)")
+            all_vals.append(ratio_db)
+        if star is not None:
+            freq, ratio_db = star
+            ax.plot(freq, ratio_db, color="mediumpurple", linewidth=1.5, linestyle="--",
+                    alpha=0.6, label="Ratio (with stars)")
+            all_vals.append(ratio_db)
+
+        ax.axhline(0.0, color=orig_color, linestyle="--", linewidth=0.8, label="0 dB (A = B)")
+        ax.axvline(0.10, color="gray", linestyle="--", linewidth=0.8,
+                   label="Low / mid boundary (0.10 cyc/px)")
+        ax.set_xlabel("Spatial frequency (cycles/pixel)")
+        ax.set_ylabel("Ratio (dB) = 10·log10(P_A / P_B)")
+        ax.set_title(f"Radial power ratio (dB): {ra.label} / {rb.label}")
+        ax.set_xlim(0, 0.5)
+        peak = float(np.max(np.abs(np.concatenate(all_vals)))) if all_vals else 3.0
+        ylim = max(3.0, peak * 1.1)
+        ax.set_ylim(-ylim, ylim)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
     # ── Section 7: Power spectrum ──────────────────────────────────────────────
 
     def _section_power(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
@@ -3535,6 +3603,12 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                                       star_pa=star_pa or None,
                                       star_pb=star_pb or None),
             "Radial power overlay",
+        )
+        img_ratio = _img_tag(
+            self._plot_radial_ratio_db(ra, rb,
+                                       star_pa=star_pa or None,
+                                       star_pb=star_pb or None),
+            "Radial power ratio (dB)",
         )
 
         sl_note = ""
@@ -3585,7 +3659,9 @@ power through their profiles, halos, and diffraction spikes.</p>"""
            'rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px) '
            'measures fine detail content relative to coarse structure.<br>'
            '<strong>Note:</strong> This comparison is only meaningful when both images cover '
-           'the same target region.',
+           'the same target region. The ratio curve below expresses this directly in decibels '
+           '(10·log10(P<sub>A</sub> / P<sub>B</sub>)): positive values mean Image A has more '
+           'power (finer detail) at that frequency, negative values mean Image B does.',
            title="About the power spectrum")}
 
 <table>
@@ -3597,6 +3673,14 @@ power through their profiles, halos, and diffraction spikes.</p>"""
 <p class="caption">Radial power spectra overlaid (log scale). Solid curves = starless; dashed curves = with stars (when starless images were provided). Curves that diverge at
 high frequencies indicate one filter preserves more fine-scale spatial detail. The
 dashed vertical line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
+
+{img_ratio}
+<p class="caption">Ratio of radial power spectra in decibels. Solid = starless-pair
+ratio; dashed = with-stars-pair ratio (only when both images used a starless primary
+input). Shown only where both images' frequency bins are exactly aligned bin-for-bin —
+always true when an analysis ROI is set, true in auto-ROI mode only when both images'
+analysed regions share the same pixel dimensions. If only one pair aligns, only that
+curve is shown.</p>
 
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_a}</div>
