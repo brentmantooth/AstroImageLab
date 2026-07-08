@@ -10,13 +10,13 @@ import matplotlib
 import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, map_coordinates, zoom, maximum_filter, minimum_filter
+from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
 import pywt
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64, figs_to_b64
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
-                         MICHELSON_KERNEL_SIZES,
+                         WEBER_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
                          XS_SNR_REGION_WIDTH)
 
@@ -36,7 +36,7 @@ class SpatialDetailAnalyzer:
                 log_sigmas: tuple = LOG_SIGMAS,
                 wavelet: str = WAVELET_NAME,
                 levels: int = WAVELET_LEVELS,
-                michelson_kernel_sizes: tuple = MICHELSON_KERNEL_SIZES,
+                weber_kernel_sizes: tuple = WEBER_KERNEL_SIZES,
                 crosshair: dict | None = None,
                 roi: tuple | None = None,
                 xs_snr_width: int | None = None) -> dict:
@@ -55,8 +55,8 @@ class SpatialDetailAnalyzer:
             "wavelet_snr_b": {},
             "sigma_noise_a": None,
             "sigma_noise_b": None,
-            "michelson_contrast_a": {},
-            "michelson_contrast_b": {},
+            "weber_contrast_a": {},
+            "weber_contrast_b": {},
             "panels": {},
         }
         figures: dict = {}
@@ -135,33 +135,33 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
             )
-            _f_mic = _ex.submit(self._michelson_analysis,
+            _f_web = _ex.submit(self._weber_analysis,
                 analysis_a, analysis_b,
-                michelson_kernel_sizes,
+                weber_kernel_sizes,
                 image_a.label, _label_b,
                 display_roi=display_roi,
             )
             std_b64, std_partial = _f_std.result()
             log_b64, log_partial = _f_log.result()
             wav_b64, wav_partial = _f_wav.result()
-            mic_b64, mic_partial = _f_mic.result()
+            web_b64, web_partial = _f_web.result()
 
         figures.update(std_b64)
         figures.update(log_b64)
         figures.update(wav_b64)
-        figures.update(mic_b64)
+        figures.update(web_b64)
         result["contrast_ratios_a"].update(std_partial["contrast_ratios_a"])
         result["contrast_ratios_b"].update(std_partial["contrast_ratios_b"])
         result["sigma_noise_a"] = wav_partial["sigma_noise_a"]
         result["sigma_noise_b"] = wav_partial["sigma_noise_b"]
         result["wavelet_snr_a"].update(wav_partial["wavelet_snr_a"])
         result["wavelet_snr_b"].update(wav_partial["wavelet_snr_b"])
-        result["michelson_contrast_a"].update(mic_partial["michelson_contrast_a"])
-        result["michelson_contrast_b"].update(mic_partial["michelson_contrast_b"])
+        result["weber_contrast_a"].update(web_partial["weber_contrast_a"])
+        result["weber_contrast_b"].update(web_partial["weber_contrast_b"])
         result["panels"].update(std_partial["panels"])
         result["panels"].update(log_partial["panels"])
         result["panels"].update(wav_partial["panels"])
-        result["panels"].update(mic_partial["panels"])
+        result["panels"].update(web_partial["panels"])
 
         if crosshair is not None:
             pos_a, prof_a = self._sample_line(norm_a, **crosshair)
@@ -506,60 +506,62 @@ class SpatialDetailAnalyzer:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Michelson contrast maps
+    # Weber fraction contrast maps
     # ------------------------------------------------------------------
 
-    def _michelson_analysis(self, norm_a, norm_b, kernel_sizes,
-                             label_a, label_b,
-                             display_roi=None) -> tuple[dict, dict]:
+    def _weber_analysis(self, norm_a, norm_b, kernel_sizes,
+                        label_a, label_b,
+                        display_roi=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
-            "michelson_contrast_a": {},
-            "michelson_contrast_b": {},
+            "weber_contrast_a": {},
+            "weber_contrast_b": {},
             "panels": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
-            mc_a = self._compute_michelson_map(norm_a, ks)
-            mc_b = self._compute_michelson_map(norm_b, ks) if not single else None
+            wc_a = self._compute_weber_map(norm_a, ks)
+            wc_b = self._compute_weber_map(norm_b, ks) if not single else None
 
-            partial["michelson_contrast_a"][ks] = float(np.max(mc_a))
+            # 99th percentile avoids dark-sky floor driving the scalar metric to extremes
+            partial["weber_contrast_a"][ks] = float(np.percentile(wc_a, 99))
             if not single:
-                partial["michelson_contrast_b"][ks] = float(np.max(mc_b))
+                partial["weber_contrast_b"][ks] = float(np.percentile(wc_b, 99))
 
-            partial["panels"][f"michelson_{ks}px"] = {
-                "a":    mc_a.astype(np.float32),
-                "b":    mc_b.astype(np.float32) if mc_b is not None else None,
-                "diff": (mc_a - mc_b).astype(np.float32) if mc_b is not None else None,
+            partial["panels"][f"weber_{ks}px"] = {
+                "a":    wc_a.astype(np.float32),
+                "b":    wc_b.astype(np.float32) if wc_b is not None else None,
+                "diff": (wc_a - wc_b).astype(np.float32) if wc_b is not None else None,
             }
 
             if not single:
                 fig = self._plot_side_by_side(
-                    self._crop_border(mc_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(mc_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Michelson contrast — kernel {ks}px — {label_a}",
-                    f"Michelson contrast — kernel {ks}px — {label_b}",
-                    diff_title=f"Michelson diff (A−B), kernel {ks}px",
+                    self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(wc_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Weber contrast — kernel {ks}px — {label_a}",
+                    f"Weber contrast — kernel {ks}px — {label_b}",
+                    diff_title=f"Weber diff (A−B), kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=False,   # values bounded [0,1]; linear scale is appropriate
-                    display_roi=None,       # _crop_border already applied; matches _log_analysis pattern
+                    nonlinear_norm=True,    # unbounded output; PowerNorm compresses dynamic range
+                    display_roi=None,       # _crop_border already applied
                 )
             else:
                 fig = self._plot_single(
-                    self._crop_border(mc_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Michelson contrast — kernel {ks}px — {label_a}",
+                    self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Weber contrast — kernel {ks}px — {label_a}",
                     cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=False,
+                    nonlinear_norm=True,
                 )
-            figures[f"michelson_{ks}px"] = fig
+            figures[f"weber_{ks}px"] = fig
 
         return figs_to_b64(figures, dpi=150), partial
 
-    def _compute_michelson_map(self, norm: np.ndarray, kernel_size: int) -> np.ndarray:
-        """Per-pixel Michelson contrast C = (I_max - I_min) / (I_max + I_min + eps).
-        Downsamples large images identically to _compute_std_map for performance.
+    def _compute_weber_map(self, norm: np.ndarray, kernel_size: int) -> np.ndarray:
+        """Weber fraction contrast c = ΔL / L where ΔL = max−min and L = median of kernel.
+        L uses median (not mean) — robust background luminance unaffected by bright filaments.
+        Output is unbounded >= 0; nonlinear_norm=True is used for display.
         """
-        _EPS = 1e-9
+        _EPS = 1e-6   # L (median) can be very small over dark sky; larger EPS prevents extremes
         factor = 1.0
         data = norm
         if max(norm.shape) > MAX_DIM_FOR_STD:
@@ -571,18 +573,18 @@ class SpatialDetailAnalyzer:
 
         i_max = maximum_filter(data, size=kernel_size)
         i_min = minimum_filter(data, size=kernel_size)
-        # Background-subtracted images can have negative pixels after mean normalisation.
-        # Clip to 0 so i_max + i_min is never negative, preventing spurious near-1 contrast.
-        i_max = np.maximum(i_max, 0.0)
-        i_min = np.maximum(i_min, 0.0)
-        mc_map = (i_max - i_min) / (i_max + i_min + _EPS)
+        i_med = median_filter(data, size=kernel_size)
+
+        delta_L = i_max - i_min                  # always >= 0
+        L = np.maximum(i_med, 0.0)              # bg-subtracted images can have negative medians
+        weber = delta_L / (L + _EPS)
 
         if factor < 1.0:
-            mc_map = zoom(mc_map,
-                          (norm.shape[0] / mc_map.shape[0],
-                           norm.shape[1] / mc_map.shape[1]),
-                          order=1)
-        return np.clip(mc_map, 0.0, 1.0)
+            weber = zoom(weber,
+                         (norm.shape[0] / weber.shape[0],
+                          norm.shape[1] / weber.shape[1]),
+                         order=1)
+        return np.maximum(weber, 0.0)
 
     def _plot_side_by_side(self, arr_a: np.ndarray, arr_b: np.ndarray,
                             title_a: str, title_b: str,

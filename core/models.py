@@ -30,7 +30,7 @@ POWER_SPECTRUM_NPIX = 2048   # px; size of square power spectrum maps (must be 2
 
 STD_KERNEL_SIZES = (3, 5, 10)  #originally (5, 10, 15)   # px; Gaussian kernel sizes for std dev maps
 LOG_SIGMAS = (1.5, 3.0, 6.0)
-MICHELSON_KERNEL_SIZES = (3, 5, 9)   # px; local max/min neighbourhood for Michelson contrast (odd values required)
+WEBER_KERNEL_SIZES = (3, 5, 9)   # px; local kernel for Weber fraction contrast c = ΔL/L (odd values required)
 WAVELET_NAME = "db4"
 WAVELET_LEVELS = 4
 
