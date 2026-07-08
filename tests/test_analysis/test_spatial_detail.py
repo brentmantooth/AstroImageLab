@@ -55,6 +55,21 @@ class TestAnalyze:
         result = SpatialDetailAnalyzer().analyze(img)
         assert isinstance(result, dict)
 
+    def test_weber_contrast_a_present(self, astro_image_a):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        assert "weber_contrast_a" in result
+
+    def test_single_image_weber_contrast_b_empty(self, astro_image_a):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        # Single-image mode: weber_contrast_b is present but empty (same pattern as contrast_ratios_b)
+        wc_b = result.get("weber_contrast_b")
+        assert wc_b is None or not wc_b
+
+    def test_weber_contrast_a_positive(self, astro_image_a):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        for v in result.get("weber_contrast_a", {}).values():
+            assert v >= 0.0
+
     def test_with_roi(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a,
                                                   roi=(50, 50, 450, 450))

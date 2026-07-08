@@ -259,7 +259,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Inline FITS too small to load | `_load_fits` skips HDUs where `max(shape) <= 100`. Test FITS must be at least 101×101; use 128×128 for safety. |
 | `float(mtf(array, m))` raises TypeError | `mtf()` returns a same-shape array, not a scalar. Index with `[0]` or pass a scalar input. |
 | `PSFAnalyzer.analyze()["figures"]` KeyError | `figures` is only added when `n_stars_used > 0`. Guard with `if result["n_stars_used"] > 0`. |
-| `contrast_ratios_b` always present | `SpatialDetailAnalyzer.analyze()` always includes `contrast_ratios_b: {}` even in single-image mode. It is never `None` or absent — check `not b_ratios` instead. |
+| `contrast_ratios_b` / `weber_contrast_b` always present | `SpatialDetailAnalyzer.analyze()` always includes `contrast_ratios_b: {}` and `weber_contrast_b: {}` even in single-image mode. Neither is ever `None` or absent — check `not b_ratios` / `not wc_b` instead. |
 | Background2D fails on tiny images | `estimate_background()` with default `box_size=64` needs the image to be larger than the box. Any image used in analysis tests should be at least 128×128. |
 
 ---
