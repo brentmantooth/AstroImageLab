@@ -104,17 +104,18 @@ class MainWindow(QMainWindow):
         analysis_menu.addAction(act_run)
 
         tools_menu = mb.addMenu("&Tools")
-        act_synth = QAction("Synthetic &Data…", self)
+        act_synth = QAction("Synthetic Star &Data…", self)
         act_synth.triggered.connect(self._open_synthetic_dialog)
         tools_menu.addAction(act_synth)
+
+ 
+        act_target = QAction("Synthetic Spatial Detail &Target…", self)
+        act_target.triggered.connect(self._open_target_dialog)
+        tools_menu.addAction(act_target)
 
         act_halo = QAction("&Halo Analyzer…", self)
         act_halo.triggered.connect(self._open_halo_dialog)
         tools_menu.addAction(act_halo)
-
-        act_target = QAction("Spatial &Target…", self)
-        act_target.triggered.connect(self._open_target_dialog)
-        tools_menu.addAction(act_target)
 
         help_menu = mb.addMenu("&Help")
         act_quickstart = QAction("&Quick Start Guide", self)

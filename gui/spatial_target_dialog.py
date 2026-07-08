@@ -167,7 +167,7 @@ class _PreviewThread(QThread):
 class _ZoneInfoDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Spatial Target — Zone Layout & Interpretation")
+        self.setWindowTitle("Spatial Detail Target — Zone Layout & Interpretation")
         self.setMinimumSize(680, 540)
         lay = QVBoxLayout(self)
         browser = QTextBrowser()
