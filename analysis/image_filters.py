@@ -10,7 +10,7 @@ import matplotlib
 import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
+from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
 import pywt
 
 from core.astro_image import AstroImage
@@ -58,6 +58,17 @@ class SpatialDetailAnalyzer:
             "weber_contrast_a": {},
             "weber_contrast_b": {},
             "panels": {},
+            "nc_shared_nebula_pixels": 0,
+            "std_nc_score_a": {}, "std_nc_score_b": {},
+            "std_nc_noise_a": {}, "std_nc_noise_b": {}, "std_nc_ratio": {},
+            "log_nc_score_a": {}, "log_nc_score_b": {},
+            "log_nc_noise_a": {}, "log_nc_noise_b": {}, "log_nc_ratio": {},
+            "wavelet_nc_score_a": {}, "wavelet_nc_score_b": {},
+            "wavelet_nc_noise_a": {}, "wavelet_nc_noise_b": {}, "wavelet_nc_ratio": {},
+            "weber_nc_score_a": {}, "weber_nc_score_b": {},
+            "weber_nc_noise_a": {}, "weber_nc_noise_b": {}, "weber_nc_ratio": {},
+            "gm_nc_score_a": {}, "gm_nc_score_b": {},
+            "gm_nc_noise_a": {}, "gm_nc_noise_b": {}, "gm_nc_ratio": {},
         }
         figures: dict = {}
 
@@ -109,11 +120,23 @@ class SpatialDetailAnalyzer:
 
         result["display_roi"] = display_roi
 
+        # Shared nebula ROI for noise-corrected A/B scoring: pixels BOTH images
+        # independently classify as nebula. None in single-image mode.
+        mask_neb_shared = None
+        if mask_neb_b is not None:
+            h_s = min(mask_neb_a.shape[0], mask_neb_b.shape[0])
+            w_s = min(mask_neb_a.shape[1], mask_neb_b.shape[1])
+            mask_neb_shared = mask_neb_a[:h_s, :w_s] & mask_neb_b[:h_s, :w_s]
+        result["nc_shared_nebula_pixels"] = (
+            int(np.count_nonzero(mask_neb_shared)) if mask_neb_shared is not None else 0
+        )
+
         _label_b = image_b.label if image_b is not None else None
 
-        # 1-3. Local std, LoG, wavelet — all read norm_a/norm_b with no shared mutable state,
-        # so they run concurrently. Each method returns (b64_figs, partial_result).
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _ex:
+        # 1-5. Local std, LoG, wavelet, Weber, gradient — all read norm_a/norm_b with no
+        # shared mutable state, so they run concurrently. Each method returns
+        # (b64_figs, partial_result).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as _ex:
             _f_std = _ex.submit(self._std_analysis,
                 analysis_a, analysis_b,
                 mask_neb_a, mask_bg_a,
@@ -122,34 +145,47 @@ class SpatialDetailAnalyzer:
                 image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
+                mask_neb_shared=mask_neb_shared,
             )
             _f_log = _ex.submit(self._log_analysis,
                 analysis_a, analysis_b, log_sigmas,
                 image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
+                mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
             )
             _f_wav = _ex.submit(self._wavelet_analysis,
                 analysis_a, analysis_b, wavelet, levels,
                 image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
+                mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
             )
             _f_web = _ex.submit(self._weber_analysis,
                 analysis_a, analysis_b,
                 weber_kernel_sizes,
                 image_a.label, _label_b,
                 display_roi=display_roi,
+                mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
+            )
+            _f_grad = _ex.submit(self._gradient_analysis,
+                analysis_a, analysis_b, log_sigmas,
+                image_a.label, _label_b,
+                display_roi=display_roi,
+                crosshair=crosshair_roi,
+                mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
             )
             std_b64, std_partial = _f_std.result()
             log_b64, log_partial = _f_log.result()
             wav_b64, wav_partial = _f_wav.result()
             web_b64, web_partial = _f_web.result()
+            grad_b64, grad_partial = _f_grad.result()
 
         figures.update(std_b64)
         figures.update(log_b64)
         figures.update(wav_b64)
         figures.update(web_b64)
+        figures.update(grad_b64)
         result["contrast_ratios_a"].update(std_partial["contrast_ratios_a"])
         result["contrast_ratios_b"].update(std_partial["contrast_ratios_b"])
         result["sigma_noise_a"] = wav_partial["sigma_noise_a"]
@@ -162,6 +198,27 @@ class SpatialDetailAnalyzer:
         result["panels"].update(log_partial["panels"])
         result["panels"].update(wav_partial["panels"])
         result["panels"].update(web_partial["panels"])
+        result["panels"].update(grad_partial["panels"])
+
+        # Merge noise-corrected scores/noise-floors and compute A/B ratios centrally.
+        for prefix, partial in (("std", std_partial), ("log", log_partial),
+                                 ("wavelet", wav_partial), ("weber", web_partial),
+                                 ("gm", grad_partial)):
+            for suffix in ("nc_score_a", "nc_score_b", "nc_noise_a", "nc_noise_b"):
+                result[f"{prefix}_{suffix}"].update(partial[f"{prefix}_{suffix}"])
+            result[f"{prefix}_nc_ratio"] = self._compute_nc_ratios(
+                result[f"{prefix}_nc_score_a"], result[f"{prefix}_nc_score_b"])
+
+        if image_b is not None:
+            nc_fig = self._plot_nc_ratio_overview({
+                "std": result["std_nc_ratio"],
+                "log": result["log_nc_ratio"],
+                "wavelet": result["wavelet_nc_ratio"],
+                "weber": result["weber_nc_ratio"],
+                "gradient": result["gm_nc_ratio"],
+            })
+            if nc_fig is not None:
+                figures["nc_ratio_overview"] = fig_to_b64(nc_fig, dpi=150)
 
         if crosshair is not None:
             pos_a, prof_a = self._sample_line(norm_a, **crosshair)
@@ -269,9 +326,15 @@ class SpatialDetailAnalyzer:
                        mask_neb_b, mask_bg_b,
                        kernel_sizes, label_a, label_b,
                        display_roi=None,
-                       crosshair=None) -> tuple[dict, dict]:
+                       crosshair=None,
+                       mask_neb_shared=None) -> tuple[dict, dict]:
         figures = {}
-        partial: dict = {"contrast_ratios_a": {}, "contrast_ratios_b": {}, "panels": {}}
+        partial: dict = {
+            "contrast_ratios_a": {}, "contrast_ratios_b": {},
+            "std_nc_score_a": {}, "std_nc_score_b": {},
+            "std_nc_noise_a": {}, "std_nc_noise_b": {},
+            "panels": {},
+        }
         single = norm_b is None
         for ks in kernel_sizes:
             std_a = self._compute_std_map(norm_a, ks)
@@ -284,11 +347,26 @@ class SpatialDetailAnalyzer:
                 cr_b = self._contrast_ratio(std_b, mask_neb_b, mask_bg_b)
                 partial["contrast_ratios_b"][ks] = cr_b
 
+            noise_a = noise_b = None
+            if not single:
+                nc_a, noise_a = self._nc_score(std_a, mask_neb_shared, mask_bg_a)
+                partial["std_nc_score_a"][ks] = nc_a
+                partial["std_nc_noise_a"][ks] = noise_a
+                nc_b, noise_b = self._nc_score(std_b, mask_neb_shared, mask_bg_b)
+                partial["std_nc_score_b"][ks] = nc_b
+                partial["std_nc_noise_b"][ks] = noise_b
+
             partial["panels"][f"std_{ks}px"] = {
                 "a":    std_a.astype(np.float32),
                 "b":    std_b.astype(np.float32) if std_b is not None else None,
                 "diff": (std_a - std_b).astype(np.float32) if std_b is not None else None,
             }
+            if not single and noise_a and noise_b:
+                partial["panels"][f"nrm_std_{ks}px"] = {
+                    "a": (std_a / noise_a).astype(np.float32),
+                    "b": (std_b / noise_b).astype(np.float32),
+                    "diff": None,
+                }
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -309,6 +387,17 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                 )
             figures[f"std_{ks}px"] = fig
+
+            if not single and noise_a and noise_b:
+                figures[f"nrm_std_{ks}px"] = self._plot_side_by_side(
+                    self._crop_border(std_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(std_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local σ (× noise floor) — kernel {ks}px — {label_a}",
+                    f"Local σ (× noise floor) — kernel {ks}px — {label_b}",
+                    diff_title=f"Diff (A−B), noise-normalised, kernel {ks}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    display_roi=None,
+                )
 
             if crosshair is not None:
                 pos, pa = self._sample_line(std_a, **crosshair)
@@ -352,6 +441,43 @@ class SpatialDetailAnalyzer:
             return None
         return float(np.median(neb_vals)) / bg_med
 
+    def _nc_score(self, detail_map: np.ndarray,
+                  mask_neb_shared: np.ndarray | None,
+                  mask_bg: np.ndarray) -> tuple[float | None, float | None]:
+        """Noise-corrected local-contrast score for one detail map at one scale.
+
+        score = median(|detail|) over the pixels BOTH images classify as nebula
+        (mask_neb_shared), divided by median(|detail|) over THIS image's own
+        background mask — its empirical per-scale noise floor for this operator.
+        Returns (score, noise_floor); either is None if a mask selects zero pixels,
+        mask_neb_shared is unavailable (single-image mode), or noise_floor <= 0.
+        """
+        if mask_neb_shared is None:
+            return None, None
+        h = min(detail_map.shape[0], mask_neb_shared.shape[0], mask_bg.shape[0])
+        w = min(detail_map.shape[1], mask_neb_shared.shape[1], mask_bg.shape[1])
+        absmap = np.abs(detail_map[:h, :w])
+        neb_vals = absmap[mask_neb_shared[:h, :w]]
+        bg_vals = absmap[mask_bg[:h, :w]]
+        if neb_vals.size == 0 or bg_vals.size == 0:
+            return None, None
+        noise_floor = float(bn.median(bg_vals))
+        if noise_floor <= 0:
+            return None, None
+        return float(bn.median(neb_vals)) / noise_floor, noise_floor
+
+    @staticmethod
+    def _compute_nc_ratios(score_a: dict, score_b: dict) -> dict:
+        """Per-scale A/B ratio of noise-corrected scores; {} if either side is empty
+        (single-image mode)."""
+        if not score_a or not score_b:
+            return {}
+        out = {}
+        for scale, va in score_a.items():
+            vb = score_b.get(scale)
+            out[scale] = None if (va is None or vb is None or vb == 0) else va / vb
+        return out
+
     # ------------------------------------------------------------------
     # Laplacian of Gaussian maps
     # ------------------------------------------------------------------
@@ -359,18 +485,40 @@ class SpatialDetailAnalyzer:
     def _log_analysis(self, norm_a, norm_b, sigmas,
                        label_a, label_b,
                        display_roi=None,
-                       crosshair=None) -> tuple[dict, dict]:
+                       crosshair=None,
+                       mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
         figures = {}
-        partial: dict = {"panels": {}}
+        partial: dict = {
+            "log_nc_score_a": {}, "log_nc_score_b": {},
+            "log_nc_noise_a": {}, "log_nc_noise_b": {},
+            "panels": {},
+        }
         single = norm_b is None
         for sigma in sigmas:
             log_a = np.abs(gaussian_laplace(norm_a, sigma=sigma))
             log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma)) if not single else None
+
+            noise_a = noise_b = None
+            if not single:
+                nc_a, noise_a = self._nc_score(log_a, mask_neb_shared, mask_bg_a)
+                partial["log_nc_score_a"][sigma] = nc_a
+                partial["log_nc_noise_a"][sigma] = noise_a
+                nc_b, noise_b = self._nc_score(log_b, mask_neb_shared, mask_bg_b)
+                partial["log_nc_score_b"][sigma] = nc_b
+                partial["log_nc_noise_b"][sigma] = noise_b
+
             partial["panels"][f"log_{sigma}"] = {
                 "a":    log_a.astype(np.float32),
                 "b":    log_b.astype(np.float32) if log_b is not None else None,
                 "diff": (log_a - log_b).astype(np.float32) if log_b is not None else None,
             }
+            if not single and noise_a and noise_b:
+                partial["panels"][f"nrm_log_{sigma}"] = {
+                    "a": (log_a / noise_a).astype(np.float32),
+                    "b": (log_b / noise_b).astype(np.float32),
+                    "diff": None,
+                }
+
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
@@ -390,6 +538,18 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                 )
             figures[f"log_sigma{sigma}"] = fig
+
+            if not single and noise_a and noise_b:
+                figures[f"nrm_log_{sigma}"] = self._plot_side_by_side(
+                    self._crop_border(log_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(log_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"|LoG| (× noise floor) σ={sigma}px — {label_a}",
+                    f"|LoG| (× noise floor) σ={sigma}px — {label_b}",
+                    diff_title=f"Diff (A−B), noise-normalised, σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    display_roi=None,
+                )
+
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(log_a, **crosshair)
                 _, pb = self._sample_line(log_b, **crosshair)
@@ -399,17 +559,103 @@ class SpatialDetailAnalyzer:
         return figs_to_b64(figures, dpi=150), partial
 
     # ------------------------------------------------------------------
+    # Gradient magnitude (edge sharpness)
+    # ------------------------------------------------------------------
+
+    def _gradient_analysis(self, norm_a, norm_b, sigmas,
+                            label_a, label_b,
+                            display_roi=None,
+                            crosshair=None,
+                            mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
+        """G = |gradient| at Gaussian scale sigma (first spatial derivative magnitude).
+        Reuses the LOG_SIGMAS scale set so gradient and |LoG| are directly comparable
+        at identical spatial scales. Structured identically to _log_analysis."""
+        figures = {}
+        partial: dict = {
+            "gm_nc_score_a": {}, "gm_nc_score_b": {},
+            "gm_nc_noise_a": {}, "gm_nc_noise_b": {},
+            "panels": {},
+        }
+        single = norm_b is None
+        for sigma in sigmas:
+            gm_a = gaussian_gradient_magnitude(norm_a, sigma=sigma)
+            gm_b = gaussian_gradient_magnitude(norm_b, sigma=sigma) if not single else None
+
+            noise_a = noise_b = None
+            if not single:
+                nc_a, noise_a = self._nc_score(gm_a, mask_neb_shared, mask_bg_a)
+                partial["gm_nc_score_a"][sigma] = nc_a
+                partial["gm_nc_noise_a"][sigma] = noise_a
+                nc_b, noise_b = self._nc_score(gm_b, mask_neb_shared, mask_bg_b)
+                partial["gm_nc_score_b"][sigma] = nc_b
+                partial["gm_nc_noise_b"][sigma] = noise_b
+
+            partial["panels"][f"gradient_{sigma}"] = {
+                "a":    gm_a.astype(np.float32),
+                "b":    gm_b.astype(np.float32) if gm_b is not None else None,
+                "diff": (gm_a - gm_b).astype(np.float32) if gm_b is not None else None,
+            }
+            if not single and noise_a and noise_b:
+                partial["panels"][f"nrm_gradient_{sigma}"] = {
+                    "a": (gm_a / noise_a).astype(np.float32),
+                    "b": (gm_b / noise_b).astype(np.float32),
+                    "diff": None,
+                }
+
+            if not single:
+                fig = self._plot_side_by_side(
+                    self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(gm_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Gradient |G| σ={sigma}px — {label_a}",
+                    f"Gradient |G| σ={sigma}px — {label_b}",
+                    diff_title=f"Gradient diff (A−B), σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                    display_roi=None,
+                )
+            else:
+                fig = self._plot_single(
+                    self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Gradient |G| σ={sigma}px — {label_a}",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                )
+            figures[f"gradient_{sigma}"] = fig
+
+            if not single and noise_a and noise_b:
+                figures[f"nrm_gradient_{sigma}"] = self._plot_side_by_side(
+                    self._crop_border(gm_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(gm_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Gradient (× noise floor) σ={sigma}px — {label_a}",
+                    f"Gradient (× noise floor) σ={sigma}px — {label_b}",
+                    diff_title=f"Diff (A−B), noise-normalised, σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    display_roi=None,
+                )
+
+            if crosshair is not None and not single:
+                pos, pa = self._sample_line(gm_a, **crosshair)
+                _, pb = self._sample_line(gm_b, **crosshair)
+                figures[f"xs_gradient_{sigma}"] = self._plot_cross_section(
+                    pos, pa, pb, label_a, label_b,
+                    f"Cross-section — Gradient, σ={sigma}px")
+        return figs_to_b64(figures, dpi=150), partial
+
+    # ------------------------------------------------------------------
     # Wavelet decomposition
     # ------------------------------------------------------------------
 
     def _wavelet_analysis(self, norm_a, norm_b, wavelet, levels,
                            label_a, label_b,
                            display_roi=None,
-                           crosshair=None) -> tuple[dict, dict]:
+                           crosshair=None,
+                           mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "sigma_noise_a": None, "sigma_noise_b": None,
             "wavelet_snr_a": {}, "wavelet_snr_b": {},
+            "wavelet_nc_score_a": {}, "wavelet_nc_score_b": {},
+            "wavelet_nc_noise_a": {}, "wavelet_nc_noise_b": {},
             "panels": {},
         }
         single = norm_b is None
@@ -434,18 +680,39 @@ class SpatialDetailAnalyzer:
         figures["wavelet_snr"] = self._plot_snr_bars(
             partial["wavelet_snr_a"], partial["wavelet_snr_b"], label_a, label_b, levels)
 
-        # Reconstruct and display levels 2 and 3 (best signal content)
-        for display_level in [2, 3]:
-            if display_level > levels:
-                continue
-            coeff_idx = levels + 1 - display_level
+        # Reconstruct every level for noise-corrected scoring (raw subband coefficients
+        # live at reduced spatial resolution and don't align pixel-for-pixel with the
+        # full-resolution nebula mask — only the inverse-DWT output does). Display
+        # figures/panels stay restricted to levels 2-3 ("best signal content").
+        for human_level in range(1, levels + 1):
+            coeff_idx = levels + 1 - human_level
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
             rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels) if coeffs_b is not None else None
+
+            noise_a = noise_b = None
+            if not single:
+                nc_a, noise_a = self._nc_score(rec_a, mask_neb_shared, mask_bg_a)
+                partial["wavelet_nc_score_a"][human_level] = nc_a
+                partial["wavelet_nc_noise_a"][human_level] = noise_a
+                nc_b, noise_b = self._nc_score(rec_b, mask_neb_shared, mask_bg_b)
+                partial["wavelet_nc_score_b"][human_level] = nc_b
+                partial["wavelet_nc_noise_b"][human_level] = noise_b
+
+            if human_level not in (2, 3):
+                continue   # display/panels only for levels 2-3, unchanged from prior behaviour
+
+            display_level = human_level
             partial["panels"][f"wavelet_{display_level}"] = {
                 "a":    rec_a.astype(np.float32),
                 "b":    rec_b.astype(np.float32) if rec_b is not None else None,
                 "diff": (rec_a - rec_b).astype(np.float32) if rec_b is not None else None,
             }
+            if not single and noise_a and noise_b:
+                partial["panels"][f"nrm_wavelet_{display_level}"] = {
+                    "a": (rec_a / noise_a).astype(np.float32),
+                    "b": (rec_b / noise_b).astype(np.float32),
+                    "diff": None,
+                }
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
@@ -464,6 +731,19 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                 )
             figures[f"wavelet_level{display_level}"] = fig
+
+            if not single and noise_a and noise_b:
+                figures[f"nrm_wavelet_{display_level}"] = self._plot_side_by_side(
+                    self._crop_border(rec_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(rec_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Wavelet level {display_level} (× noise floor) — {label_a}",
+                    f"Wavelet level {display_level} (× noise floor) — {label_b}",
+                    diff_title=f"Level {display_level} diff (A−B), noise-normalised",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    symmetric_diff=True,
+                    display_roi=None,
+                )
+
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(rec_a, **crosshair)
                 _, pb = self._sample_line(rec_b, **crosshair)
@@ -511,11 +791,14 @@ class SpatialDetailAnalyzer:
 
     def _weber_analysis(self, norm_a, norm_b, kernel_sizes,
                         label_a, label_b,
-                        display_roi=None) -> tuple[dict, dict]:
+                        display_roi=None,
+                        mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "weber_contrast_a": {},
             "weber_contrast_b": {},
+            "weber_nc_score_a": {}, "weber_nc_score_b": {},
+            "weber_nc_noise_a": {}, "weber_nc_noise_b": {},
             "panels": {},
         }
         single = norm_b is None
@@ -528,11 +811,26 @@ class SpatialDetailAnalyzer:
             if not single:
                 partial["weber_contrast_b"][ks] = float(np.percentile(wc_b, 99))
 
+            noise_a = noise_b = None
+            if not single:
+                nc_a, noise_a = self._nc_score(wc_a, mask_neb_shared, mask_bg_a)
+                partial["weber_nc_score_a"][ks] = nc_a
+                partial["weber_nc_noise_a"][ks] = noise_a
+                nc_b, noise_b = self._nc_score(wc_b, mask_neb_shared, mask_bg_b)
+                partial["weber_nc_score_b"][ks] = nc_b
+                partial["weber_nc_noise_b"][ks] = noise_b
+
             partial["panels"][f"weber_{ks}px"] = {
                 "a":    wc_a.astype(np.float32),
                 "b":    wc_b.astype(np.float32) if wc_b is not None else None,
                 "diff": (wc_a - wc_b).astype(np.float32) if wc_b is not None else None,
             }
+            if not single and noise_a and noise_b:
+                partial["panels"][f"nrm_weber_{ks}px"] = {
+                    "a": (wc_a / noise_a).astype(np.float32),
+                    "b": (wc_b / noise_b).astype(np.float32),
+                    "diff": None,
+                }
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -553,6 +851,17 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                 )
             figures[f"weber_{ks}px"] = fig
+
+            if not single and noise_a and noise_b:
+                figures[f"nrm_weber_{ks}px"] = self._plot_side_by_side(
+                    self._crop_border(wc_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(wc_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Weber (× noise floor) — kernel {ks}px — {label_a}",
+                    f"Weber (× noise floor) — kernel {ks}px — {label_b}",
+                    diff_title=f"Diff (A−B), noise-normalised, kernel {ks}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    display_roi=None,
+                )
 
         return figs_to_b64(figures, dpi=150), partial
 
@@ -705,6 +1014,49 @@ class SpatialDetailAnalyzer:
         ax.set_xticklabels([f"Level {i}" for i in x])
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
+        fig.tight_layout()
+        return fig
+
+    def _plot_nc_ratio_overview(self, ratios_by_method: dict) -> plt.Figure | None:
+        """One line per method: noise-corrected A/B ratio vs. approximate spatial
+        scale (px, log-x). None if no method has any usable (non-None) value."""
+        _SCALE_LABEL = {
+            "std": "px", "weber": "px", "log": "σ px",
+            "gradient": "σ px", "wavelet": "level (≈px)",
+        }
+        _COLORS = {
+            "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
+            "weber": "seagreen", "gradient": "goldenrod",
+        }
+        series = {}
+        for method, ratios in ratios_by_method.items():
+            if not ratios:
+                continue
+            if method == "wavelet":
+                pts = [(2 ** scale, v) for scale, v in ratios.items() if v is not None]
+            else:
+                pts = [(float(scale), v) for scale, v in ratios.items() if v is not None]
+            if pts:
+                pts.sort(key=lambda p: p[0])
+                series[method] = pts
+
+        if not series:
+            return None
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        for method, pts in series.items():
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            ax.plot(xs, ys, marker="o", label=f"{method} ({_SCALE_LABEL.get(method, 'px')})",
+                    color=_COLORS.get(method))
+        ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8,
+                   label="Ratio = 1 (A = B)")
+        ax.set_xscale("log")
+        ax.set_xlabel("Approximate spatial scale (px)")
+        ax.set_ylabel("Noise-corrected score ratio (A / B)")
+        ax.set_title("Noise-corrected local contrast — cross-method overview")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
         fig.tight_layout()
         return fig
 

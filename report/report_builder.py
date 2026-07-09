@@ -461,6 +461,43 @@ def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[st
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
 
 
+def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label, val_fmt: str = ".3f") -> str:
+    """Build <tr> rows for a noise-corrected score table: scale | A | B | Ratio A/B.
+    scale_label(scale) -> row label string. Ratio cell is colored relative to
+    1.0 (parity), independently of the A/B columns' own coloring."""
+    rows = ""
+    for scale in sorted(set(list(score_a.keys()) + list(score_b.keys()))):
+        va, vb, vr = score_a.get(scale), score_b.get(scale), ratio.get(scale)
+        ca, cb = _better_worse_class(va, vb)
+        cr, _ = _better_worse_class(vr, 1.0)
+        rows += (f"<tr><td>{scale_label(scale)}</td>"
+                 f"<td class='{ca}'>{_val(va, val_fmt)}</td>"
+                 f"<td class='{cb}'>{_val(vb, val_fmt)}</td>"
+                 f"<td class='{cr}'>{_val(vr, val_fmt)}</td></tr>")
+    return rows
+
+
+def _panel_display_name(pkey: str) -> str:
+    """Derive a human-readable label from a SpatialDetailAnalyzer panels dict key.
+    Dynamic (not a hardcoded map) so every scale it computes — including future
+    additions — automatically appears in the Report Inspector catalog."""
+    nrm = pkey.startswith("nrm_")
+    base = pkey[4:] if nrm else pkey
+    if base.startswith("std_") and base.endswith("px"):
+        name = f"Std Dev {base[4:-2]} px"
+    elif base.startswith("log_"):
+        name = f"LoG σ {base[4:]} px"
+    elif base.startswith("wavelet_"):
+        name = f"Wavelet level {base[8:]}"
+    elif base.startswith("weber_") and base.endswith("px"):
+        name = f"Weber {base[6:-2]} px"
+    elif base.startswith("gradient_"):
+        name = f"Gradient σ {base[9:]} px"
+    else:
+        name = base
+    return f"{name} (noise-normalized)" if nrm else name
+
+
 def _power_ratio_db(freq_a, rp_a, freq_b, rp_b) -> tuple[np.ndarray, np.ndarray] | None:
     """10*log10(P_A/P_B) per frequency bin. Returns None if data is missing or the
     two frequency axes are not bin-for-bin aligned."""
@@ -787,19 +824,10 @@ class ReportBuilder:
                                {"Image A": "gm_display_a", "Image B": "gm_display_b"})
 
         # ── Spatial Detail subsections ────────────────────────────────────────
-        _PANEL_IMAGE_SETS = {
-            "std_5px":    "Std Dev 5 px",
-            "std_15px":   "Std Dev 15 px",
-            "std_31px":   "Std Dev 31 px",
-            "log_1.5":    "LoG σ 1.5 px",
-            "log_3.0":    "LoG σ 3.0 px",
-            "log_6.0":    "LoG σ 6.0 px",
-            "wavelet_2":  "Wavelet level 2",
-            "wavelet_3":  "Wavelet level 3",
-        }
         panels_a = (result_a.spatial_metrics or {}).get("panels", {})
         panels_b = (result_b.spatial_metrics or {}).get("panels", {})
-        for pkey, img_set_name in _PANEL_IMAGE_SETS.items():
+        for pkey in sorted(panels_a.keys()):
+            img_set_name = _panel_display_name(pkey)
             pa_panel = panels_a.get(pkey)
             if pa_panel is None:
                 continue
@@ -3736,6 +3764,46 @@ curve is shown.</p>
         sigma_a = _val(sm.get("sigma_noise_a"), ".5f")
         sigma_b = _val(sm.get("sigma_noise_b"), ".5f")
 
+        # Noise-corrected local contrast ratio tables (one per method)
+        std_nc_rows = _nc_ratio_rows(
+            sm.get("std_nc_score_a", {}), sm.get("std_nc_score_b", {}),
+            sm.get("std_nc_ratio", {}), lambda ks: f"{ks} px")
+        log_nc_rows = _nc_ratio_rows(
+            sm.get("log_nc_score_a", {}), sm.get("log_nc_score_b", {}),
+            sm.get("log_nc_ratio", {}), lambda s: f"σ = {s} px")
+        wavelet_nc_rows = _nc_ratio_rows(
+            sm.get("wavelet_nc_score_a", {}), sm.get("wavelet_nc_score_b", {}),
+            sm.get("wavelet_nc_ratio", {}), lambda lvl: f"Level {lvl} (~{2 ** lvl}px scale)")
+        weber_nc_rows = _nc_ratio_rows(
+            sm.get("weber_nc_score_a", {}), sm.get("weber_nc_score_b", {}),
+            sm.get("weber_nc_ratio", {}), lambda ks: f"{ks} px")
+        gm_nc_rows = _nc_ratio_rows(
+            sm.get("gm_nc_score_a", {}), sm.get("gm_nc_score_b", {}),
+            sm.get("gm_nc_ratio", {}), lambda s: f"σ = {s} px")
+
+        nc_methodology_box = _info_box(
+            'Each detail map above additionally yields a <strong>noise-corrected local '
+            'contrast score</strong> at every scale: score = median(|detail|) over the '
+            'region BOTH images classify as nebula (intersection of each image\'s own '
+            'nebula mask), divided by median(|detail|) over that image\'s OWN background '
+            'region (its empirical per-scale noise floor). <strong>Ratio A/B</strong> '
+            'divides Image A\'s score by Image B\'s score at each scale — greater than 1 '
+            'means Image A shows relatively stronger detail than Image B at that scale, '
+            'after accounting for each image\'s own noise level. Scale units differ by '
+            'method (kernel px for std/Weber, Gaussian σ px for LoG/gradient, ≈2<sup>level</sup> '
+            'px for wavelet) and ratios should not be compared numerically across methods — '
+            'see 8h for a cross-method overview. See also Section 7 for the frequency-domain '
+            'view of this same question. Maps below are also shown in noise-normalised form '
+            '(map ÷ noise floor) so that a shared colour scale is a fair visual comparison '
+            'between A and B, even when their absolute noise levels differ.',
+            title="Noise-corrected local contrast (methodology)")
+        nc_empty_note = ""
+        if not getattr(self, "_single_image", False) and sm.get("nc_shared_nebula_pixels", 0) == 0:
+            nc_empty_note = _info_box(
+                '⚠ Images A and B share no common nebula-mask pixels — noise-corrected '
+                'scores below are unavailable (—) for every scale and method.',
+                title="No shared nebula region", open=True)
+
         def figs_for(prefix):
             out = ""
             for key in sorted(figs):
@@ -3834,6 +3902,8 @@ curve is shown.</p>
            'across different filter bandwidths. Images are shown side-by-side with a shared '
            'colour scale; the third panel shows the difference A−B.',
            title="Spatial detail maps overview")}
+{nc_methodology_box}
+{nc_empty_note}
 
 <h3>8b. Local Standard Deviation Maps</h3>
 {_info_box('Measures how much pixel values vary within a neighbourhood. '
@@ -3851,10 +3921,16 @@ curve is shown.</p>
   <tr><th>Kernel size</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   {cr_rows}
 </table>
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {std_nc_rows}
+</table>
 {xs_note}{paired_figs_for("std_", "xs_std_")}
 <p class="caption">Side-by-side local σ maps at each kernel size (shared colour scale),
 each followed by its cross-section profile.
 The difference map (right) highlights where one filter preserves more local variation.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_std_")}
 <h3>8c. Laplacian of Gaussian (LoG) Maps</h3>
 {_info_box('The Laplacian of Gaussian highlights regions of rapid intensity '
            'change at a specific spatial scale (controlled by σ). Brighter regions in |LoG| maps '
@@ -3867,10 +3943,16 @@ The difference map (right) highlights where one filter preserves more local vari
            'brighter LoG response at small σ values. Cross-section profiles reveal subtle '
            'differences in edge sharpness along the selected line.',
            title="Laplacian of Gaussian (LoG)")}
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {log_nc_rows}
+</table>
 {paired_figs_for("log_", "xs_log_")}
 <p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
 each followed by its cross-section profile.
 A filter preserving more fine detail shows brighter, more defined boundaries at small σ.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_log_")}
 <h3>8d. Wavelet Decomposition</h3>
 {_wavelet_box}
 
@@ -3882,11 +3964,17 @@ A filter preserving more fine detail shows brighter, more defined boundaries at 
   <tr><th>Wavelet level</th><th>{ra.label} SNR</th><th>{rb.label} SNR</th></tr>
   {snr_rows}
 </table>
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {wavelet_nc_rows}
+</table>
 
 {paired_figs_for("wavelet_level", "xs_wavelet_level")}
 <p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
 diverging colourmap), each followed by its cross-section profile.
 The difference panel (right) shows where fine structure differs between the two filters.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_wavelet_")}
 
 <h3>8e. Weber Fraction Contrast Maps</h3>
 {_info_box(
@@ -3915,12 +4003,50 @@ The difference panel (right) shows where fine structure differs between the two 
   <tr><th>Kernel size</th><th>{ra.label} (99th pct c)</th><th>{rb.label} (99th pct c)</th></tr>
   {wc_rows}
 </table>
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {weber_nc_rows}
+</table>
 {figs_for("weber_")}
 <p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root colour
 scale, viridis). Brighter regions have higher Weber contrast — the local intensity range
 is large relative to the local median luminance. The difference panel (A−B) shows where
 one image achieves greater relative contrast. High values over dark-sky regions are
-expected; use a nebula ROI for meaningful filter comparison.</p>"""
+expected; use a nebula ROI for meaningful filter comparison.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_weber_")}
+
+<h3>8f. Gradient Magnitude (Edge Sharpness)</h3>
+{_info_box('The gradient magnitude G = |∇I| = sqrt((∂I/∂x)² + (∂I/∂y)²) highlights regions '
+           'of rapid intensity change at a specific spatial scale (controlled by σ), computed '
+           'as the first spatial derivative rather than the second derivative (curvature) LoG uses. '
+           'Smaller σ highlights finer features; larger σ highlights broader structures. '
+           'Reuses the same σ scales as 8c so gradient and |LoG| are directly comparable at '
+           'identical spatial frequencies. This measures how abrupt structure boundaries are — '
+           'relevant when one filter renders stronger filament boundaries or shock fronts. '
+           '<strong>Distinct from Section 6 (Edge Detection):</strong> Section 6 measures '
+           'precise sub-pixel edge width and contrast at the 2–3 strongest individual detected '
+           'edges. This section is the opposite granularity — an aggregate, whole-nebula, '
+           'multi-scale sharpness score across the shared ROI, following the same '
+           'noise-corrected framework as 8b–8e. They are complementary, not redundant.',
+           title="Gradient magnitude / edge sharpness")}
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {gm_nc_rows}
+</table>
+{paired_figs_for("gradient_", "xs_gradient_")}
+<p class="caption">Gradient magnitude maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
+each followed by its cross-section profile.
+A filter preserving sharper boundaries shows brighter, more defined gradient response.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_gradient_")}
+
+<h3>8h. Noise-Corrected Contrast — Cross-Method Overview</h3>
+{_hires_img_tag(figs.get("nc_ratio_overview"), "NC ratio overview")}
+<p class="caption">Ratio A/B for every noise-corrected method plotted against its
+approximate spatial scale. Scale units differ by method (see 8b–8f methodology
+boxes) — use this chart to spot which spatial-scale regime favours which filter,
+not to compare absolute ratio values across methods.</p>"""
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 

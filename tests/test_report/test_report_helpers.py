@@ -17,6 +17,8 @@ from report.report_builder import (
     _fig_to_b64,
     _psf_stat_test,
     _power_ratio_db,
+    _nc_ratio_rows,
+    _panel_display_name,
 )
 
 EM_DASH = "—"
@@ -228,3 +230,59 @@ class TestPowerRatioDb:
         freq_b = np.linspace(0.0, 0.4, 5)
         rp = np.ones(5)
         assert _power_ratio_db(freq_a, rp, freq_b, rp) is None
+
+
+class TestNcRatioRows:
+    def _label(self, scale):
+        return f"{scale} px"
+
+    def test_known_ratio_formatted(self):
+        rows = _nc_ratio_rows({3: 2.0}, {3: 1.0}, {3: 2.0}, self._label)
+        assert "2.000" in rows
+        assert "1.000" in rows
+
+    def test_missing_entry_renders_em_dash(self):
+        rows = _nc_ratio_rows({3: 1.5}, {}, {}, self._label)
+        assert EM_DASH in rows
+
+    def test_none_ratio_renders_em_dash(self):
+        rows = _nc_ratio_rows({3: 1.5}, {3: None}, {3: None}, self._label)
+        assert EM_DASH in rows
+
+    def test_empty_inputs_produce_no_rows(self):
+        rows = _nc_ratio_rows({}, {}, {}, self._label)
+        assert rows == ""
+
+    def test_scale_label_used(self):
+        rows = _nc_ratio_rows({5: 1.0}, {5: 1.0}, {5: 1.0}, lambda s: f"σ = {s} px")
+        assert "σ = 5 px" in rows
+
+    def test_ratio_cell_colored_independently_of_ab_columns(self):
+        # A/B columns: A < B -> "worse"/"better"; ratio itself (0.5) vs parity (1.0)
+        # is colored via a SEPARATE _better_worse_class(vr, 1.0) call.
+        rows = _nc_ratio_rows({3: 1.0}, {3: 2.0}, {3: 0.5}, self._label)
+        assert "worse" in rows   # A's own value vs B's
+        # the ratio 0.5 < 1.0 is also "worse" here, but computed independently
+        # (not derived from the A/B column classes) - verify it renders at all
+        assert "0.500" in rows
+
+    def test_union_of_scale_keys(self):
+        rows = _nc_ratio_rows({3: 1.0}, {5: 1.0}, {}, self._label)
+        assert "3 px" in rows
+        assert "5 px" in rows
+
+
+class TestPanelDisplayName:
+    @pytest.mark.parametrize("pkey,expected", [
+        ("std_3px", "Std Dev 3 px"),
+        ("std_10px", "Std Dev 10 px"),
+        ("weber_9px", "Weber 9 px"),
+        ("log_1.5", "LoG σ 1.5 px"),
+        ("wavelet_2", "Wavelet level 2"),
+        ("gradient_3.0", "Gradient σ 3.0 px"),
+        ("nrm_log_1.5", "LoG σ 1.5 px (noise-normalized)"),
+        ("nrm_std_3px", "Std Dev 3 px (noise-normalized)"),
+        ("nrm_gradient_6.0", "Gradient σ 6.0 px (noise-normalized)"),
+    ])
+    def test_display_name(self, pkey, expected):
+        assert _panel_display_name(pkey) == expected
