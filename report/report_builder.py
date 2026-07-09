@@ -483,7 +483,9 @@ def _panel_display_name(pkey: str) -> str:
     additions — automatically appears in the Report Inspector catalog."""
     nrm = pkey.startswith("nrm_")
     base = pkey[4:] if nrm else pkey
-    if base.startswith("std_") and base.endswith("px"):
+    if base == "original":
+        name = "Original Image (ROI)"
+    elif base.startswith("std_") and base.endswith("px"):
         name = f"Std Dev {base[4:-2]} px"
     elif base.startswith("log_"):
         name = f"LoG σ {base[4:]} px"

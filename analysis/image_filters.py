@@ -120,6 +120,16 @@ class SpatialDetailAnalyzer:
 
         result["display_roi"] = display_roi
 
+        # Export the exact preprocessed array every std/LoG/wavelet/Weber/gradient
+        # map is computed from (mean-normalised, ROI-cropped if a ROI was given) as
+        # its own panel, so the Report Inspector can show the source image content
+        # for a map alongside the map itself, pixel-aligned to the same crop.
+        result["panels"]["original"] = {
+            "a":    analysis_a.astype(np.float32),
+            "b":    analysis_b.astype(np.float32) if analysis_b is not None else None,
+            "diff": (analysis_a - analysis_b).astype(np.float32) if analysis_b is not None else None,
+        }
+
         # Shared nebula ROI for noise-corrected A/B scoring: pixels BOTH images
         # independently classify as nebula. None in single-image mode.
         mask_neb_shared = None

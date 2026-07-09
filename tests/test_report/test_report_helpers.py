@@ -283,6 +283,7 @@ class TestPanelDisplayName:
         ("nrm_log_1.5", "LoG σ 1.5 px (noise-normalized)"),
         ("nrm_std_3px", "Std Dev 3 px (noise-normalized)"),
         ("nrm_gradient_6.0", "Gradient σ 6.0 px (noise-normalized)"),
+        ("original", "Original Image (ROI)"),
     ])
     def test_display_name(self, pkey, expected):
         assert _panel_display_name(pkey) == expected

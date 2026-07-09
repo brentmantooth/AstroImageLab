@@ -27,6 +27,13 @@ class TestAnalyze:
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
         assert "panels" in result
 
+    def test_original_panel_present_single_image(self, astro_image_a):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        original = result["panels"]["original"]
+        assert original["a"] is not None
+        assert original["b"] is None
+        assert original["diff"] is None
+
     def test_contrast_ratios_are_positive(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
         ratios = result.get("contrast_ratios_a") or []
@@ -204,6 +211,13 @@ class TestNoiseCorrectedContrast:
             assert f"nrm_weber_{ks}px" in panels
         for lvl in (2, 3):
             assert f"nrm_wavelet_{lvl}" in panels
+
+    def test_original_panel_present_two_image(self, nc_result):
+        original = nc_result["panels"]["original"]
+        assert original["a"] is not None
+        assert original["b"] is not None
+        assert original["diff"] is not None
+        assert original["a"].shape == original["b"].shape
 
     def test_normalized_panel_values_differ_from_raw(self, nc_result):
         panels = nc_result["panels"]
