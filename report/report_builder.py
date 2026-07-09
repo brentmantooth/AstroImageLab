@@ -3292,7 +3292,13 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
             w_label = f"  (A: {w_a:.2f} px)"
         elif w_b is not None:
             w_label = f"  (B: {w_b:.2f} px)"
-        ax_esf.set_title(f"Edge #{edge_num} ESF — 10–90% width{w_label}", fontsize=9)
+        low_conf = edge_a.get("low_confidence") or edge_b.get("low_confidence")
+        title = f"Edge #{edge_num} ESF — 10–90% width{w_label}"
+        if low_conf:
+            title += "  ⚠ low confidence"
+            ax_esf.set_title(title, fontsize=9, color="#c0392b")
+        else:
+            ax_esf.set_title(title, fontsize=9)
         ax_esf.set_xlabel("Position (px)")
         ax_esf.set_ylabel("Normalised intensity")
         ax_esf.legend(fontsize=8)
@@ -3375,8 +3381,16 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
             if ea_e or eb_e:
                 esf_lsf_fig = self._plot_esf_lsf_pair(ea_e, eb_e, ra.label, rb.label, i + 1)
                 esf_lsf_html = _img_tag(esf_lsf_fig, f"Edge #{i+1} ESF + LSF")
+            low_conf_badge = (
+                ' &nbsp;<span class="metric-label-warn">⚠ low confidence — '
+                'ESF profile is not cleanly monotonic, likely because the scan line '
+                'crossed more than one physical edge (a corner, knot, or nearby '
+                'filament); treat the width/contrast numbers for this edge with '
+                'caution</span>'
+                if (ea_e.get("low_confidence") or eb_e.get("low_confidence")) else ""
+            )
             edge_figures_html += (
-                f'<h4 style="margin-top:1.2em;">Edge #{i+1}</h4>'
+                f'<h4 style="margin-top:1.2em;">Edge #{i+1}{low_conf_badge}</h4>'
                 f'<div style="display:flex;gap:10px;">'
                 + "".join(f'<div style="flex:1;">{img}</div>'
                           for img in [img_a_i, img_b_i] if img)
@@ -3470,8 +3484,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
   '<strong>ESF scan direction is taken from whichever image has the stronger overall '
   'gradient</strong>, then applied to both, so the two ESF curves always sample the '
   'same cross-section orientation and are directly comparable. '
-  'The table below shows metrics from the strongest of the three edges; individual '
-  'per-edge figures follow.',
+  'Each candidate\'s ESF is checked for <strong>monotonicity</strong> (it should be a '
+  'single smooth transition); a candidate whose profile doubles back on itself — '
+  'usually because the scan line crossed a corner, knot, or a second nearby edge — '
+  'is skipped in favour of the next-strongest gradient peak. If every candidate for an '
+  'image fails this check, the least-bad one is still shown, clearly marked '
+  '<strong>⚠ low confidence</strong>, rather than silently reporting a meaningless width. '
+  'The table below shows metrics from the strongest confident edge (falling back to the '
+  'strongest overall if none are confident); individual per-edge figures follow.',
   title="How the edge regions were selected")}
 {gradient_row}
 

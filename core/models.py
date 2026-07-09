@@ -23,6 +23,7 @@ DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback
 SEEING_WARN_FWHM_ARCS = 3.0
 EDGE_ROI_HALF_WIDTH = 30
 EDGE_ROI_MAP_INDICATOR_PX = 500   # px; full width of the ROI indicator box drawn on the gradient magnitude map
+EDGE_ESF_MIN_MONOTONICITY = 0.3   # min net/total variation ratio; below this the ESF likely crossed >1 edge (corner/filament)
 FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); default for UI
 GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
 RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation

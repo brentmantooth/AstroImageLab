@@ -1,18 +1,24 @@
 ﻿from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from scipy.ndimage import sobel, rotate, gaussian_gradient_magnitude, median_filter
+from scipy.ndimage import sobel, rotate, gaussian_gradient_magnitude, median_filter, uniform_filter1d
 from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
-from core.models import EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX, SECTION8_BORDER_CROP_FRACTION
+from core.models import (EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX,
+                          SECTION8_BORDER_CROP_FRACTION, EDGE_ESF_MIN_MONOTONICITY)
 
 EDGE_DISPLAY_HALF_WIDTH = 250   # half-side of the context window shown in the report figure
 N_TOP_EDGES = 3                  # number of gradient peaks to auto-detect
+N_CANDIDATE_EDGES = N_TOP_EDGES * 3   # extra auto-detect candidates so low-quality ones can be skipped
+_ESF_DISC_MARGIN_PX = 2.0        # safety margin (px) subtracted from the inscribed-circle radius
+_ESF_QUALITY_SMOOTH_FRAC = 0.20  # smoothing window as a fraction of ESF length, for the quality metric only
 
 
 def _gradient_sigma(pixel_scale: float) -> float:
@@ -54,9 +60,15 @@ class EdgeAnalyzer:
         image.estimate_background()
         bgsub = image.background_subtracted()
 
-        # Build list of (roi_data_array, roi_tuple) pairs
+        # Build list of (roi_data_array, roi_tuple) pairs. Auto-detect mode
+        # searches more candidates than N_TOP_EDGES so low-quality ones (ESF
+        # crossed more than one physical edge) can be skipped in favour of the
+        # next-strongest gradient peak; user-drawn/A-matched ROIs are fixed
+        # and can't be swapped for an alternative, so quality is only flagged
+        # for those, never used to drop them.
+        allow_skip = roi is None
         if roi is None:
-            roi_pairs = self._auto_detect_top_rois(bgsub, image)
+            roi_pairs = self._auto_detect_top_rois(bgsub, image, n=N_CANDIDATE_EDGES)
         elif isinstance(roi, list):
             h, w = bgsub.shape
             roi_pairs = []
@@ -74,7 +86,10 @@ class EdgeAnalyzer:
         rois_used = [r for _, r in roi_pairs]
 
         edges: list[dict] = []
+        rejected: list[dict] = []   # low-quality auto-detect candidates, kept only as a fallback
         for i, (roi_data, roi_tuple) in enumerate(roi_pairs):
+            if allow_skip and len(edges) >= N_TOP_EDGES:
+                break
             if roi_data is None or roi_data.size == 0:
                 continue
 
@@ -90,44 +105,22 @@ class EdgeAnalyzer:
             if esf is None or len(esf) < 5:
                 continue
 
-            lsf   = self._compute_lsf(positions, esf)
-            width = self._measure_edge_width(positions, esf)
-            ecr   = self._measure_edge_contrast_ratio(roi_data, edge_info)
+            quality = self._esf_quality(esf)
+            low_confidence = quality < EDGE_ESF_MIN_MONOTONICITY
+            entry = self._build_edge_entry(
+                image, bgsub, roi_data, roi_tuple, edge_info,
+                positions, esf, i, quality, low_confidence)
 
-            # 500×500 display context
-            x0, y0, x1, y1 = roi_tuple
-            xc_full = x0 + edge_info["center_x"]
-            yc_full = y0 + edge_info["center_y"]
-            dw  = EDGE_DISPLAY_HALF_WIDTH
-            dx0 = max(0, xc_full - dw)
-            dy0 = max(0, yc_full - dw)
-            dx1 = min(bgsub.shape[1], xc_full + dw)
-            dy1 = min(bgsub.shape[0], yc_full + dw)
-            display_roi  = bgsub[dy0:dy1, dx0:dx1]
-            analysis_rect = (x0 - dx0, y0 - dy0, x1 - dx0, y1 - dy0)
-            edge_info_display = dict(edge_info)
-            edge_info_display["center_x"] = xc_full - dx0
-            edge_info_display["center_y"] = yc_full - dy0
+            if allow_skip and low_confidence:
+                rejected.append(entry)
+                continue
+            edges.append(entry)
 
-            edges.append({
-                "roi_used":               roi_tuple,
-                "gradient_magnitude":     edge_info["gradient_magnitude"],
-                "angle_rad":              edge_info["angle_rad"],
-                "edge_width_10_90_px":    width,
-                "edge_width_10_90_arcsec": (width * image.pixel_scale
-                                            if width is not None else None),
-                "edge_contrast_ratio":    ecr,
-                "esf":                    esf,
-                "lsf":                    lsf,
-                "positions":              positions.tolist(),
-                "figures": figs_to_b64({
-                    "edge": self._plot_results(
-                        roi_data, display_roi, analysis_rect,
-                        positions, esf, lsf, width, image.label,
-                        edge_info_display, edge_num=i + 1,
-                    )
-                }),
-            })
+        if allow_skip and not edges and rejected:
+            # Every candidate crossed more than one edge -- surface the least
+            # bad one rather than showing nothing, clearly flagged.
+            rejected.sort(key=lambda e: e["esf_quality"], reverse=True)
+            edges.append(rejected[0])
 
         # Full-image gradient map for report visualisation
         from core.stretch import stf_stretch
@@ -162,12 +155,65 @@ class EdgeAnalyzer:
             "figures":               figs_to_b64({"gradient_map": gradient_fig}),
         }
         if edges:
-            best = max(edges, key=lambda e: e.get("gradient_magnitude") or 0)
+            # Prefer a confident measurement over a merely-stronger-gradient one
+            # (a corner/knot can have higher raw gradient than a clean edge).
+            best = max(edges, key=lambda e: (not e.get("low_confidence", False),
+                                              e.get("gradient_magnitude") or 0))
             for k in ("edge_width_10_90_px", "edge_width_10_90_arcsec",
                       "gradient_magnitude", "edge_contrast_ratio", "esf", "lsf"):
                 result[k] = best[k]
 
         return result
+
+    # ------------------------------------------------------------------
+    # Edge-result assembly
+    # ------------------------------------------------------------------
+
+    def _build_edge_entry(self, image: AstroImage, bgsub: np.ndarray,
+                           roi_data: np.ndarray, roi_tuple: tuple,
+                           edge_info: dict, positions: np.ndarray, esf: np.ndarray,
+                           edge_num: int, quality: float, low_confidence: bool) -> dict:
+        lsf   = self._compute_lsf(positions, esf)
+        width = self._measure_edge_width(positions, esf)
+        ecr   = self._measure_edge_contrast_ratio(roi_data, edge_info)
+
+        # 500×500 display context
+        x0, y0, x1, y1 = roi_tuple
+        xc_full = x0 + edge_info["center_x"]
+        yc_full = y0 + edge_info["center_y"]
+        dw  = EDGE_DISPLAY_HALF_WIDTH
+        dx0 = max(0, xc_full - dw)
+        dy0 = max(0, yc_full - dw)
+        dx1 = min(bgsub.shape[1], xc_full + dw)
+        dy1 = min(bgsub.shape[0], yc_full + dw)
+        display_roi  = bgsub[dy0:dy1, dx0:dx1]
+        analysis_rect = (x0 - dx0, y0 - dy0, x1 - dx0, y1 - dy0)
+        edge_info_display = dict(edge_info)
+        edge_info_display["center_x"] = xc_full - dx0
+        edge_info_display["center_y"] = yc_full - dy0
+
+        return {
+            "roi_used":               roi_tuple,
+            "gradient_magnitude":     edge_info["gradient_magnitude"],
+            "angle_rad":              edge_info["angle_rad"],
+            "edge_width_10_90_px":    width,
+            "edge_width_10_90_arcsec": (width * image.pixel_scale
+                                        if width is not None else None),
+            "edge_contrast_ratio":    ecr,
+            "esf":                    esf,
+            "lsf":                    lsf,
+            "positions":              positions.tolist(),
+            "esf_quality":            quality,
+            "low_confidence":         low_confidence,
+            "figures": figs_to_b64({
+                "edge": self._plot_results(
+                    roi_data, display_roi, analysis_rect,
+                    positions, esf, lsf, width, image.label,
+                    edge_info_display, edge_num=edge_num + 1,
+                    low_confidence=low_confidence,
+                )
+            }),
+        }
 
     # ------------------------------------------------------------------
     # ROI auto-detection
@@ -238,20 +284,72 @@ class EdgeAnalyzer:
                       edge_info: dict) -> tuple[np.ndarray, np.ndarray | None]:
         angle_deg = np.degrees(edge_info["angle_rad"])
         rotation_angle = -(90.0 - angle_deg)
-        rotated = rotate(roi_data, rotation_angle, reshape=False, order=3)
+        # cval=nan (not the default 0.0) marks pixels that rotate() had to
+        # invent because the source square doesn't cover that output pixel at
+        # this angle -- see the disc-mask comment below for why this matters.
+        rotated = rotate(roi_data, rotation_angle, reshape=False, order=3, cval=np.nan)
 
-        esf_raw   = np.mean(rotated, axis=0)
+        # Rotating a square ROI about its own center clips its corners for any
+        # angle other than 0/90 deg (reshape=False keeps the output the same
+        # size as the input, so content that rotates outside that frame is
+        # lost). Averaging over the full box (the previous behaviour) mixes
+        # this invented/zero-filled corner content into the profile, which can
+        # fabricate a second, spurious transition -- worst at 45 deg, where
+        # ~30% of the box area is affected. The disc inscribed in the ROI
+        # square (radius = half the side length) is the largest region
+        # guaranteed to contain only genuine data at ANY rotation angle, since
+        # a rotation about the center never moves points closer to the center
+        # outside the original square. Restrict averaging to that disc (minus
+        # a small margin for cubic-spline interpolation at the boundary).
+        h, w = rotated.shape
+        cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+        yy, xx = np.mgrid[0:h, 0:w]
+        radius = min(h, w) / 2.0 - _ESF_DISC_MARGIN_PX
+        in_disc = ((yy - cy) ** 2 + (xx - cx) ** 2) <= radius ** 2
+        masked = np.where(in_disc & ~np.isnan(rotated), rotated, np.nan)
+
+        # Columns beyond the disc radius are entirely NaN by construction
+        # (trimmed out below) -- nanmean's "empty slice" warning for those is
+        # expected, not a sign of a problem.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            esf_raw = np.nanmean(masked, axis=0)
         positions = np.arange(len(esf_raw), dtype=float)
 
-        lo, hi = esf_raw.min(), esf_raw.max()
+        valid_idx = np.where(~np.isnan(esf_raw))[0]
+        if len(valid_idx) < 5:
+            return positions, None
+        lo = float(np.nanmin(esf_raw))
+        hi = float(np.nanmax(esf_raw))
         if hi - lo < 1e-12:
             return positions, None
         esf = (esf_raw - lo) / (hi - lo)
 
-        if esf[0] > esf[-1]:
+        if esf[valid_idx[0]] > esf[valid_idx[-1]]:
             esf = 1.0 - esf
 
-        return positions, esf
+        # Trim to the contiguous valid range (only the disc-excluded columns
+        # near the two far ends can be NaN) so downstream LSF/width code never
+        # has to handle missing values.
+        i0, i1 = valid_idx[0], valid_idx[-1] + 1
+        return positions[i0:i1] - positions[i0], esf[i0:i1]
+
+    @staticmethod
+    def _esf_quality(esf: np.ndarray) -> float:
+        """Monotonicity ratio of a lightly-smoothed ESF: net variation over
+        total variation. 1.0 = a clean single transition; low values mean the
+        profile doubles back on itself (median(|detail|)-style contamination
+        from a second edge -- a corner, filament, or nearby knot crossed by
+        the same scan line)."""
+        n = len(esf)
+        win = max(3, int(round(n * _ESF_QUALITY_SMOOTH_FRAC)) | 1)
+        smoothed = uniform_filter1d(esf.astype(float), size=win, mode="nearest")
+        diffs = np.diff(smoothed)
+        total_variation = float(np.sum(np.abs(diffs)))
+        if total_variation < 1e-9:
+            return 0.0
+        net_variation = float(abs(smoothed[-1] - smoothed[0]))
+        return net_variation / total_variation
 
     # ------------------------------------------------------------------
     # LSF and width
@@ -357,7 +455,8 @@ class EdgeAnalyzer:
                        width: float | None,
                        label: str,
                        edge_info: dict | None = None,
-                       edge_num: int = 1) -> plt.Figure:
+                       edge_num: int = 1,
+                       low_confidence: bool = False) -> plt.Figure:
         from matplotlib.patches import Rectangle
 
         fig, ax = plt.subplots(figsize=(5, 5))
@@ -366,7 +465,12 @@ class EdgeAnalyzer:
         ax.imshow(display_roi, origin="upper", cmap="gray",
                   aspect="equal", interpolation="nearest",
                   extent=[0, w_disp, h_disp, 0])
-        ax.set_title(f"Edge #{edge_num} ROI — {label}")
+        title = f"Edge #{edge_num} ROI — {label}"
+        if low_confidence:
+            title += "  ⚠ low confidence"
+            ax.set_title(title, color="#c0392b")
+        else:
+            ax.set_title(title)
         ax.set_xlabel("X (px)")
         ax.set_ylabel("Y (px)")
 
