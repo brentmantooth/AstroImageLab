@@ -30,10 +30,10 @@ matplotlib.rcParams.update({
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QSlider, QFrame, QSizePolicy,
+    QLabel, QComboBox, QSlider, QFrame, QSizePolicy, QCheckBox,
 )
 
 
@@ -536,13 +536,24 @@ class _ProfileCanvas(QWidget):
     def update_profiles(self, dist_a: np.ndarray, prof_a: np.ndarray,
                          dist_b: np.ndarray | None, prof_b: np.ndarray | None,
                          label_a: str, label_b: str,
-                         normalized: bool = True) -> None:
+                         normalized: bool = True,
+                         subtract_median: bool = False,
+                         is_linear: bool = False) -> None:
         self._ax.cla()
         self._ax.plot(dist_a, prof_a, color="steelblue", lw=1.2, label=label_a)
         if dist_b is not None and prof_b is not None:
             self._ax.plot(dist_b, prof_b, color="tomato", lw=1.2, label=label_b)
         self._ax.set_xlabel("Distance (px)", fontsize=8)
-        self._ax.set_ylabel("Normalized intensity" if normalized else "Value", fontsize=8)
+        lin = " (linear)" if is_linear else ""
+        if normalized and subtract_median:
+            ylabel = f"Normalized, bg-subtracted{lin}"
+        elif normalized:
+            ylabel = f"Normalized{lin}"
+        elif subtract_median:
+            ylabel = f"Background-subtracted{lin}"
+        else:
+            ylabel = f"Linear value [0–1]" if is_linear else "Value"
+        self._ax.set_ylabel(ylabel, fontsize=8)
         self._ax.legend(fontsize=7, loc="upper right")
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
@@ -575,6 +586,7 @@ class ReportInspector(QMainWindow):
         self._current_arr_a: np.ndarray | None = None
         self._current_arr_b: np.ndarray | None = None
         self._current_shape: tuple | None = None
+        self._current_is_linear: bool = False
 
         self._build_ui()
         self._populate_section_combo()
@@ -686,7 +698,6 @@ class ReportInspector(QMainWindow):
         root.addWidget(self._profile_canvas)
 
         # ── Profile options row ─────────────────────────────────────────
-        from PyQt6.QtWidgets import QCheckBox
         prof_opts = QHBoxLayout()
         self._normalize_check = QCheckBox("Normalize to peak")
         self._normalize_check.setChecked(False)   # default: absolute values
@@ -695,6 +706,13 @@ class ReportInspector(QMainWindow):
             "When unchecked, raw array values are shown on a shared scale,\n"
             "preserving absolute differences between the two images.")
         prof_opts.addWidget(self._normalize_check)
+        self._subtract_median_check = QCheckBox("Subtract image median")
+        self._subtract_median_check.setChecked(False)
+        self._subtract_median_check.setToolTip(
+            "Subtract each image's global median from its cross-section profile.\n"
+            "Removes the background pedestal so profiles start near zero.\n"
+            "Applied before 'Normalize to peak' when both are checked.")
+        prof_opts.addWidget(self._subtract_median_check)
         prof_opts.addStretch()
         root.addLayout(prof_opts)
 
@@ -711,6 +729,7 @@ class ReportInspector(QMainWindow):
         # with the axes bounds (which shift slightly on resize or content change).
         self._image_canvas._canvas.mpl_connect("draw_event", self._on_canvas_drawn)
         self._normalize_check.stateChanged.connect(self._on_normalize_changed)
+        self._subtract_median_check.stateChanged.connect(self._on_normalize_changed)
         self._reset_zoom_btn.clicked.connect(self._image_canvas.reset_zoom)
 
     # ------------------------------------------------------------------
@@ -735,7 +754,7 @@ class ReportInspector(QMainWindow):
         else:
             self._slider_row_widget.setVisible(True)
             self._image_canvas.set_mode("slider")
-            self._sync_slider_margins()
+            QTimer.singleShot(0, self._sync_slider_margins)
 
     def _on_canvas_drawn(self, event) -> None:
         if self._mode_combo.currentIndex() == 1:
@@ -828,14 +847,26 @@ class ReportInspector(QMainWindow):
         if p0 is None or self._current_arr_a is None:
             self._profile_canvas.clear()
             return
-        normalized = self._normalize_check.isChecked()
-        dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1, normalize=normalized)
+        normalized      = self._normalize_check.isChecked()
+        subtract_median = self._subtract_median_check.isChecked()
+        is_linear       = self._current_is_linear
+
+        dist_a, prof_a = _sample_line(self._current_arr_a, p0, p1, normalize=False)
+        if subtract_median:
+            prof_a = prof_a - float(np.median(self._current_arr_a))
+        if normalized:
+            peak = float(prof_a.max())
+            if peak > 0:
+                prof_a = prof_a / peak
+
         if self._current_arr_b is None:
             self._profile_canvas.update_profiles(
                 dist_a, prof_a, None, None,
                 self._left_combo.currentText(), "",
-                normalized=normalized)
+                normalized=normalized, subtract_median=subtract_median,
+                is_linear=is_linear)
             return
+
         # Scale line coordinates to the right panel's pixel space if sizes differ.
         # p0/p1 are in the left panel's (arr_a) pixel coordinate system.
         ha, wa = self._current_arr_a.shape[:2]
@@ -845,12 +876,21 @@ class ReportInspector(QMainWindow):
             p1b = (p1[0] * wb / wa, p1[1] * hb / ha)
         else:
             p0b, p1b = p0, p1
-        dist_b, prof_b = _sample_line(self._current_arr_b, p0b, p1b, normalize=normalized)
+
+        dist_b, prof_b = _sample_line(self._current_arr_b, p0b, p1b, normalize=False)
+        if subtract_median:
+            prof_b = prof_b - float(np.median(self._current_arr_b))
+        if normalized:
+            peak = float(prof_b.max())
+            if peak > 0:
+                prof_b = prof_b / peak
+
         self._profile_canvas.update_profiles(
             dist_a, prof_a, dist_b, prof_b,
             self._left_combo.currentText(),
             self._right_combo.currentText(),
-            normalized=normalized)
+            normalized=normalized, subtract_median=subtract_median,
+            is_linear=is_linear)
 
     def _on_normalize_changed(self, _state: int) -> None:
         if self._image_canvas._p0 is not None and self._image_canvas._p1 is not None:
@@ -879,6 +919,7 @@ class ReportInspector(QMainWindow):
         if key_left is None or key_right is None:
             return
 
+        self._current_is_linear = key_left.startswith("linear_")
         raw_left = _get_array(self._npz, key_left)
         if raw_left is None:
             return

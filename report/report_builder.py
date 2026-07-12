@@ -36,6 +36,29 @@ def _inspector_display(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
     return arr
 
 
+def _inspector_linear(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
+    """Return pre-stretch linear data as float32 [0, 1], downsampled so max dimension ≤ max_dim.
+
+    Integer data (uint16 ADUs) is divided by the dtype's max representable value.
+    PixInsight float32 output is already in [0, 1] and is clipped but not rescaled.
+    Stored as [0, 1] so the inspector's existing >1.5 guard never fires.
+    """
+    arr = img.data.astype(np.float32)
+    if img.original_dtype is not None and np.issubdtype(img.original_dtype, np.integer):
+        arr = arr / float(np.iinfo(img.original_dtype).max)
+    else:
+        hi = float(arr.max())
+        if hi > 1.0:
+            arr = arr / hi
+    arr = np.clip(arr, 0.0, 1.0)
+    h, w = arr.shape[:2]
+    scale = min(1.0, max_dim / max(h, w))
+    if scale < 1.0:
+        pil = _PILImage.fromarray(arr)   # PIL infers mode='F' for float32 2-D arrays
+        arr = np.asarray(pil.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS))
+    return arr
+
+
 
 def _make_moffat_kernel(fwhm_px: float, beta: float = REF_SEEING_BETA,
                          size: int | None = None) -> np.ndarray:
@@ -438,6 +461,66 @@ def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[st
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
 
 
+def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label, val_fmt: str = ".3f") -> str:
+    """Build <tr> rows for a noise-corrected score table: scale | A | B | Ratio A/B.
+    scale_label(scale) -> row label string. Ratio cell is colored relative to
+    1.0 (parity), independently of the A/B columns' own coloring."""
+    rows = ""
+    for scale in sorted(set(list(score_a.keys()) + list(score_b.keys()))):
+        va, vb, vr = score_a.get(scale), score_b.get(scale), ratio.get(scale)
+        ca, cb = _better_worse_class(va, vb)
+        cr, _ = _better_worse_class(vr, 1.0)
+        rows += (f"<tr><td>{scale_label(scale)}</td>"
+                 f"<td class='{ca}'>{_val(va, val_fmt)}</td>"
+                 f"<td class='{cb}'>{_val(vb, val_fmt)}</td>"
+                 f"<td class='{cr}'>{_val(vr, val_fmt)}</td></tr>")
+    return rows
+
+
+def _panel_display_name(pkey: str) -> str:
+    """Derive a human-readable label from a SpatialDetailAnalyzer panels dict key.
+    Dynamic (not a hardcoded map) so every scale it computes — including future
+    additions — automatically appears in the Report Inspector catalog."""
+    nrm = pkey.startswith("nrm_")
+    base = pkey[4:] if nrm else pkey
+    if base == "original":
+        name = "Original Image (ROI)"
+    elif base.startswith("std_") and base.endswith("px"):
+        name = f"Std Dev {base[4:-2]} px"
+    elif base.startswith("log_"):
+        name = f"LoG σ {base[4:]} px"
+    elif base.startswith("wavelet_"):
+        name = f"Wavelet level {base[8:]}"
+    elif base.startswith("weber_") and base.endswith("px"):
+        name = f"Weber {base[6:-2]} px"
+    elif base.startswith("gradient_"):
+        name = f"Gradient σ {base[9:]} px"
+    else:
+        name = base
+    return f"{name} (noise-normalized)" if nrm else name
+
+
+def _power_ratio_db(freq_a, rp_a, freq_b, rp_b) -> tuple[np.ndarray, np.ndarray] | None:
+    """10*log10(P_A/P_B) per frequency bin. Returns None if data is missing or the
+    two frequency axes are not bin-for-bin aligned."""
+    if freq_a is None or rp_a is None or freq_b is None or rp_b is None:
+        return None
+    freq_a = np.asarray(freq_a, dtype=float)
+    freq_b = np.asarray(freq_b, dtype=float)
+    # Shape check MUST precede allclose: np.allclose raises ValueError on
+    # incompatible shapes rather than returning False.
+    if freq_a.shape != freq_b.shape or not np.allclose(freq_a, freq_b):
+        return None
+    rp_a = np.asarray(rp_a, dtype=float)
+    rp_b = np.asarray(rp_b, dtype=float)
+    positive = np.concatenate([rp_a[rp_a > 0], rp_b[rp_b > 0]])
+    # Relative epsilon, mirroring the existing precedent at
+    # power_spectrum.py:199 (`ps2d[ps2d > 0].min() * 0.01`).
+    eps = float(positive.min()) * 0.01 if positive.size > 0 else 1e-12
+    ratio_db = 10.0 * np.log10(np.clip(rp_a, eps, None) / np.clip(rp_b, eps, None))
+    return freq_a, ratio_db
+
+
 def _focal_ratio(img: AstroImage) -> float | None:
     hdr = img.header
     if hdr is None:
@@ -594,6 +677,14 @@ class ReportBuilder:
             orig_opts["Image B"] = "display_b"
         _add_options_entry("Input Images", "Original", orig_opts)
 
+        # Linear (pre-stretch) counterparts — float32 [0, 1]
+        _add("linear_a", _inspector_linear(image_a))
+        lin_opts: dict[str, str] = {"Image A": "linear_a"}
+        if image_b is not None:
+            _add("linear_b", _inspector_linear(image_b))
+            lin_opts["Image B"] = "linear_b"
+        _add_options_entry("Input Images", "Original (linear)", lin_opts)
+
         sl_opts: dict[str, str] = {}
         if image_a.starless_image is not None:
             _add("display_sl_a", _inspector_display(image_a.starless_image))
@@ -604,12 +695,22 @@ class ReportBuilder:
         if sl_opts:
             _add_options_entry("Input Images", "Starless", sl_opts)
 
+        lin_sl_opts: dict[str, str] = {}
+        if image_a.starless_image is not None:
+            _add("linear_sl_a", _inspector_linear(image_a.starless_image))
+            lin_sl_opts["Image A"] = "linear_sl_a"
+        if image_b is not None and image_b.starless_image is not None:
+            _add("linear_sl_b", _inspector_linear(image_b.starless_image))
+            lin_sl_opts["Image B"] = "linear_sl_b"
+        if lin_sl_opts:
+            _add_options_entry("Input Images", "Starless (linear)", lin_sl_opts)
+
         # ── PSF / MTF ─────────────────────────────────────────────────────────
         pa = result_a.psf_metrics or {}
         pb = result_b.psf_metrics or {}
         if pa.get("epsf_data") is not None and pb.get("epsf_data") is not None:
-            ea = pa["epsf_data"].astype(np.float64)
-            eb = pb["epsf_data"].astype(np.float64)
+            ea = pa["epsf_data"].astype(np.float32)
+            eb = pb["epsf_data"].astype(np.float32)
             _add("epsf_a", np.log1p(ea - ea.min()).astype(np.float32))
             _add("epsf_b", np.log1p(eb - eb.min()).astype(np.float32))
             ref_fwhm = _ref_fwhm_px(pa, pb, self._ref_seeing_arcsec)
@@ -725,19 +826,10 @@ class ReportBuilder:
                                {"Image A": "gm_display_a", "Image B": "gm_display_b"})
 
         # ── Spatial Detail subsections ────────────────────────────────────────
-        _PANEL_IMAGE_SETS = {
-            "std_5px":    "Std Dev 5 px",
-            "std_15px":   "Std Dev 15 px",
-            "std_31px":   "Std Dev 31 px",
-            "log_1.5":    "LoG σ 1.5 px",
-            "log_3.0":    "LoG σ 3.0 px",
-            "log_6.0":    "LoG σ 6.0 px",
-            "wavelet_2":  "Wavelet level 2",
-            "wavelet_3":  "Wavelet level 3",
-        }
         panels_a = (result_a.spatial_metrics or {}).get("panels", {})
         panels_b = (result_b.spatial_metrics or {}).get("panels", {})
-        for pkey, img_set_name in _PANEL_IMAGE_SETS.items():
+        for pkey in sorted(panels_a.keys()):
+            img_set_name = _panel_display_name(pkey)
             pa_panel = panels_a.get(pkey)
             if pa_panel is None:
                 continue
@@ -2745,7 +2837,7 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                          xc: float, yc: float, half: int) -> np.ndarray:
         h, w = data.shape
         size = 2 * half + 1
-        cut = np.zeros((size, size), dtype=np.float64)
+        cut = np.zeros((size, size), dtype=np.float32)
         x0_src = max(0, int(xc) - half)
         x1_src = min(w, int(xc) + half + 1)
         y0_src = max(0, int(yc) - half)
@@ -2808,7 +2900,7 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
 
         bgsub = img_a.background_subtracted() if img_a.background is not None else img_a.data
         from core.stretch import stf_stretch
-        display = stf_stretch(bgsub).astype(np.float64)
+        display = stf_stretch(bgsub)
 
         h, w = display.shape
         if max(h, w) > 1200:
@@ -3200,7 +3292,13 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
             w_label = f"  (A: {w_a:.2f} px)"
         elif w_b is not None:
             w_label = f"  (B: {w_b:.2f} px)"
-        ax_esf.set_title(f"Edge #{edge_num} ESF — 10–90% width{w_label}", fontsize=9)
+        low_conf = edge_a.get("low_confidence") or edge_b.get("low_confidence")
+        title = f"Edge #{edge_num} ESF — 10–90% width{w_label}"
+        if low_conf:
+            title += "  ⚠ low confidence"
+            ax_esf.set_title(title, fontsize=9, color="#c0392b")
+        else:
+            ax_esf.set_title(title, fontsize=9)
         ax_esf.set_xlabel("Position (px)")
         ax_esf.set_ylabel("Normalised intensity")
         ax_esf.legend(fontsize=8)
@@ -3283,8 +3381,16 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
             if ea_e or eb_e:
                 esf_lsf_fig = self._plot_esf_lsf_pair(ea_e, eb_e, ra.label, rb.label, i + 1)
                 esf_lsf_html = _img_tag(esf_lsf_fig, f"Edge #{i+1} ESF + LSF")
+            low_conf_badge = (
+                ' &nbsp;<span class="metric-label-warn">⚠ low confidence — '
+                'ESF profile is not cleanly monotonic, likely because the scan line '
+                'crossed more than one physical edge (a corner, knot, or nearby '
+                'filament); treat the width/contrast numbers for this edge with '
+                'caution</span>'
+                if (ea_e.get("low_confidence") or eb_e.get("low_confidence")) else ""
+            )
             edge_figures_html += (
-                f'<h4 style="margin-top:1.2em;">Edge #{i+1}</h4>'
+                f'<h4 style="margin-top:1.2em;">Edge #{i+1}{low_conf_badge}</h4>'
                 f'<div style="display:flex;gap:10px;">'
                 + "".join(f'<div style="flex:1;">{img}</div>'
                           for img in [img_a_i, img_b_i] if img)
@@ -3378,8 +3484,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
   '<strong>ESF scan direction is taken from whichever image has the stronger overall '
   'gradient</strong>, then applied to both, so the two ESF curves always sample the '
   'same cross-section orientation and are directly comparable. '
-  'The table below shows metrics from the strongest of the three edges; individual '
-  'per-edge figures follow.',
+  'Each candidate\'s ESF is checked for <strong>monotonicity</strong> (it should be a '
+  'single smooth transition); a candidate whose profile doubles back on itself — '
+  'usually because the scan line crossed a corner, knot, or a second nearby edge — '
+  'is skipped in favour of the next-strongest gradient peak. If every candidate for an '
+  'image fails this check, the least-bad one is still shown, clearly marked '
+  '<strong>⚠ low confidence</strong>, rather than silently reporting a meaningless width. '
+  'The table below shows metrics from the strongest confident edge (falling back to the '
+  'strongest overall if none are confident); individual per-edge figures follow.',
   title="How the edge regions were selected")}
 {gradient_row}
 
@@ -3477,6 +3589,53 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
         fig.tight_layout()
         return fig
 
+    def _plot_radial_ratio_db(self, ra: AnalysisResult, rb: AnalysisResult,
+                               star_pa: dict | None = None,
+                               star_pb: dict | None = None) -> plt.Figure | None:
+        """dB ratio of A's to B's radial power spectrum. Solid = primary/starless pair;
+        dashed = with-stars pair (only when both images have star_power data)."""
+        pa = ra.power_metrics or {}
+        pb = rb.power_metrics or {}
+        primary = _power_ratio_db(pa.get("freq_axis"), pa.get("radial_power"),
+                                   pb.get("freq_axis"), pb.get("radial_power"))
+        star = None
+        if star_pa and star_pb:
+            star = _power_ratio_db(star_pa.get("freq_axis"), star_pa.get("radial_power"),
+                                    star_pb.get("freq_axis"), star_pb.get("radial_power"))
+        if primary is None and star is None:
+            return None   # neither pair usable — degrade gracefully, no image, no crash
+
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        all_vals = []
+        if primary is not None:
+            freq, ratio_db = primary
+            ax.plot(freq, ratio_db, color="mediumpurple", linewidth=2, label="Ratio (starless)")
+            all_vals.append(ratio_db)
+        if star is not None:
+            freq, ratio_db = star
+            ax.plot(freq, ratio_db, color="mediumpurple", linewidth=1.5, linestyle="--",
+                    alpha=0.6, label="Ratio (with stars)")
+            all_vals.append(ratio_db)
+
+        ax.axhline(0.0, color=orig_color, linestyle="--", linewidth=0.8, label="0 dB (A = B)")
+        ax.axvline(0.10, color="gray", linestyle="--", linewidth=0.8,
+                   label="Low / mid boundary (0.10 cyc/px)")
+        ax.set_xlabel("Spatial frequency (cycles/pixel)")
+        ax.set_ylabel("Ratio (dB) = 10·log10(P_A / P_B)")
+        ax.set_title(f"Radial power ratio (dB): {ra.label} / {rb.label}")
+        ax.set_xlim(0, 0.5)
+        peak = float(np.max(np.abs(np.concatenate(all_vals)))) if all_vals else 3.0
+        ylim = max(3.0, peak * 1.1)
+        ax.set_ylim(-ylim, ylim)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
     # ── Section 7: Power spectrum ──────────────────────────────────────────────
 
     def _section_power(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
@@ -3494,6 +3653,12 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                                       star_pa=star_pa or None,
                                       star_pb=star_pb or None),
             "Radial power overlay",
+        )
+        img_ratio = _img_tag(
+            self._plot_radial_ratio_db(ra, rb,
+                                       star_pa=star_pa or None,
+                                       star_pb=star_pb or None),
+            "Radial power ratio (dB)",
         )
 
         sl_note = ""
@@ -3544,7 +3709,9 @@ power through their profiles, halos, and diffraction spikes.</p>"""
            'rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px) '
            'measures fine detail content relative to coarse structure.<br>'
            '<strong>Note:</strong> This comparison is only meaningful when both images cover '
-           'the same target region.',
+           'the same target region. The ratio curve below expresses this directly in decibels '
+           '(10·log10(P<sub>A</sub> / P<sub>B</sub>)): positive values mean Image A has more '
+           'power (finer detail) at that frequency, negative values mean Image B does.',
            title="About the power spectrum")}
 
 <table>
@@ -3556,6 +3723,14 @@ power through their profiles, halos, and diffraction spikes.</p>"""
 <p class="caption">Radial power spectra overlaid (log scale). Solid curves = starless; dashed curves = with stars (when starless images were provided). Curves that diverge at
 high frequencies indicate one filter preserves more fine-scale spatial detail. The
 dashed vertical line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
+
+{img_ratio}
+<p class="caption">Ratio of radial power spectra in decibels. Solid = starless-pair
+ratio; dashed = with-stars-pair ratio (only when both images used a starless primary
+input). Shown only where both images' frequency bins are exactly aligned bin-for-bin —
+always true when an analysis ROI is set, true in auto-ROI mode only when both images'
+analysed regions share the same pixel dimensions. If only one pair aligns, only that
+curve is shown.</p>
 
 <div style="display:flex;gap:10px;">
   <div style="flex:1;">{img_a}</div>
@@ -3583,6 +3758,18 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
                         f"<td class='{ca}'>{_val(va)}</td>"
                         f"<td class='{cb}'>{_val(vb)}</td></tr>")
 
+        # Weber fraction contrast table
+        wc_a = sm.get("weber_contrast_a", {})
+        wc_b = sm.get("weber_contrast_b", {})
+        wc_rows = ""
+        for ks in sorted(set(list(wc_a.keys()) + list(wc_b.keys()))):
+            va = wc_a.get(ks)
+            vb = wc_b.get(ks)
+            ca, cb = _better_worse_class(va, vb)
+            wc_rows += (f"<tr><td>{ks} px</td>"
+                        f"<td class='{ca}'>{_val(va, '.4f')}</td>"
+                        f"<td class='{cb}'>{_val(vb, '.4f')}</td></tr>")
+
         # Wavelet SNR table
         snr_a = sm.get("wavelet_snr_a", {})
         snr_b = sm.get("wavelet_snr_b", {})
@@ -3598,6 +3785,46 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
 
         sigma_a = _val(sm.get("sigma_noise_a"), ".5f")
         sigma_b = _val(sm.get("sigma_noise_b"), ".5f")
+
+        # Noise-corrected local contrast ratio tables (one per method)
+        std_nc_rows = _nc_ratio_rows(
+            sm.get("std_nc_score_a", {}), sm.get("std_nc_score_b", {}),
+            sm.get("std_nc_ratio", {}), lambda ks: f"{ks} px")
+        log_nc_rows = _nc_ratio_rows(
+            sm.get("log_nc_score_a", {}), sm.get("log_nc_score_b", {}),
+            sm.get("log_nc_ratio", {}), lambda s: f"σ = {s} px")
+        wavelet_nc_rows = _nc_ratio_rows(
+            sm.get("wavelet_nc_score_a", {}), sm.get("wavelet_nc_score_b", {}),
+            sm.get("wavelet_nc_ratio", {}), lambda lvl: f"Level {lvl} (~{2 ** lvl}px scale)")
+        weber_nc_rows = _nc_ratio_rows(
+            sm.get("weber_nc_score_a", {}), sm.get("weber_nc_score_b", {}),
+            sm.get("weber_nc_ratio", {}), lambda ks: f"{ks} px")
+        gm_nc_rows = _nc_ratio_rows(
+            sm.get("gm_nc_score_a", {}), sm.get("gm_nc_score_b", {}),
+            sm.get("gm_nc_ratio", {}), lambda s: f"σ = {s} px")
+
+        nc_methodology_box = _info_box(
+            'Each detail map above additionally yields a <strong>noise-corrected local '
+            'contrast score</strong> at every scale: score = median(|detail|) over the '
+            'region BOTH images classify as nebula (intersection of each image\'s own '
+            'nebula mask), divided by median(|detail|) over that image\'s OWN background '
+            'region (its empirical per-scale noise floor). <strong>Ratio A/B</strong> '
+            'divides Image A\'s score by Image B\'s score at each scale — greater than 1 '
+            'means Image A shows relatively stronger detail than Image B at that scale, '
+            'after accounting for each image\'s own noise level. Scale units differ by '
+            'method (kernel px for std/Weber, Gaussian σ px for LoG/gradient, ≈2<sup>level</sup> '
+            'px for wavelet) and ratios should not be compared numerically across methods — '
+            'see 8h for a cross-method overview. See also Section 7 for the frequency-domain '
+            'view of this same question. Maps below are also shown in noise-normalised form '
+            '(map ÷ noise floor) so that a shared colour scale is a fair visual comparison '
+            'between A and B, even when their absolute noise levels differ.',
+            title="Noise-corrected local contrast (methodology)")
+        nc_empty_note = ""
+        if not getattr(self, "_single_image", False) and sm.get("nc_shared_nebula_pixels", 0) == 0:
+            nc_empty_note = _info_box(
+                '⚠ Images A and B share no common nebula-mask pixels — noise-corrected '
+                'scores below are unavailable (—) for every scale and method.',
+                title="No shared nebula region", open=True)
 
         def figs_for(prefix):
             out = ""
@@ -3697,6 +3924,8 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
            'across different filter bandwidths. Images are shown side-by-side with a shared '
            'colour scale; the third panel shows the difference A−B.',
            title="Spatial detail maps overview")}
+{nc_methodology_box}
+{nc_empty_note}
 
 <h3>8b. Local Standard Deviation Maps</h3>
 {_info_box('Measures how much pixel values vary within a neighbourhood. '
@@ -3714,10 +3943,16 @@ dashed vertical line marks the boundary between low (coarse structure) and mid/h
   <tr><th>Kernel size</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   {cr_rows}
 </table>
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {std_nc_rows}
+</table>
 {xs_note}{paired_figs_for("std_", "xs_std_")}
 <p class="caption">Side-by-side local σ maps at each kernel size (shared colour scale),
 each followed by its cross-section profile.
 The difference map (right) highlights where one filter preserves more local variation.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_std_")}
 <h3>8c. Laplacian of Gaussian (LoG) Maps</h3>
 {_info_box('The Laplacian of Gaussian highlights regions of rapid intensity '
            'change at a specific spatial scale (controlled by σ). Brighter regions in |LoG| maps '
@@ -3730,10 +3965,16 @@ The difference map (right) highlights where one filter preserves more local vari
            'brighter LoG response at small σ values. Cross-section profiles reveal subtle '
            'differences in edge sharpness along the selected line.',
            title="Laplacian of Gaussian (LoG)")}
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {log_nc_rows}
+</table>
 {paired_figs_for("log_", "xs_log_")}
 <p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
 each followed by its cross-section profile.
 A filter preserving more fine detail shows brighter, more defined boundaries at small σ.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_log_")}
 <h3>8d. Wavelet Decomposition</h3>
 {_wavelet_box}
 
@@ -3745,19 +3986,99 @@ A filter preserving more fine detail shows brighter, more defined boundaries at 
   <tr><th>Wavelet level</th><th>{ra.label} SNR</th><th>{rb.label} SNR</th></tr>
   {snr_rows}
 </table>
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {wavelet_nc_rows}
+</table>
 
 {paired_figs_for("wavelet_level", "xs_wavelet_level")}
 <p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
 diverging colourmap), each followed by its cross-section profile.
-The difference panel (right) shows where fine structure differs between the two filters.</p>"""
+The difference panel (right) shows where fine structure differs between the two filters.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_wavelet_")}
+
+<h3>8e. Weber Fraction Contrast Maps</h3>
+{_info_box(
+    '<p><strong>Formula:</strong> c = ΔL / L, '
+    'where ΔL = I<sub>max</sub> − I<sub>min</sub> (local range in the K × K kernel) '
+    'and L = median(kernel) (local background luminance). '
+    'Output is unbounded ≥ 0; a value of 1.0 means the local range equals the background '
+    'luminance, 2.0 means twice, and so on.</p>'
+    '<p><strong>Why median for L:</strong> The median represents the background luminance '
+    'the feature is seen against, matching Weber\'s Law. Using the mean would inflate L '
+    'toward bright filaments within the kernel, artificially suppressing contrast values. '
+    'Median is also robust to hot pixels and residual star halos in starless images.</p>'
+    '<p><strong>Scalar metric (table below):</strong> 99th percentile of the Weber map '
+    'within the analysis region. Near-zero median pixels over dark sky produce very large '
+    'Weber values; the 99th percentile captures peak structural contrast while ignoring '
+    'isolated dark-floor artefacts.</p>'
+    '<p><strong>Kernel sizes:</strong> Small kernels (3 px) respond to sub-pixel-scale '
+    'transitions. Medium kernels (5 px) capture fine filaments. '
+    'Large kernels (9 px) reflect coarser structural contrast such as knots and shell edges.</p>'
+    '<p><strong>Wide dynamic range:</strong> Weber contrast is intentionally unbounded. '
+    'Maps are displayed with a square-root colour scale (PowerNorm γ = 0.5) to compress '
+    'the bright end. Selecting a star-free nebula ROI avoids dark-sky pixels that drive '
+    'Weber values very high. Maps use a starless image when one is available.</p>',
+    title="Weber fraction contrast")}
+<table>
+  <tr><th>Kernel size</th><th>{ra.label} (99th pct c)</th><th>{rb.label} (99th pct c)</th></tr>
+  {wc_rows}
+</table>
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {weber_nc_rows}
+</table>
+{figs_for("weber_")}
+<p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root colour
+scale, viridis). Brighter regions have higher Weber contrast — the local intensity range
+is large relative to the local median luminance. The difference panel (A−B) shows where
+one image achieves greater relative contrast. High values over dark-sky regions are
+expected; use a nebula ROI for meaningful filter comparison.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_weber_")}
+
+<h3>8f. Gradient Magnitude (Edge Sharpness)</h3>
+{_info_box('The gradient magnitude G = |∇I| = sqrt((∂I/∂x)² + (∂I/∂y)²) highlights regions '
+           'of rapid intensity change at a specific spatial scale (controlled by σ), computed '
+           'as the first spatial derivative rather than the second derivative (curvature) LoG uses. '
+           'Smaller σ highlights finer features; larger σ highlights broader structures. '
+           'Reuses the same σ scales as 8c so gradient and |LoG| are directly comparable at '
+           'identical spatial frequencies. This measures how abrupt structure boundaries are — '
+           'relevant when one filter renders stronger filament boundaries or shock fronts. '
+           '<strong>Distinct from Section 6 (Edge Detection):</strong> Section 6 measures '
+           'precise sub-pixel edge width and contrast at the 2–3 strongest individual detected '
+           'edges. This section is the opposite granularity — an aggregate, whole-nebula, '
+           'multi-scale sharpness score across the shared ROI, following the same '
+           'noise-corrected framework as 8b–8e. They are complementary, not redundant.',
+           title="Gradient magnitude / edge sharpness")}
+<table>
+  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {gm_nc_rows}
+</table>
+{paired_figs_for("gradient_", "xs_gradient_")}
+<p class="caption">Gradient magnitude maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
+each followed by its cross-section profile.
+A filter preserving sharper boundaries shows brighter, more defined gradient response.</p>
+<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
+{figs_for("nrm_gradient_")}
+
+<h3>8h. Noise-Corrected Contrast — Cross-Method Overview</h3>
+{_hires_img_tag(figs.get("nc_ratio_overview"), "NC ratio overview")}
+<p class="caption">Ratio A/B for every noise-corrected method plotted against its
+approximate spatial scale. Scale units differ by method (see 8b–8f methodology
+boxes) — use this chart to spot which spatial-scale regime favours which filter,
+not to compare absolute ratio values across methods.</p>"""
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
     def _plot_snr_pair(self, disp_a, label_a, disp_b, label_b,
-                        vmin: float, vmax: float) -> plt.Figure:
+                        vmin: float, vmax: float) -> plt.Figure | None:
         """Render both SNR maps side-by-side with a shared plasma color scale."""
         panels = [(d, lbl) for d, lbl in [(disp_a, label_a), (disp_b, label_b)]
                   if d is not None]
+        if not panels:
+            return None
         fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
         if len(panels) == 1:
             axes = [axes]
@@ -4148,6 +4469,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         cr_b = sm_b.get("contrast_ratios_b", {}) if sm_b else {}
         snr_wav_a = sm_a.get("wavelet_snr_a", {})
         snr_wav_b = sm_b.get("wavelet_snr_b", {}) if sm_b else {}
+        wc_a_s = sm_a.get("weber_contrast_a", {})
+        wc_b_s = sm_b.get("weber_contrast_b", {}) if sm_b else {}
         snr_ma = ra.snr_metrics or {}
         snr_mb = rb.snr_metrics or {}
 
@@ -4205,6 +4528,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
             row("Std contrast ratio (15px)", cr_a.get(15), cr_b.get(15)),
             row("Wavelet SNR level 2", snr_wav_a.get(2), snr_wav_b.get(2)),
             row("Wavelet SNR level 3", snr_wav_a.get(3), snr_wav_b.get(3)),
+            row("Weber contrast 99th pct (5px)", wc_a_s.get(5), wc_b_s.get(5), fmt=".4f"),
             *([row(
                 "Global SNR — starless (σ) ★",
                 (snr_ma.get("starless") or {}).get("snr_global"),

@@ -78,6 +78,10 @@ class PowerSpectrumAnalyzer:
                 sub = zoom(sub, (zy, zx), order=1)
             return sub[:N, :N]
 
+        # For images smaller than POWER_SPECTRUM_NPIX, use the largest square
+        # that fits — the c/px frequency axis interpretation is unchanged.
+        N = min(N, h, w)
+
         # Auto-select: find a star-free NxN region
         catalog = getattr(image, "catalog", None)
         if catalog is not None and len(catalog) > 0:
@@ -86,12 +90,13 @@ class PowerSpectrumAnalyzer:
         else:
             star_xs, star_ys = np.array([]), np.array([])
 
-        # Try candidate positions on a grid
-        step = N // 2
+        # Try candidate positions on a grid; +1 so images exactly N px wide/tall
+        # still yield one candidate at their centre.
+        step = max(1, N // 2)
         best_pos = None
         best_score = -np.inf
-        for yc in range(N // 2, h - N // 2, step):
-            for xc in range(N // 2, w - N // 2, step):
+        for yc in range(N // 2, h - N // 2 + 1, step):
+            for xc in range(N // 2, w - N // 2 + 1, step):
                 x0 = xc - N // 2
                 y0 = yc - N // 2
                 if len(star_xs) > 0:
@@ -105,17 +110,20 @@ class PowerSpectrumAnalyzer:
                     best_pos = (x0, y0)
 
         if best_pos is None:
-            # Fallback: centre of image
-            x0 = w // 2 - N // 2
-            y0 = h // 2 - N // 2
+            # Fallback: centre of image — clamp so coordinates are never negative
+            x0 = max(0, w // 2 - N // 2)
+            y0 = max(0, h // 2 - N // 2)
             best_pos = (x0, y0)
 
         x0, y0 = best_pos
         region = bgsub[y0:y0 + N, x0:x0 + N].copy()
 
-        # Sigma-clip to remove unmasked faint stars
+        # Sigma-clip to remove unmasked faint stars; getmaskarray always returns
+        # a full bool array (avoids scalar-False indexing when nothing is clipped).
         clipped = sigma_clip(region, sigma=3.0, maxiters=3)
-        region[clipped.mask] = float(np.ma.median(clipped))
+        mask = np.ma.getmaskarray(clipped)
+        if mask.any():
+            region[mask] = float(np.ma.median(clipped))
         return region
 
     # ------------------------------------------------------------------

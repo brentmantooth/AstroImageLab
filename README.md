@@ -73,7 +73,7 @@ This creates a conda environment named `astrolab` with all required packages. **
 Install the scientific stack via conda-forge, then add PyQt6 and XISF support via pip:
 
 ```bash
-conda install -c conda-forge numpy scipy matplotlib astropy photutils pywavelets astroalign pillow lz4 zstandard
+conda install -c conda-forge numpy scipy matplotlib astropy photutils bottleneck pywavelets astroalign pillow lz4 zstandard
 pip install pyqt6 xisf
 ```
 
@@ -92,7 +92,7 @@ conda env create -f environment.yml
 conda activate astrolab
 
 # Option B — manual install into an existing environment
-conda install -c conda-forge numpy scipy matplotlib astropy photutils pywavelets astroalign pillow lz4 zstandard
+conda install -c conda-forge numpy scipy matplotlib astropy photutils bottleneck pywavelets astroalign pillow lz4 zstandard
 pip install pyqt6 xisf
 ```
 
@@ -230,6 +230,7 @@ gui/
 |---------|---------|
 | [astropy](https://www.astropy.org/) | FITS I/O, Moffat2D model, Background2D |
 | [photutils](https://photutils.readthedocs.io/) | DAOStarFinder, EPSFBuilder, morphology |
+| [bottleneck](https://bottleneck.readthedocs.io/) | Fast NaN-aware and median reductions on large arrays |
 | [scipy](https://scipy.org/) | Optimisation, FFT, image filters |
 | [PyWavelets](https://pywavelets.readthedocs.io/) | Daubechies-4 wavelet decomposition |
 | [astroalign](https://astroalign.quatrope.org/) | Image registration |

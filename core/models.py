@@ -23,13 +23,15 @@ DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback
 SEEING_WARN_FWHM_ARCS = 3.0
 EDGE_ROI_HALF_WIDTH = 30
 EDGE_ROI_MAP_INDICATOR_PX = 500   # px; full width of the ROI indicator box drawn on the gradient magnitude map
+EDGE_ESF_MIN_MONOTONICITY = 0.3   # min net/total variation ratio; below this the ESF likely crossed >1 edge (corner/filament)
 FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); default for UI
 GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
 RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation
-POWER_SPECTRUM_NPIX = 1024
+POWER_SPECTRUM_NPIX = 2048   # px; size of square power spectrum maps (must be 2^n)
 
-STD_KERNEL_SIZES = (5, 15, 31)
+STD_KERNEL_SIZES = (3, 5, 10)  #originally (5, 10, 15)   # px; Gaussian kernel sizes for std dev maps
 LOG_SIGMAS = (1.5, 3.0, 6.0)
+WEBER_KERNEL_SIZES = (3, 5, 9)   # px; local kernel for Weber fraction contrast c = ΔL/L (odd values required)
 WAVELET_NAME = "db4"
 WAVELET_LEVELS = 4
 

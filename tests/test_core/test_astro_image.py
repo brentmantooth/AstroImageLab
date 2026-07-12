@@ -10,8 +10,8 @@ from core.models import DEFAULT_PIXEL_SCALE
 
 
 class TestLoad:
-    def test_data_float64(self, astro_image_a):
-        assert astro_image_a.data.dtype == np.float64
+    def test_data_float32(self, astro_image_a):
+        assert astro_image_a.data.dtype == np.float32
 
     def test_correct_shape(self, astro_image_a):
         assert astro_image_a.data.shape == (512, 512)
@@ -109,7 +109,7 @@ class TestBackground:
 
     def test_background_subtracted_dtype(self, astro_image_a):
         bs = astro_image_a.background_subtracted()
-        assert bs.dtype == np.float64
+        assert bs.dtype == np.float32
 
     def test_background_subtracted_without_background(self, test_fits_path):
         img = AstroImage(str(test_fits_path), label="NoBkg")

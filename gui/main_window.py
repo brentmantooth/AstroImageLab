@@ -104,9 +104,14 @@ class MainWindow(QMainWindow):
         analysis_menu.addAction(act_run)
 
         tools_menu = mb.addMenu("&Tools")
-        act_synth = QAction("Synthetic &Data…", self)
+        act_synth = QAction("Synthetic Star &Data…", self)
         act_synth.triggered.connect(self._open_synthetic_dialog)
         tools_menu.addAction(act_synth)
+
+ 
+        act_target = QAction("Synthetic Spatial Detail &Target…", self)
+        act_target.triggered.connect(self._open_target_dialog)
+        tools_menu.addAction(act_target)
 
         act_halo = QAction("&Halo Analyzer…", self)
         act_halo.triggered.connect(self._open_halo_dialog)
@@ -148,6 +153,25 @@ class MainWindow(QMainWindow):
         target.load_path(main_path)
         if starless_path:
             target.set_starless_path(starless_path)
+
+    def _open_target_dialog(self) -> None:
+        from gui.spatial_target_dialog import SpatialTargetDialog
+        self._target_dialog = SpatialTargetDialog(parent=self)
+        self._target_dialog.targets_generated.connect(self._on_target_generated)
+        self._target_dialog.show()
+
+    def _on_target_generated(self, clean_path: str, degraded_path: str,
+                              mode: str) -> None:
+        if mode == "clean_a_deg_b":
+            self._panel_a.load_path(clean_path)
+            self._panel_b.load_path(degraded_path)
+        elif mode == "deg_a_clean_b":
+            self._panel_a.load_path(degraded_path)
+            self._panel_b.load_path(clean_path)
+        elif mode == "deg_a":
+            self._panel_a.load_path(degraded_path)
+        elif mode == "deg_b":
+            self._panel_b.load_path(degraded_path)
 
     def _on_image_loaded(self, img) -> None:
         either_loaded = (self._panel_a.image is not None or

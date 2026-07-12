@@ -5,6 +5,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+try:
+    import bottleneck as bn
+except ImportError:
+    bn = np
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64
@@ -15,7 +19,7 @@ class SNRAnalyzer:
 
     def analyze(self, image: AstroImage) -> dict:
         image.estimate_background()
-        bgsub = image.background_subtracted().astype(np.float64)
+        bgsub = image.background_subtracted()
         rms = image.background_rms  # 2D array from Background2D
 
         noise = float(np.median(rms)) if rms is not None else 1.0
@@ -41,7 +45,7 @@ class SNRAnalyzer:
         star_snr_median: float | None = None
         star_snr_iqr: float | None = None
         if cat is not None and len(cat) > 0 and noise > 0:
-            peaks = np.asarray(cat["peak"], dtype=np.float64)
+            peaks = np.asarray(cat["peak"], dtype=np.float32)
             star_snrs = peaks / noise
             star_snrs = star_snrs[np.isfinite(star_snrs) & (star_snrs > 0)]
             if star_snrs.size > 0:
@@ -52,7 +56,7 @@ class SNRAnalyzer:
 
         # --- Local SNR map -----------------------------------------------
         if rms is not None:
-            denom = np.where(rms > 0, rms.astype(np.float64), np.nan)
+            denom = np.where(rms > 0, rms.astype(np.float32), np.nan)
         else:
             denom = noise
         snr_map = bgsub / denom
@@ -79,7 +83,7 @@ class SNRAnalyzer:
 
         # --- Sky background level ----------------------------------------
         # Median of the 2D background model in ADU; lower = darker sky.
-        background_median = (float(np.median(image.background.background))
+        background_median = (float(bn.median(image.background.background))
                              if image.background is not None else None)
 
         # --- Camera gain from FITS header --------------------------------
@@ -125,12 +129,12 @@ class SNRAnalyzer:
             "snr_global_db":     snr_global_db,
             "noise_median":      noise,     # median sky RMS (σ_sky) in ADU
             "background_median": background_median,  # median sky background (μ_sky) in ADU
-            "star_snr_median": star_snr_median,
-            "star_snr_iqr":    star_snr_iqr,
-            "pct_above_3":     pcts[3],
-            "pct_above_5":     pcts[5],
-            "pct_above_10":    pcts[10],
-            "pct_above_20":    pcts[20],
+            "star_snr_median":   star_snr_median,
+            "star_snr_iqr":      star_snr_iqr,
+            "pct_above_3":       pcts[3],
+            "pct_above_5":       pcts[5],
+            "pct_above_10":      pcts[10],
+            "pct_above_20":      pcts[20],
             "snr_display":       snr_display,
             "snr_p2":            snr_p2,
             "snr_p98":           snr_p98,
