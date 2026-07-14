@@ -86,6 +86,25 @@ def _sample_line(data: np.ndarray, p0: tuple, p1: tuple,
     return np.linspace(0.0, dist, n), profile
 
 
+def _zoom_interval(lo: float, hi: float, center: float, factor: float,
+                    log: bool) -> tuple[float, float]:
+    """Scale [lo, hi] toward center by factor, in log-space when log=True."""
+    if log and center > 0 and lo > 0 and hi > 0:
+        c, lo_l, hi_l = np.log10(center), np.log10(lo), np.log10(hi)
+        return 10 ** (c + (lo_l - c) * factor), 10 ** (c + (hi_l - c) * factor)
+    return center + (lo - center) * factor, center + (hi - center) * factor
+
+
+def _pan_interval(lo: float, hi: float, last_val: float, curr_val: float,
+                   log: bool) -> tuple[float, float]:
+    """Shift [lo, hi] by (last_val - curr_val), in log-space when log=True."""
+    if log and last_val > 0 and curr_val > 0 and lo > 0 and hi > 0:
+        dlog = np.log10(last_val) - np.log10(curr_val)
+        return 10 ** (np.log10(lo) + dlog), 10 ** (np.log10(hi) + dlog)
+    delta = last_val - curr_val
+    return lo + delta, hi + delta
+
+
 def _to_uint8_display(arr: np.ndarray) -> np.ndarray:
     """Normalize any float array to uint8 via 1st–99th percentile clip."""
     lo = float(np.percentile(arr, 1))
@@ -542,10 +561,27 @@ class _ProfileCanvas(QWidget):
         self._prof_b: np.ndarray | None = None
         self._label_a: str = ""
         self._label_b: str = ""
+        self._log_scale: bool = False
         self._add_hover_line()
 
-        self._canvas.mpl_connect("motion_notify_event", self._on_motion)
+        # Pan state (right-click drag)
+        self._pan_drag   = False
+        self._pan_last_x = 0.0   # display-coord x at last pan motion event
+        self._pan_last_y = 0.0
+
+        # Saved zoom/pan: (xlim, ylim). None = let the plot autoscale.
+        self._view_state: tuple | None = None
+
+        self._canvas.mpl_connect("button_press_event",   self._on_press)
+        self._canvas.mpl_connect("motion_notify_event",  self._on_motion)
+        self._canvas.mpl_connect("button_release_event", self._on_release)
+        self._canvas.mpl_connect("scroll_event",         self._on_scroll)
         self._canvas.mpl_connect("axes_leave_event", self._on_leave)
+        self._canvas.draw_idle()
+
+    def set_log_scale(self, enabled: bool) -> None:
+        self._log_scale = enabled
+        self._ax.set_yscale("log" if enabled else "linear")
         self._canvas.draw_idle()
 
     def _add_hover_line(self) -> None:
@@ -582,19 +618,59 @@ class _ProfileCanvas(QWidget):
         self._ax.legend(fontsize=7, loc="upper right")
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
+        self._ax.set_yscale("log" if self._log_scale else "linear")
         self._add_hover_line()
+        if self._view_state is not None:
+            self._ax.set_xlim(self._view_state[0])
+            self._ax.set_ylim(self._view_state[1])
         self._canvas.draw_idle()
 
     def clear(self) -> None:
         self._dist_a = self._prof_a = self._dist_b = self._prof_b = None
         self._label_a = self._label_b = ""
+        self._view_state = None
 
         self._ax.cla()
         self._ax.set_xlabel("Distance (px)", fontsize=8)
         self._ax.set_ylabel("Normalized intensity", fontsize=8)
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
+        self._ax.set_yscale("log" if self._log_scale else "linear")
         self._add_hover_line()
+        self._canvas.draw_idle()
+
+    def reset_zoom(self) -> None:
+        """Restore axes to the full autoscaled view."""
+        self._view_state = None
+        if self._dist_a is not None:
+            self._ax.relim()
+            self._ax.autoscale_view()
+        self._canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # Mouse handlers — scroll to zoom near cursor, right-click drag to pan
+    # ------------------------------------------------------------------
+
+    def _on_press(self, event) -> None:
+        if event.button == 3 and event.inaxes is self._ax:
+            self._pan_drag   = True
+            self._pan_last_x = event.x
+            self._pan_last_y = event.y
+
+    def _on_release(self, event) -> None:
+        if event.button == 3:
+            self._pan_drag = False
+
+    def _on_scroll(self, event) -> None:
+        if event.inaxes is not self._ax or event.xdata is None or event.ydata is None:
+            return
+        factor = 0.8 if event.button == "up" else (1.0 / 0.8)
+        xl, yl = self._ax.get_xlim(), self._ax.get_ylim()
+        new_xl = _zoom_interval(xl[0], xl[1], event.xdata, factor, log=False)
+        new_yl = _zoom_interval(yl[0], yl[1], event.ydata, factor, log=self._log_scale)
+        self._ax.set_xlim(new_xl)
+        self._ax.set_ylim(new_yl)
+        self._view_state = (new_xl, new_yl)
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -602,6 +678,24 @@ class _ProfileCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _on_motion(self, event) -> None:
+        if self._pan_drag:
+            try:
+                inv       = self._ax.transData.inverted()
+                last_data = inv.transform((self._pan_last_x, self._pan_last_y))
+                curr_data = inv.transform((event.x,          event.y))
+                xl = self._ax.get_xlim()
+                yl = self._ax.get_ylim()
+                new_xl = _pan_interval(xl[0], xl[1], last_data[0], curr_data[0], log=False)
+                new_yl = _pan_interval(yl[0], yl[1], last_data[1], curr_data[1], log=self._log_scale)
+                self._ax.set_xlim(new_xl)
+                self._ax.set_ylim(new_yl)
+                self._pan_last_x = event.x
+                self._pan_last_y = event.y
+                self._view_state = (new_xl, new_yl)
+                self._canvas.draw_idle()
+            except Exception:
+                pass
+            return
         if event.inaxes is not self._ax or self._dist_a is None:
             self._on_leave(event)
             return
@@ -789,6 +883,12 @@ class ReportInspector(QMainWindow):
             "Removes the background pedestal so profiles start near zero.\n"
             "Applied before 'Normalize to peak' when both are checked.")
         prof_opts.addWidget(self._subtract_median_check)
+        self._log_scale_check = QCheckBox("Log scale Y axis")
+        self._log_scale_check.setChecked(False)
+        self._log_scale_check.setToolTip(
+            "Display the cross-section Y axis on a logarithmic scale.\n"
+            "Non-positive values cannot be shown on a log axis and are omitted.")
+        prof_opts.addWidget(self._log_scale_check)
         prof_opts.addStretch()
         root.addLayout(prof_opts)
 
@@ -806,7 +906,8 @@ class ReportInspector(QMainWindow):
         self._image_canvas._canvas.mpl_connect("draw_event", self._on_canvas_drawn)
         self._normalize_check.stateChanged.connect(self._on_normalize_changed)
         self._subtract_median_check.stateChanged.connect(self._on_normalize_changed)
-        self._reset_zoom_btn.clicked.connect(self._image_canvas.reset_zoom)
+        self._log_scale_check.stateChanged.connect(self._on_log_scale_changed)
+        self._reset_zoom_btn.clicked.connect(self._on_reset_zoom_clicked)
 
     # ------------------------------------------------------------------
     # Combo population
@@ -980,6 +1081,13 @@ class ReportInspector(QMainWindow):
             self._on_line_updated(self._image_canvas._p0, self._image_canvas._p1)
         else:
             self._profile_canvas.clear()
+
+    def _on_log_scale_changed(self, _state: int) -> None:
+        self._profile_canvas.set_log_scale(self._log_scale_check.isChecked())
+
+    def _on_reset_zoom_clicked(self) -> None:
+        self._image_canvas.reset_zoom()
+        self._profile_canvas.reset_zoom()
 
     # ------------------------------------------------------------------
     # Panel loading
