@@ -30,10 +30,11 @@ matplotlib.rcParams.update({
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QSlider, QFrame, QSizePolicy, QCheckBox,
+    QLabel, QComboBox, QSlider, QFrame, QSizePolicy, QCheckBox, QToolTip,
 )
 
 
@@ -533,7 +534,25 @@ class _ProfileCanvas(QWidget):
         self._ax.set_ylabel("Normalized intensity", fontsize=8)
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
+
+        # Cached profile data for hover lookups — set by update_profiles(), cleared by clear()
+        self._dist_a: np.ndarray | None = None
+        self._prof_a: np.ndarray | None = None
+        self._dist_b: np.ndarray | None = None
+        self._prof_b: np.ndarray | None = None
+        self._label_a: str = ""
+        self._label_b: str = ""
+        self._add_hover_line()
+
+        self._canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self._canvas.mpl_connect("axes_leave_event", self._on_leave)
         self._canvas.draw_idle()
+
+    def _add_hover_line(self) -> None:
+        # ax.cla() (in update_profiles/clear) detaches any prior line artist, so this
+        # must be re-created after every cla() — a fresh Line2D reference each time.
+        self._hover_line = self._ax.axvline(
+            0, color="#dddddd", lw=1.0, ls=":", alpha=0.8, visible=False)
 
     def update_profiles(self, dist_a: np.ndarray, prof_a: np.ndarray,
                          dist_b: np.ndarray | None, prof_b: np.ndarray | None,
@@ -541,6 +560,10 @@ class _ProfileCanvas(QWidget):
                          normalized: bool = True,
                          subtract_median: bool = False,
                          is_linear: bool = False) -> None:
+        self._dist_a, self._prof_a = dist_a, prof_a
+        self._dist_b, self._prof_b = dist_b, prof_b
+        self._label_a, self._label_b = label_a, label_b
+
         self._ax.cla()
         self._ax.plot(dist_a, prof_a, color="steelblue", lw=1.2, label=label_a)
         if dist_b is not None and prof_b is not None:
@@ -559,15 +582,58 @@ class _ProfileCanvas(QWidget):
         self._ax.legend(fontsize=7, loc="upper right")
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
+        self._add_hover_line()
         self._canvas.draw_idle()
 
     def clear(self) -> None:
+        self._dist_a = self._prof_a = self._dist_b = self._prof_b = None
+        self._label_a = self._label_b = ""
+
         self._ax.cla()
         self._ax.set_xlabel("Distance (px)", fontsize=8)
         self._ax.set_ylabel("Normalized intensity", fontsize=8)
         self._ax.grid(True, alpha=0.25)
         self._ax.tick_params(labelsize=7)
+        self._add_hover_line()
         self._canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # Hover tooltip + crosshair
+    # ------------------------------------------------------------------
+
+    def _on_motion(self, event) -> None:
+        if event.inaxes is not self._ax or self._dist_a is None:
+            self._on_leave(event)
+            return
+
+        x = float(event.xdata)
+        val_a = float(np.interp(x, self._dist_a, self._prof_a))
+        lines = [f"x = {x:.4g} px", f"{self._label_a}: {val_a:.4g}"]
+
+        if self._dist_b is not None and self._prof_b is not None:
+            val_b = float(np.interp(x, self._dist_b, self._prof_b))
+            ratio = val_a / val_b if val_b != 0 else float("nan")
+            ratio_str = f"{ratio:.4g}" if np.isfinite(ratio) else "—"
+            lines.append(f"{self._label_b}: {val_b:.4g}")
+            lines.append(f"Ratio A/B: {ratio_str}")
+
+        self._hover_line.set_xdata([x, x])
+        self._hover_line.set_visible(True)
+        self._canvas.draw_idle()
+
+        # Use the native Qt cursor position rather than converting matplotlib's
+        # event.x/event.y — those are device-pixel coordinates and mapToGlobal
+        # expects logical pixels, so on a HiDPI display the tooltip would land
+        # far from the cursor. Offset up-right so it doesn't sit on top of the
+        # crosshair/data point it's describing.
+        pos = QCursor.pos()
+        QToolTip.showText(pos + QPoint(16, -16), "\n".join(lines), self._canvas)
+
+    def _on_leave(self, event) -> None:
+        if self._hover_line.get_visible():
+            self._hover_line.set_visible(False)
+            self._canvas.draw_idle()
+        QToolTip.hideText()
 
 
 # ---------------------------------------------------------------------------
