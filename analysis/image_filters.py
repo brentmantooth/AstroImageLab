@@ -731,7 +731,6 @@ class SpatialDetailAnalyzer:
                     f"Wavelet level {display_level} — {label_b}",
                     diff_title=f"Level {display_level} diff (A−B)",
                     cmap=SECTION8_ANALYSIS_CMAP,
-                    symmetric_diff=True,
                     display_roi=None,
                 )
             else:
@@ -750,7 +749,6 @@ class SpatialDetailAnalyzer:
                     f"Wavelet level {display_level} (× noise floor) — {label_b}",
                     diff_title=f"Level {display_level} diff (A−B), noise-normalised",
                     cmap=SECTION8_ANALYSIS_CMAP,
-                    symmetric_diff=True,
                     display_roi=None,
                 )
 
@@ -909,7 +907,6 @@ class SpatialDetailAnalyzer:
                             title_a: str, title_b: str,
                             diff_title: str = "",
                             cmap: str = "viridis",
-                            symmetric_diff: bool = False,
                             nonlinear_norm: bool = False,
                             display_roi=None,
                             smooth_display: bool = True) -> plt.Figure:
@@ -939,12 +936,9 @@ class SpatialDetailAnalyzer:
         w_min = min(arr_a.shape[1], arr_b.shape[1])
         diff = arr_a[:h_min, :w_min] - arr_b[:h_min, :w_min]
 
-        if symmetric_diff:
-            d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
-            dvmin, dvmax = -d_max, d_max
-        else:
-            dvmin = float(np.percentile(diff, 0.5))
-            dvmax = float(np.percentile(diff, 99.5))
+        # Symmetric about zero so the "bwr" midpoint (white) always means no difference.
+        d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
+        dvmin, dvmax = -d_max, d_max
 
         # 3×1 column layout — A, B, then diff stacked vertically.
         # Use 1:1 pixel aspect; size figure based on the cropped array dimensions.
