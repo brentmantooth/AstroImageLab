@@ -18,7 +18,7 @@ from core.fig_utils import fig_to_b64, figs_to_b64
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
                          WEBER_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
-                         XS_SNR_REGION_WIDTH)
+                         XS_SNR_REGION_WIDTH, SECTION8_DIFF_DIST_MAX_SAMPLES)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -58,6 +58,7 @@ class SpatialDetailAnalyzer:
             "weber_contrast_a": {},
             "weber_contrast_b": {},
             "panels": {},
+            "diff_dist": {},
             "nc_shared_nebula_pixels": 0,
             "std_nc_score_a": {}, "std_nc_score_b": {},
             "std_nc_noise_a": {}, "std_nc_noise_b": {}, "std_nc_ratio": {},
@@ -120,26 +121,36 @@ class SpatialDetailAnalyzer:
 
         result["display_roi"] = display_roi
 
-        # Export the exact preprocessed array every std/LoG/wavelet/Weber/gradient
-        # map is computed from (mean-normalised, ROI-cropped if a ROI was given) as
-        # its own panel, so the Report Inspector can show the source image content
-        # for a map alongside the map itself, pixel-aligned to the same crop.
-        result["panels"]["original"] = {
-            "a":    analysis_a.astype(np.float32),
-            "b":    analysis_b.astype(np.float32) if analysis_b is not None else None,
-            "diff": (analysis_a - analysis_b).astype(np.float32) if analysis_b is not None else None,
-        }
-
-        # Shared nebula ROI for noise-corrected A/B scoring: pixels BOTH images
-        # independently classify as nebula. None in single-image mode.
-        mask_neb_shared = None
+        # Shared nebula/background regions for noise-corrected A/B scoring and diff
+        # distributions: pixels BOTH images independently classify the same way.
+        # None in single-image mode.
+        mask_neb_shared = mask_bg_shared = None
         if mask_neb_b is not None:
             h_s = min(mask_neb_a.shape[0], mask_neb_b.shape[0])
             w_s = min(mask_neb_a.shape[1], mask_neb_b.shape[1])
             mask_neb_shared = mask_neb_a[:h_s, :w_s] & mask_neb_b[:h_s, :w_s]
+            mask_bg_shared = mask_bg_a[:h_s, :w_s] & mask_bg_b[:h_s, :w_s]
         result["nc_shared_nebula_pixels"] = (
             int(np.count_nonzero(mask_neb_shared)) if mask_neb_shared is not None else 0
         )
+
+        # Fixed seed so the diff-distribution subsampling below is reproducible
+        # across report generations for the same input images.
+        diff_dist_rng = np.random.default_rng(42)
+
+        # Export the exact preprocessed array every std/LoG/wavelet/Weber/gradient
+        # map is computed from (mean-normalised, ROI-cropped if a ROI was given) as
+        # its own panel, so the Report Inspector can show the source image content
+        # for a map alongside the map itself, pixel-aligned to the same crop.
+        original_diff = (analysis_a - analysis_b).astype(np.float32) if analysis_b is not None else None
+        result["panels"]["original"] = {
+            "a":    analysis_a.astype(np.float32),
+            "b":    analysis_b.astype(np.float32) if analysis_b is not None else None,
+            "diff": original_diff,
+        }
+        if original_diff is not None:
+            result["diff_dist"]["original"] = self._diff_distribution(
+                original_diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
 
         _label_b = image_b.label if image_b is not None else None
 
@@ -156,6 +167,7 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared,
+                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
             )
             _f_log = _ex.submit(self._log_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -163,6 +175,7 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
+                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
             )
             _f_wav = _ex.submit(self._wavelet_analysis,
                 analysis_a, analysis_b, wavelet, levels,
@@ -170,6 +183,7 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
+                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
             )
             _f_web = _ex.submit(self._weber_analysis,
                 analysis_a, analysis_b,
@@ -177,6 +191,7 @@ class SpatialDetailAnalyzer:
                 image_a.label, _label_b,
                 display_roi=display_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
+                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
             )
             _f_grad = _ex.submit(self._gradient_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -184,6 +199,7 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
+                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
             )
             std_b64, std_partial = _f_std.result()
             log_b64, log_partial = _f_log.result()
@@ -209,6 +225,11 @@ class SpatialDetailAnalyzer:
         result["panels"].update(wav_partial["panels"])
         result["panels"].update(web_partial["panels"])
         result["panels"].update(grad_partial["panels"])
+        result["diff_dist"].update(std_partial["diff_dist"])
+        result["diff_dist"].update(log_partial["diff_dist"])
+        result["diff_dist"].update(wav_partial["diff_dist"])
+        result["diff_dist"].update(web_partial["diff_dist"])
+        result["diff_dist"].update(grad_partial["diff_dist"])
 
         # Merge noise-corrected scores/noise-floors and compute A/B ratios centrally.
         for prefix, partial in (("std", std_partial), ("log", log_partial),
@@ -337,13 +358,15 @@ class SpatialDetailAnalyzer:
                        kernel_sizes, label_a, label_b,
                        display_roi=None,
                        crosshair=None,
-                       mask_neb_shared=None) -> tuple[dict, dict]:
+                       mask_neb_shared=None,
+                       mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "contrast_ratios_a": {}, "contrast_ratios_b": {},
             "std_nc_score_a": {}, "std_nc_score_b": {},
             "std_nc_noise_a": {}, "std_nc_noise_b": {},
             "panels": {},
+            "diff_dist": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
@@ -366,11 +389,15 @@ class SpatialDetailAnalyzer:
                 partial["std_nc_score_b"][ks] = nc_b
                 partial["std_nc_noise_b"][ks] = noise_b
 
+            diff = (std_a - std_b).astype(np.float32) if not single else None
             partial["panels"][f"std_{ks}px"] = {
                 "a":    std_a.astype(np.float32),
                 "b":    std_b.astype(np.float32) if std_b is not None else None,
-                "diff": (std_a - std_b).astype(np.float32) if std_b is not None else None,
+                "diff": diff,
             }
+            if diff is not None:
+                partial["diff_dist"][f"std_{ks}px"] = self._diff_distribution(
+                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_std_{ks}px"] = {
                     "a": (std_a / noise_a).astype(np.float32),
@@ -477,6 +504,33 @@ class SpatialDetailAnalyzer:
         return float(bn.median(neb_vals)) / noise_floor, noise_floor
 
     @staticmethod
+    def _diff_distribution(diff_map: np.ndarray,
+                            mask_neb_shared: np.ndarray | None,
+                            mask_bg_shared: np.ndarray | None,
+                            rng: np.random.Generator) -> dict:
+        """Random-subsampled A-B diff pixel populations for nebula vs background.
+
+        Returns {"nebula": ndarray, "background": ndarray} (float32, signed diff
+        values, up to SECTION8_DIFF_DIST_MAX_SAMPLES each). Either array is empty
+        if the corresponding mask is unavailable (single-image mode) or selects
+        zero pixels.
+        """
+        out = {"nebula": np.empty(0, dtype=np.float32),
+               "background": np.empty(0, dtype=np.float32)}
+        if mask_neb_shared is None or mask_bg_shared is None:
+            return out
+        h = min(diff_map.shape[0], mask_neb_shared.shape[0], mask_bg_shared.shape[0])
+        w = min(diff_map.shape[1], mask_neb_shared.shape[1], mask_bg_shared.shape[1])
+        cropped = diff_map[:h, :w]
+        for key, mask in (("nebula", mask_neb_shared), ("background", mask_bg_shared)):
+            vals = cropped[mask[:h, :w]]
+            if vals.size > SECTION8_DIFF_DIST_MAX_SAMPLES:
+                idx = rng.choice(vals.size, SECTION8_DIFF_DIST_MAX_SAMPLES, replace=False)
+                vals = vals[idx]
+            out[key] = vals.astype(np.float32)
+        return out
+
+    @staticmethod
     def _compute_nc_ratios(score_a: dict, score_b: dict) -> dict:
         """Per-scale A/B ratio of noise-corrected scores; {} if either side is empty
         (single-image mode)."""
@@ -496,12 +550,14 @@ class SpatialDetailAnalyzer:
                        label_a, label_b,
                        display_roi=None,
                        crosshair=None,
-                       mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
+                       mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
+                       mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "log_nc_score_a": {}, "log_nc_score_b": {},
             "log_nc_noise_a": {}, "log_nc_noise_b": {},
             "panels": {},
+            "diff_dist": {},
         }
         single = norm_b is None
         for sigma in sigmas:
@@ -517,11 +573,15 @@ class SpatialDetailAnalyzer:
                 partial["log_nc_score_b"][sigma] = nc_b
                 partial["log_nc_noise_b"][sigma] = noise_b
 
+            diff = (log_a - log_b).astype(np.float32) if log_b is not None else None
             partial["panels"][f"log_{sigma}"] = {
                 "a":    log_a.astype(np.float32),
                 "b":    log_b.astype(np.float32) if log_b is not None else None,
-                "diff": (log_a - log_b).astype(np.float32) if log_b is not None else None,
+                "diff": diff,
             }
+            if diff is not None:
+                partial["diff_dist"][f"log_{sigma}"] = self._diff_distribution(
+                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_log_{sigma}"] = {
                     "a": (log_a / noise_a).astype(np.float32),
@@ -576,7 +636,8 @@ class SpatialDetailAnalyzer:
                             label_a, label_b,
                             display_roi=None,
                             crosshair=None,
-                            mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
+                            mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
+                            mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
         """G = |gradient| at Gaussian scale sigma (first spatial derivative magnitude).
         Reuses the LOG_SIGMAS scale set so gradient and |LoG| are directly comparable
         at identical spatial scales. Structured identically to _log_analysis."""
@@ -585,6 +646,7 @@ class SpatialDetailAnalyzer:
             "gm_nc_score_a": {}, "gm_nc_score_b": {},
             "gm_nc_noise_a": {}, "gm_nc_noise_b": {},
             "panels": {},
+            "diff_dist": {},
         }
         single = norm_b is None
         for sigma in sigmas:
@@ -600,11 +662,15 @@ class SpatialDetailAnalyzer:
                 partial["gm_nc_score_b"][sigma] = nc_b
                 partial["gm_nc_noise_b"][sigma] = noise_b
 
+            diff = (gm_a - gm_b).astype(np.float32) if gm_b is not None else None
             partial["panels"][f"gradient_{sigma}"] = {
                 "a":    gm_a.astype(np.float32),
                 "b":    gm_b.astype(np.float32) if gm_b is not None else None,
-                "diff": (gm_a - gm_b).astype(np.float32) if gm_b is not None else None,
+                "diff": diff,
             }
+            if diff is not None:
+                partial["diff_dist"][f"gradient_{sigma}"] = self._diff_distribution(
+                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_gradient_{sigma}"] = {
                     "a": (gm_a / noise_a).astype(np.float32),
@@ -659,7 +725,8 @@ class SpatialDetailAnalyzer:
                            label_a, label_b,
                            display_roi=None,
                            crosshair=None,
-                           mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
+                           mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
+                           mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "sigma_noise_a": None, "sigma_noise_b": None,
@@ -667,6 +734,7 @@ class SpatialDetailAnalyzer:
             "wavelet_nc_score_a": {}, "wavelet_nc_score_b": {},
             "wavelet_nc_noise_a": {}, "wavelet_nc_noise_b": {},
             "panels": {},
+            "diff_dist": {},
         }
         single = norm_b is None
 
@@ -712,11 +780,15 @@ class SpatialDetailAnalyzer:
                 continue   # display/panels only for levels 2-3, unchanged from prior behaviour
 
             display_level = human_level
+            diff = (rec_a - rec_b).astype(np.float32) if rec_b is not None else None
             partial["panels"][f"wavelet_{display_level}"] = {
                 "a":    rec_a.astype(np.float32),
                 "b":    rec_b.astype(np.float32) if rec_b is not None else None,
-                "diff": (rec_a - rec_b).astype(np.float32) if rec_b is not None else None,
+                "diff": diff,
             }
+            if diff is not None:
+                partial["diff_dist"][f"wavelet_{display_level}"] = self._diff_distribution(
+                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_wavelet_{display_level}"] = {
                     "a": (rec_a / noise_a).astype(np.float32),
@@ -800,7 +872,8 @@ class SpatialDetailAnalyzer:
     def _weber_analysis(self, norm_a, norm_b, kernel_sizes,
                         label_a, label_b,
                         display_roi=None,
-                        mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None) -> tuple[dict, dict]:
+                        mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
+                        mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "weber_contrast_a": {},
@@ -808,6 +881,7 @@ class SpatialDetailAnalyzer:
             "weber_nc_score_a": {}, "weber_nc_score_b": {},
             "weber_nc_noise_a": {}, "weber_nc_noise_b": {},
             "panels": {},
+            "diff_dist": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
@@ -828,11 +902,15 @@ class SpatialDetailAnalyzer:
                 partial["weber_nc_score_b"][ks] = nc_b
                 partial["weber_nc_noise_b"][ks] = noise_b
 
+            diff = (wc_a - wc_b).astype(np.float32) if wc_b is not None else None
             partial["panels"][f"weber_{ks}px"] = {
                 "a":    wc_a.astype(np.float32),
                 "b":    wc_b.astype(np.float32) if wc_b is not None else None,
-                "diff": (wc_a - wc_b).astype(np.float32) if wc_b is not None else None,
+                "diff": diff,
             }
+            if diff is not None:
+                partial["diff_dist"][f"weber_{ks}px"] = self._diff_distribution(
+                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_weber_{ks}px"] = {
                     "a": (wc_a / noise_a).astype(np.float32),

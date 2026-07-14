@@ -428,6 +428,133 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
     return img_html, caption_html
 
 
+# Display order and labels for _spatial_diff_distributions_figure. Keys must match
+# analysis/image_filters.py's partial["diff_dist"] keys exactly (same keys used for
+# partial["panels"], see SpatialDetailAnalyzer._std_analysis/_log_analysis/etc.).
+_SPATIAL_DIFF_DIST_ROWS = [
+    ("original",     "Original (normalised image)"),
+    ("std_3px",      "Local σ — 3 px"),
+    ("std_5px",      "Local σ — 5 px"),
+    ("std_10px",     "Local σ — 10 px"),
+    ("log_1.5",      "|LoG| — σ=1.5 px"),
+    ("log_3.0",      "|LoG| — σ=3 px"),
+    ("log_6.0",      "|LoG| — σ=6 px"),
+    ("gradient_1.5", "Gradient |G| — σ=1.5 px"),
+    ("gradient_3.0", "Gradient |G| — σ=3 px"),
+    ("gradient_6.0", "Gradient |G| — σ=6 px"),
+    ("wavelet_2",    "Wavelet — level 2"),
+    ("wavelet_3",    "Wavelet — level 3"),
+    ("weber_3px",    "Weber contrast — 3 px"),
+    ("weber_5px",    "Weber contrast — 5 px"),
+    ("weber_9px",    "Weber contrast — 9 px"),
+]
+
+
+def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
+    """Combined figure: one row per Section 8 calculation, each row showing a
+    nebula-region violin and a background-region violin of the A-B diff pixel
+    values, with an IQR box-plot overlay (median magenta, IQR cyan — same styling
+    as the ePSF section's _psf_distributions_figure). Always violin+box, never
+    strip/swarm — diff populations here are always high-N.
+
+    Returns (img_html, caption_html), or ("", "") if no row has enough data
+    (including single-image mode, where diff_dist is empty).
+    """
+    import seaborn as sns
+    import pandas as pd
+
+    rows = [(k, label) for k, label in _SPATIAL_DIFF_DIST_ROWS if k in diff_dist]
+    has_data = any(
+        diff_dist[k]["nebula"].size >= 3 and diff_dist[k]["background"].size >= 3
+        for k, _ in rows
+    )
+    if not rows or not has_data:
+        return "", ""
+
+    fig, axes = plt.subplots(len(rows), 1, figsize=(7, 1.3 * len(rows) + 1))
+    fig.subplots_adjust(hspace=0.65, left=0.22, right=0.97, top=0.97, bottom=0.04)
+    palette = {"Nebula": "steelblue", "Background": "tomato"}
+    order = ["Nebula", "Background"]
+
+    def _draw_boxwhisker(ax, vals_list):
+        for i, vals in enumerate(vals_list):
+            ax.boxplot(
+                [vals], positions=[i], vert=False,
+                widths=0.45, zorder=5,
+                patch_artist=True,
+                manage_ticks=False,
+                boxprops=dict(facecolor="none", edgecolor="#00e5ff", linewidth=1.5, alpha=0.9),
+                medianprops=dict(color="magenta", linewidth=2.0, alpha=0.9),
+                whiskerprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                capprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                flierprops=dict(marker="", visible=False),
+            )
+
+    for ax, (key, title) in zip(np.atleast_1d(axes), rows):
+        neb = diff_dist[key]["nebula"]
+        bg = diff_dist[key]["background"]
+        if neb.size < 3 or bg.size < 3:
+            ax.set_visible(False)
+            continue
+
+        combined = np.concatenate([neb, bg])
+        df = pd.DataFrame({
+            "value": combined,
+            "region": (["Nebula"] * neb.size) + (["Background"] * bg.size),
+        })
+        sns.violinplot(data=df, x="value", y="region", order=order,
+                       palette=palette, inner=None, linewidth=0.8, ax=ax)
+        _draw_boxwhisker(ax, [neb, bg])
+
+        # Some detail maps (e.g. Weber contrast, unbounded near dark-sky pixels —
+        # see 8e methodology) have rare extreme-outlier diffs that stretch the axis
+        # so far the IQR box becomes an invisible sliver. Clip the *view* to the
+        # 1st-99th percentile of this row's own pooled data; the boxplot/violin
+        # values themselves are unaffected, only what's visible is cropped.
+        lo, hi = np.percentile(combined, [1.0, 99.0])
+        if hi > lo:
+            pad = 0.05 * (hi - lo)
+            ax.set_xlim(lo - pad, hi + pad)
+
+        ax.axvline(0.0, color="red", linestyle="--", linewidth=1.0, alpha=0.8, zorder=3)
+        ax.set_title(title, fontsize=8, loc="left", pad=2)
+        ax.set_xlabel("", fontsize=7)
+        ax.set_ylabel("", fontsize=7)
+        ax.tick_params(axis="x", labelsize=7)
+        ax.tick_params(axis="y", labelsize=7, pad=1)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    img_html = _img_tag(fig, "spatial_diff_distributions")
+
+    caption_html = (
+        '<p class="caption">'
+        "<b>Pixel-wise A&minus;B difference distributions.</b> "
+        "Each row is one Section 8 calculation, shown as a "
+        "<b>violin plot</b> (kernel density estimate of the diff pixel values, "
+        "randomly subsampled for display) with an IQR box-plot overlay: "
+        "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, "
+        "a <span style='color:magenta'><b>magenta centre line</b></span> at the "
+        "median. <span style='color:steelblue'><b>Nebula</b></span> = pixels both "
+        "images classify as nebula; <span style='color:tomato'><b>Background</b></span> "
+        "= pixels both images classify as background sky — the same shared masks used "
+        "for the noise-corrected scores in 8b&ndash;8f, here shown as full distributions "
+        "rather than a single median ratio. "
+        "A <span style='color:red'><b>red dashed line</b></span> marks zero "
+        "(A&nbsp;=&nbsp;B, no difference). "
+        "<b>How to read it:</b> a Background row centred at zero with a narrow IQR is "
+        "the expected noise floor; a Nebula row with a similarly narrow, zero-centred "
+        "distribution means the two filters agree at that scale. A Nebula median shifted "
+        "away from zero, or an IQR visibly wider than the Background row's, indicates a "
+        "real structural difference between the filters at that scale rather than noise. "
+        "Each row's x-axis is independently clipped to its own 1st&ndash;99th percentile "
+        "range so the IQR box stays visible; rows with rare extreme-outlier diffs (e.g. "
+        "Weber contrast near dark-sky pixels, see 8e) may have a small fraction of the "
+        "violin's tail extend beyond the visible axis."
+        "</p>"
+    )
+    return img_html, caption_html
+
+
 def _epsf_stars_cell(psf_metrics: dict) -> str:
     """Format the number of stars used to build the ePSF."""
     n = psf_metrics.get("epsf_n_stars")
@@ -3873,6 +4000,12 @@ curve is shown.</p>
         sm = ra.spatial_metrics or {}
         figs = sm.get("figures", {})
 
+        dist_img, dist_caption = _spatial_diff_distributions_figure(sm.get("diff_dist", {}))
+        dist_html = (
+            "<h3>8a. Difference Distribution Overview (A&minus;B)</h3>" + dist_img + dist_caption
+            if dist_img else ""
+        )
+
         cr_a = sm.get("contrast_ratios_a", {})
         cr_b = sm.get("contrast_ratios_b", {})
 
@@ -4053,6 +4186,7 @@ curve is shown.</p>
            'across different filter bandwidths. Images are shown side-by-side with a shared '
            'colour scale; the third panel shows the difference A−B.',
            title="Spatial detail maps overview")}
+{dist_html}
 {nc_methodology_box}
 {nc_empty_note}
 
