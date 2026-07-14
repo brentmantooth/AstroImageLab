@@ -102,6 +102,7 @@ def _to_uint8_display(arr: np.ndarray) -> np.ndarray:
 class _Entry:
     name:    str
     options: dict[str, str]   # display_label → npz_key; ordered
+    concept: str = ""         # optional explanatory text (Spatial Detail section)
 
 
 @dataclass
@@ -140,7 +141,8 @@ def _load_inspector_data(npz: "np.lib.npyio.NpzFile") -> _InspectorData:
                 if e.get("key_b") in npz_keys:
                     opts["Image B"] = e["key_b"]
             if opts:
-                parsed.append(_Entry(name=e["name"], options=opts))
+                parsed.append(_Entry(name=e["name"], options=opts,
+                                      concept=e.get("concept", "")))
         if parsed:
             data.sections[section] = parsed
     return data
@@ -664,6 +666,14 @@ class ReportInspector(QMainWindow):
             fn_row.addStretch()
             root.addLayout(fn_row)
 
+        # ── Concept info box (populated for Spatial Detail entries only) ──
+        self._concept_lbl = QLabel()
+        self._concept_lbl.setWordWrap(True)
+        self._concept_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._concept_lbl.setStyleSheet("color: #6cabdb; font-size: 9pt; padding: 2px 0;")
+        self._concept_lbl.setVisible(False)
+        root.addWidget(self._concept_lbl)
+
         # ── Slider reveal row (hidden in side-by-side mode) ────────────
         self._slider_row_widget = QWidget()
         slider_layout = QHBoxLayout(self._slider_row_widget)
@@ -812,6 +822,13 @@ class ReportInspector(QMainWindow):
         entries = self._data.sections.get(section, [])
         if idx < 0 or idx >= len(entries):
             return
+        concept = entries[idx].concept
+        if concept:
+            self._concept_lbl.setText(concept)
+            self._concept_lbl.setVisible(True)
+        else:
+            self._concept_lbl.clear()
+            self._concept_lbl.setVisible(False)
         option_labels = list(entries[idx].options.keys())
         self._left_combo.blockSignals(True)
         self._right_combo.blockSignals(True)

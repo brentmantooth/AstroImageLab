@@ -477,6 +477,79 @@ def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label, val_f
     return rows
 
 
+_SPATIAL_GLOSSARY_HTML = (
+    '<h3>8a. Background — Key Terms</h3>'
+    '<p>Section 8 measures <strong>Detail</strong> — how much real, resolvable structure '
+    'the current image actually contains at each spatial scale — which is related to '
+    'but distinct from <strong>Signal</strong>, <strong>Noise</strong>, <strong>SNR</strong>, '
+    '<strong>Contrast</strong>, and <strong>Resolution</strong>. Expand the boxes below for '
+    'definitions and for which term each metric in this section primarily measures.</p>'
+    + _info_box(
+        '<table>'
+        '  <tr><th>Term</th><th>Meaning</th><th>Example</th></tr>'
+        '  <tr><td>Signal</td><td>The true photon flux from the sky, before noise corrupts it — '
+        '      an absolute (or mean-normalised) brightness value.</td>'
+        '      <td>A nebula filament sits at 50 ADU above sky background — that 50 ADU is signal.</td></tr>'
+        '  <tr><td>Noise</td><td>Random fluctuation on top of the signal (shot, read, sky-background '
+        '      Poisson noise) — same true signal, different noise draw every exposure.</td>'
+        '      <td>Two sub-exposures of the same filament read 48 and 53 ADU — the ±2–3 ADU wobble '
+        '      is noise, not real structure.</td></tr>'
+        '  <tr><td>SNR</td><td>Signal ÷ noise. Answers whether a brightness level is real, or could '
+        '      be a random fluctuation. Says nothing about whether brightness varies spatially.</td>'
+        "      <td>A flat, uniform sky patch at 1000 ADU with 2 ADU noise has SNR = 500 — very high "
+        "      SNR, but zero contrast (nothing to see, it's uniform).</td></tr>"
+        '  <tr><td>Contrast</td><td>The relative brightness difference between a feature and its '
+        '      immediate surround. Requires spatial variation to exist at all.</td>'
+        '      <td>A filament at 1050 ADU on a 1000 ADU background has 5% contrast, regardless of '
+        '      how noisy either value is.</td></tr>'
+        '  <tr><td>Detail</td><td>Real, resolvable spatial structure actually present in this '
+        '      specific image, at a given scale — content-dependent.</td>'
+        '      <td>Fine filamentary sub-structure visible in a sharp, well-guided sub, smeared into '
+        '      a single blob in a poorly-guided one.</td></tr>'
+        '  <tr><td>Resolution</td><td>A property of the imaging system (optics + atmosphere + filter '
+        '      + sensor) — the finest scale at which contrast can be transmitted at all, independent '
+        '      of scene content. A ceiling, not a measurement of the scene.</td>'
+        '      <td>Two stars 1.5″ apart merge into one blob or resolve as two peaks — the same '
+        '      threshold whether pointed at a cluster or a galaxy.</td></tr>'
+        '</table>'
+        '<p>SNR and Contrast are both ratios, but over different things — SNR is signal vs. '
+        "random noise; Contrast is one region's brightness vs. a neighbouring region's. Detail "
+        'and Resolution are both about spatial scale, but Detail is scene-dependent (how much '
+        'structure is actually captured in this image), while Resolution is system-dependent '
+        '(a ceiling on how fine a structure the system can transmit at all, independent of '
+        "what's imaged — see Section 3 PSF/MTF and Section 6 Edge/ESF-LSF for Resolution "
+        "proper; Section 7's power spectrum is a hybrid of the two).</p>",
+        title="Key terms — Signal, Noise, SNR, Contrast, Detail, Resolution")
+    + _info_box(
+        '<table>'
+        '  <tr><th>Metric</th><th>Kernel / scale</th><th>Primarily measures</th><th>Responds to</th></tr>'
+        '  <tr><td>Local σ map (8b)</td><td>3, 5, 10 px window</td><td>Detail (texture / variability)</td>'
+        "      <td>Any local brightness variation — filaments, halos, and noise (can't tell them "
+        '      apart alone)</td></tr>'
+        '  <tr><td>Contrast ratio (8b)</td><td>same kernel sizes</td><td>Contrast, built from the σ map</td>'
+        '      <td>How much more textured the nebula is than blank sky, at this scale</td></tr>'
+        '  <tr><td>|LoG| map (8c)</td><td>σ = 1.5, 3, 6 px</td><td>Detail (edge / curvature strength)</td>'
+        '      <td>Intensity boundaries — filament edges, shell rims — surviving smoothing at scale σ</td></tr>'
+        '  <tr><td>Gradient magnitude (8f)</td><td>same σ as LoG</td><td>Detail (edge sharpness)</td>'
+        "      <td>How abrupt a boundary is at scale σ; complements Section 6's precise per-edge "
+        '      resolution measurement</td></tr>'
+        '  <tr><td>Wavelet decomposition (8d)</td><td>levels ≈ 2, 4, 8, 16 px</td>'
+        '      <td>Detail by scale band, plus explicit SNR</td>'
+        '      <td>Structure whose size matches this scale band; level 1 is noise-only, used to '
+        '      calibrate the noise floor</td></tr>'
+        "  <tr><td>Weber fraction contrast (8e)</td><td>3, 5, 9 px window</td>"
+        "      <td>Contrast (Weber's law, ΔL/L)</td>"
+        '      <td>Local range vs. local median background — the most literal "Contrast" metric in '
+        '      this section</td></tr>'
+        '  <tr><td>Noise-corrected (NC) score (8b–8f, 8h)</td><td>same scale as parent method</td>'
+        '      <td>SNR of Detail</td>'
+        "      <td>Whether a detail-map response in the nebula is real structure or just this image's "
+        '      own noise floor at that scale</td></tr>'
+        '</table>',
+        title="Which concept each metric primarily measures")
+)
+
+
 def _panel_display_name(pkey: str) -> str:
     """Derive a human-readable label from a SpatialDetailAnalyzer panels dict key.
     Dynamic (not a hardcoded map) so every scale it computes — including future
@@ -498,6 +571,58 @@ def _panel_display_name(pkey: str) -> str:
     else:
         name = base
     return f"{name} (noise-normalized)" if nrm else name
+
+
+def _panel_concept(pkey: str) -> str:
+    """Short explanatory text for the Report Inspector's concept box: what
+    concept a Spatial Detail panel measures, what it responds to, and whether
+    higher or lower indicates a stronger response. Dynamic (not a hardcoded
+    map), mirroring _panel_display_name's key-family parsing."""
+    nrm = pkey.startswith("nrm_")
+    base = pkey[4:] if nrm else pkey
+    if base == "original":
+        return ("Source image (mean-signal-normalised), not a detail metric itself — "
+                 "shown for reference alongside the derived maps below.")
+    elif base.startswith("std_") and base.endswith("px"):
+        concept = ("Measures <b>Detail</b> (local texture / variability) within a square "
+                   "window. Responds to any local brightness variation — nebula filaments, "
+                   "star halos, and pixel noise all raise this value; it cannot distinguish "
+                   "real structure from noise on its own. <b>Higher = more local variation</b> "
+                   "(more preserved detail in nebula regions, but also more noise in blank sky).")
+    elif base.startswith("log_"):
+        concept = ("Measures <b>Detail</b> as edge/curvature strength (2nd derivative) at a "
+                   "Gaussian smoothing scale σ. Responds to intensity boundaries — filament "
+                   "edges, shell rims — that survive smoothing at this scale. "
+                   "<b>Higher = sharper, more defined edges</b> at this scale (also amplifies "
+                   "noise at small σ).")
+    elif base.startswith("wavelet_"):
+        concept = ("Measures <b>Detail</b> at a specific spatial scale (~2<sup>level</sup> px) "
+                   "via wavelet decomposition. Responds to structure whose size matches this "
+                   "level — fine filaments/star cores at low levels, broader emission knots/"
+                   "shell edges at higher levels. <b>Higher coefficient magnitude = more "
+                   "structure at this scale</b>; see the wavelet SNR chart for whether it's "
+                   "signal- or noise-dominated.")
+    elif base.startswith("weber_") and base.endswith("px"):
+        concept = ("Measures <b>Contrast</b> (Weber's law, c = ΔL/L) within a square window — "
+                   "local intensity range relative to local background luminance. Responds to "
+                   "how strongly a feature stands out against its immediate surround. "
+                   "<b>Higher = feature stands out more strongly</b> from its local background "
+                   "(very high values over near-black sky can be an artifact of a small "
+                   "denominator, not real contrast).")
+    elif base.startswith("gradient_"):
+        concept = ("Measures <b>Detail</b> as edge sharpness (1st derivative, slope magnitude) "
+                   "at Gaussian scale σ. Responds to how abrupt an intensity transition is at "
+                   "this scale. <b>Higher = crisper, more abrupt boundaries</b> (also amplifies "
+                   "noise at small σ).")
+    else:
+        return ""
+    if nrm:
+        concept += (" <b>Noise-normalised:</b> this map is divided by this image's own "
+                    "empirical noise floor at this scale/operator, putting A and B on a fair "
+                    "shared colour scale. <b>Higher = stronger real signal relative to this "
+                    "image's own noise</b>; values at or below ~1 indicate the response here "
+                    "is no stronger than this image's own noise floor.")
+    return concept
 
 
 def _power_ratio_db(freq_a, rp_a, freq_b, rp_b) -> tuple[np.ndarray, np.ndarray] | None:
@@ -662,12 +787,14 @@ class ReportBuilder:
         def _add(key: str, arr: np.ndarray) -> None:
             arrays[key] = arr
 
-        def _add_options_entry(section: str, name: str, options: dict) -> None:
+        def _add_options_entry(section: str, name: str, options: dict,
+                                concept: str = "") -> None:
             valid = {k: v for k, v in options.items() if v in arrays}
             if valid:
-                catalog_sections.setdefault(section, []).append(
-                    {"name": name, "options": valid}
-                )
+                entry = {"name": name, "options": valid}
+                if concept:
+                    entry["concept"] = concept
+                catalog_sections.setdefault(section, []).append(entry)
 
         # ── Input images ──────────────────────────────────────────────────────
         _add("display_a", _inspector_display(image_a))
@@ -846,7 +973,8 @@ class ReportBuilder:
                 npz_diff = f"sp_{pkey}_diff"
                 _add(npz_diff, pa_panel["diff"])
                 sp_opts["Diff (A−B)"] = npz_diff
-            _add_options_entry("Spatial Detail", img_set_name, sp_opts)
+            _add_options_entry("Spatial Detail", img_set_name, sp_opts,
+                               concept=_panel_concept(pkey))
 
         # ── Catalog JSON ──────────────────────────────────────────────────────
         catalog = {
@@ -3916,6 +4044,7 @@ curve is shown.</p>
         return f"""
 <h2>8. Spatial Detail Comparison &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
 {err}
+{_SPATIAL_GLOSSARY_HTML}
 {sl_note}
 {roi_note}
 {smooth_note}
