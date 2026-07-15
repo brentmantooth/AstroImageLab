@@ -272,6 +272,8 @@ class AstroImage:
     def estimate_background(self, box_size: int = 64) -> None:
         if self.data is None:
             raise RuntimeError("Image not loaded")
+        if self.background is not None:
+            return   # already computed for this instance's data; self.data never changes post-load
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.background = Background2D(

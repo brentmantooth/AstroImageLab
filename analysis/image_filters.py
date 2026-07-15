@@ -1340,9 +1340,7 @@ class SpatialDetailAnalyzer:
     @staticmethod
     def _draw_cross_section(ax, pos: np.ndarray, prof_a: np.ndarray, prof_b: np.ndarray,
                              label_a: str, label_b: str, title: str) -> None:
-        """Draw a cross-section profile (+ linear A−B diff on a twinx — CLAUDE.md's
-        sanctioned linear-vs-linear twinx precedent, unrelated to the log-ratio
-        metric used elsewhere in Section 8) into an existing Axes: the bottom-right
+        """Draw a cross-section profile into an existing Axes: the bottom-right
         quadrant of _plot_side_by_side's 2×2 grid. Fonts/linewidths are tuned down
         from the metric's old standalone-figure sizes since this panel is now
         roughly a quarter the area."""
@@ -1356,15 +1354,6 @@ class SpatialDetailAnalyzer:
         ax.tick_params(labelsize=7)
         ax.legend(loc="upper left", fontsize=6.5, labelspacing=0.3)
         ax.grid(True, alpha=0.3)
-
-        ax2 = ax.twinx()
-        diff = prof_a - prof_b
-        ax2.plot(pos, diff, color="#2ca02c", linewidth=0.9,
-                 linestyle="--", alpha=0.85, label="A−B")
-        ax2.axhline(0, color="#2ca02c", linewidth=0.6, alpha=0.3)   # zero-crossing reference
-        ax2.set_ylabel("Difference (A−B)", color="#2ca02c", fontsize=8)
-        ax2.tick_params(axis="y", labelcolor="#2ca02c", labelsize=7)
-        ax2.legend(loc="upper right", fontsize=6.5, labelspacing=0.3)
         ax.set_title(title, fontsize=9)
 
     @staticmethod

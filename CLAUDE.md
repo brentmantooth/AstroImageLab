@@ -62,6 +62,7 @@ synthetic/
 | `_log_ratio_map(a, b)` | `analysis/image_filters.py` | Per-pixel `log10(\|A\|/\|B\|)` map with percentile-based epsilon floor and defensive shape crop — the Section 8 replacement for plain `A − B` diff |
 | `_plot_mask_illustration(base, mask_neb, mask_bg)` | `analysis/image_filters.py` | Translucent steelblue/tomato mask overlay on a grayscale base image |
 | `_plot_metric_correlation(map_a, map_b, mask_neb, mask_bg, ...)` | `analysis/image_filters.py` | 1×2 masked-region scatter (A vs B) with a 1:1 line plus overall + tail-restricted dual linear fits |
+| `_family_figs_with_corr(rows, map_key_fn)` | `report_builder.py` | Emits a Section 8 family's map figure immediately followed by its `corr_*` correlation scatter, one scale at a time, in numeric order (`_SPATIAL_CORR_ROWS`) — the pattern to follow when adding any new per-scale Section 8 figure pair |
 
 ---
 
@@ -229,11 +230,13 @@ When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_rati
   `20 * np.log10(ratio)`. Using the wrong constant is silently off by 2× in dB — no
   exception, no obviously-wrong output, just a subtly incorrect number.
 - **Don't add the ratio via `ax.twinx()`** onto the existing absolute-value plot unless
-  both axes are the same kind of quantity (linear-vs-linear, as in
-  `analysis/image_filters.py::_draw_cross_section`'s A−B difference line). A linear,
-  zero-centered ratio next to a log-scale absolute axis has no principled vertical
-  alignment between the two scales — matplotlib's independent autoscaling invents a
-  relationship that isn't in the data. Build a separate, dedicated figure/panel instead.
+  both axes are the same kind of quantity (linear-vs-linear). A linear, zero-centered
+  ratio next to a log-scale absolute axis has no principled vertical alignment between
+  the two scales — matplotlib's independent autoscaling invents a relationship that
+  isn't in the data. Build a separate, dedicated figure/panel instead. (The codebase's
+  prior linear-vs-linear precedent, `_draw_cross_section`'s A−B difference line, was
+  removed as unnecessary clutter — there is currently no `ax.twinx()` usage anywhere
+  in the codebase, so treat this as a rule to apply fresh, not an existing pattern to copy.)
 - **Guard bin alignment before dividing two arrays from different analyses.** Two
   per-image radial/frequency arrays are only safely divisible bin-for-bin when they
   share the same shape *and* values (`freq_a.shape == freq_b.shape and
@@ -252,6 +255,27 @@ When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_rati
   values — same tool as the existing display-clipping precedent
   (`_plot_side_by_side`'s `np.percentile(arr, 0.5)`), applied to the epsilon floor
   instead of just the color scale.
+
+### Background estimation — compute once via the pre-pass, never redundantly
+
+`AstroImage.estimate_background()` (`core/astro_image.py`) is idempotent: it returns
+immediately if `self.background is not None`, since `self.data` is only ever set once,
+during `load()`. Every analyzer (`SNRAnalyzer`, `PSFAnalyzer`, `HaloAnalyzer`,
+`EdgeAnalyzer`, `PowerSpectrumAnalyzer`, `SpatialDetailAnalyzer`) still calls
+`estimate_background()` unconditionally at the top of its `analyze()` — that's
+intentional and does not need to change; the idempotency guard just makes each of
+those calls a cheap no-op once the object's background has already been computed.
+
+`gui/analysis_thread.py::_execute()` runs a pre-pass — after alignment, before task
+dispatch — that calls `estimate_background()` once per distinct `AstroImage` object
+(`img_a`, `img_b`, `self._starless_a`, `self._starless_b`) via a small
+`ThreadPoolExecutor`. This exists because multiple analyzers share the same image
+object and can run concurrently under `parallel=True`; without the pre-pass each one
+would independently trigger a full `Background2D` computation (expensive) and race to
+write `self.background` / `self.background_rms` on the same object. When adding a new
+analyzer that needs background stats, just call `image.estimate_background()` as
+normal at the top of `analyze()` — do not add another pre-pass call site; the existing
+one in `_execute()` already covers every image object the thread constructs.
 
 ---
 
@@ -351,7 +375,8 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
 | `_section_snr` crashed when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) built a `panels` list filtered to non-`None` entries but never checked whether it was empty before calling `plt.subplots(1, len(panels), ...)` — 0 columns raised `ValueError: Number of columns must be a positive integer, not 0`. Hit whenever SNR is unchecked while another metric (e.g. Power Spectrum) is run. Fixed with an early `if not panels: return None` guard, matching `_plot_radial_overlay`/`_plot_radial_ratio_db`; both call sites already pipe the result through `_img_tag`, which turns `None` into `""`. |
 | Whole-population regression slope hides tail-specific divergence | A single OLS fit over an entire A-vs-B scatter is dominated by leverage (distance from the mean), not point count — it can show near-zero correlation even when a sparse high-value tail diverges sharply (or vice versa), because it blends "the bulk agrees" and "the tail diverges" into one ambiguous number. When the signal of interest lives specifically in the tail (Section 8g: "which filter shows more detail in the brightest/most-structured pixels"), fit two lines — an overall fit and a second fit restricted to the top N% by combined magnitude (`_plot_metric_correlation`, `SECTION8_SCATTER_TAIL_PERCENTILE`) — and report slope + R² for each. High tail R² with slope far from 1 is a real, systematic effect; low tail R² means the apparent divergence is mostly noise. |
-| New Section 8 panel key doesn't need Report Inspector code changes | `gui/report_inspector.py` is fully generic — driven entirely by a companion `<stem>_inspector.npz` (raw float32/uint8 arrays) plus an embedded `catalog_json` built in `report_builder.py::_write_inspector_file`. `_panel_display_name`/`_panel_concept` dynamically parse any `panels` dict key prefix, so a new `SpatialDetailAnalyzer` panel family auto-appears in the inspector with zero inspector-side changes. A genuinely new *visual type* is a different story: the inspector only knows how to `imshow` 2D/RGB arrays (side-by-side or slider-reveal), so scatter-style plots (Section 8g's `corr_*` figures) must stay static-HTML-only unless new inspector canvas code is written. |
+| New Section 8 panel key doesn't need Report Inspector code changes | `gui/report_inspector.py` is fully generic — driven entirely by a companion `<stem>_inspector.npz` (raw float32/uint8 arrays) plus an embedded `catalog_json` built in `report_builder.py::_write_inspector_file`. `_panel_display_name`/`_panel_concept` dynamically parse any `panels` dict key prefix, so a new `SpatialDetailAnalyzer` panel family auto-appears in the inspector with zero inspector-side changes. A genuinely new *visual type* is a different story: the inspector only knows how to `imshow` 2D/RGB arrays (side-by-side or slider-reveal), so scatter-style plots (Section 8's `corr_*` correlation figures, interleaved into 8b–8f right after each map figure via `_family_figs_with_corr`) must stay static-HTML-only unless new inspector canvas code is written. |
+| Renumbering a Section 8 subsection misses caption cross-references | Section 8's sub-heading letters (8a–8g) are referenced by literal string in caption/info-box text scattered throughout `_section_spatial` — not just in the `<h3>` tags (e.g. "see 8g for…", "(8b–8f, 8g)"). After adding, removing, or renumbering a subsection, `grep` the function for every old *and* new heading letter — HTML renders a stale cross-reference without error, it just silently misdirects the reader to the wrong subsection. |
 
 ---
 

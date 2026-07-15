@@ -109,6 +109,20 @@ class AnalysisThread(QThread):
         else:
             self.progress.emit(2, "Single-image mode — skipping alignment…")
 
+        # Pre-compute background once per distinct image object, ahead of the parallel
+        # dispatch below. Every analyzer (SNR, PSF, Halo, Edge, PowerSpectrum, Spatial)
+        # calls estimate_background() unconditionally on whichever image it's given;
+        # with parallel=True several of them can share the same img_a/img_b/starless
+        # instance and race to recompute the same Background2D concurrently. Computing
+        # it here first makes every downstream call a no-op (see the idempotency guard
+        # in AstroImage.estimate_background) instead of a redundant recomputation.
+        _bg_images = {id(im): im for im in
+                      (img_a, img_b, self._starless_a, self._starless_b)
+                      if im is not None}
+        if _bg_images:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(_bg_images)) as ex:
+                list(ex.map(lambda im: im.estimate_background(), _bg_images.values()))
+
         # Build ordered task list: (metric_key, display_label, callable)
         # Each callable is a zero-arg function that writes into result_a / result_b.
         tasks: list[tuple[str, str, Callable[[], None]]] = []
