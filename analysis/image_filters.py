@@ -10,7 +10,9 @@ import matplotlib
 import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
+from scipy.stats import linregress
 import pywt
 
 from core.astro_image import AstroImage
@@ -18,7 +20,9 @@ from core.fig_utils import fig_to_b64, figs_to_b64
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
                          WEBER_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
-                         XS_SNR_REGION_WIDTH, SECTION8_DIFF_DIST_MAX_SAMPLES)
+                         XS_SNR_REGION_WIDTH, SECTION8_DIFF_DIST_MAX_SAMPLES,
+                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES,
+                         SECTION8_SCATTER_TAIL_PERCENTILE)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -142,7 +146,7 @@ class SpatialDetailAnalyzer:
         # map is computed from (mean-normalised, ROI-cropped if a ROI was given) as
         # its own panel, so the Report Inspector can show the source image content
         # for a map alongside the map itself, pixel-aligned to the same crop.
-        original_diff = (analysis_a - analysis_b).astype(np.float32) if analysis_b is not None else None
+        original_diff = self._log_ratio_map(analysis_a, analysis_b) if analysis_b is not None else None
         result["panels"]["original"] = {
             "a":    analysis_a.astype(np.float32),
             "b":    analysis_b.astype(np.float32) if analysis_b is not None else None,
@@ -151,6 +155,13 @@ class SpatialDetailAnalyzer:
         if original_diff is not None:
             result["diff_dist"]["original"] = self._diff_distribution(
                 original_diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+
+        # Mask illustration: only meaningful in two-image mode, mirroring the
+        # violin plots' own empty-in-single-image-mode behaviour.
+        if mask_neb_shared is not None:
+            mask_fig = self._plot_mask_illustration(
+                result["panels"]["original"]["a"], mask_neb_shared, mask_bg_shared)
+            figures["mask_illustration"] = fig_to_b64(mask_fig, dpi=150)
 
         _label_b = image_b.label if image_b is not None else None
 
@@ -389,7 +400,7 @@ class SpatialDetailAnalyzer:
                 partial["std_nc_score_b"][ks] = nc_b
                 partial["std_nc_noise_b"][ks] = noise_b
 
-            diff = (std_a - std_b).astype(np.float32) if not single else None
+            diff = self._log_ratio_map(std_a, std_b) if not single else None
             partial["panels"][f"std_{ks}px"] = {
                 "a":    std_a.astype(np.float32),
                 "b":    std_b.astype(np.float32) if std_b is not None else None,
@@ -398,6 +409,12 @@ class SpatialDetailAnalyzer:
             if diff is not None:
                 partial["diff_dist"][f"std_{ks}px"] = self._diff_distribution(
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+            if not single:
+                corr_fig = self._plot_metric_correlation(
+                    std_a, std_b, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Local σ (kernel {ks}px)", diff_dist_rng)
+                if corr_fig is not None:
+                    figures[f"corr_std_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_std_{ks}px"] = {
                     "a": (std_a / noise_a).astype(np.float32),
@@ -411,7 +428,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(std_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Local σ — kernel {ks}px — {label_a}",
                     f"Local σ — kernel {ks}px — {label_b}",
-                    diff_title=f"Diff (A−B), kernel {ks}px",
+                    diff_title=f"Log ratio (A/B), kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                     display_roi=None,
@@ -431,7 +448,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(std_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Local σ (× noise floor) — kernel {ks}px — {label_a}",
                     f"Local σ (× noise floor) — kernel {ks}px — {label_b}",
-                    diff_title=f"Diff (A−B), noise-normalised, kernel {ks}px",
+                    diff_title=f"Log ratio (A/B), noise-normalised, kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                 )
@@ -504,16 +521,51 @@ class SpatialDetailAnalyzer:
         return float(bn.median(neb_vals)) / noise_floor, noise_floor
 
     @staticmethod
+    def _log_ratio_map(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Per-pixel log10(|A|/|B|) map, replacing plain A-B difference.
+
+        Sign is discarded (via abs()) before the ratio so the result is always
+        well-defined even for map families that can go negative (original
+        background-subtracted flux, wavelet band-pass reconstructions) — this
+        turns the comparison into "which image shows more structure/contrast at
+        this scale", not "which image is signed-brighter". Non-negative families
+        (std, |LoG|, gradient magnitude, Weber contrast) are unaffected by the
+        abs() since they're already >= 0.
+
+        Epsilon-floors both operands using a low percentile (not a raw minimum —
+        a raw minimum over a multi-megapixel array can be pathologically tiny and
+        let a single spurious pixel dominate the log-ratio's dynamic range) of the
+        pooled positive values from both inputs, mirroring report_builder.py's
+        _power_ratio_db epsilon pattern but adapted for per-pixel map sizes.
+
+        A and B are defensively cropped to their common shape first — two-image
+        analysis can reach here with mismatched shapes when astroalign
+        registration fails and analysis proceeds unaligned.
+        """
+        abs_a, abs_b = np.abs(a), np.abs(b)
+        h = min(abs_a.shape[0], abs_b.shape[0])
+        w = min(abs_a.shape[1], abs_b.shape[1])
+        abs_a, abs_b = abs_a[:h, :w], abs_b[:h, :w]
+
+        positive = np.concatenate([abs_a[abs_a > 0].ravel(), abs_b[abs_b > 0].ravel()])
+        eps = max(float(np.percentile(positive, SECTION8_LOGRATIO_EPS_PERCENTILE)), 1e-12) \
+            if positive.size > 0 else 1e-12
+
+        ratio = np.clip(abs_a, eps, None) / np.clip(abs_b, eps, None)
+        return np.log10(ratio).astype(np.float32)
+
+    @staticmethod
     def _diff_distribution(diff_map: np.ndarray,
                             mask_neb_shared: np.ndarray | None,
                             mask_bg_shared: np.ndarray | None,
                             rng: np.random.Generator) -> dict:
-        """Random-subsampled A-B diff pixel populations for nebula vs background.
+        """Random-subsampled log10(|A|/|B|) ratio pixel populations for nebula vs
+        background.
 
-        Returns {"nebula": ndarray, "background": ndarray} (float32, signed diff
-        values, up to SECTION8_DIFF_DIST_MAX_SAMPLES each). Either array is empty
-        if the corresponding mask is unavailable (single-image mode) or selects
-        zero pixels.
+        Returns {"nebula": ndarray, "background": ndarray} (float32, signed
+        log-ratio values — 0 means A=B — up to SECTION8_DIFF_DIST_MAX_SAMPLES
+        each). Either array is empty if the corresponding mask is unavailable
+        (single-image mode) or selects zero pixels.
         """
         out = {"nebula": np.empty(0, dtype=np.float32),
                "background": np.empty(0, dtype=np.float32)}
@@ -573,7 +625,7 @@ class SpatialDetailAnalyzer:
                 partial["log_nc_score_b"][sigma] = nc_b
                 partial["log_nc_noise_b"][sigma] = noise_b
 
-            diff = (log_a - log_b).astype(np.float32) if log_b is not None else None
+            diff = self._log_ratio_map(log_a, log_b) if log_b is not None else None
             partial["panels"][f"log_{sigma}"] = {
                 "a":    log_a.astype(np.float32),
                 "b":    log_b.astype(np.float32) if log_b is not None else None,
@@ -582,6 +634,12 @@ class SpatialDetailAnalyzer:
             if diff is not None:
                 partial["diff_dist"][f"log_{sigma}"] = self._diff_distribution(
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+            if not single:
+                corr_fig = self._plot_metric_correlation(
+                    log_a, log_b, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"|LoG| (σ={sigma}px)", diff_dist_rng)
+                if corr_fig is not None:
+                    figures[f"corr_log_{sigma}"] = corr_fig
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_log_{sigma}"] = {
                     "a": (log_a / noise_a).astype(np.float32),
@@ -595,7 +653,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
                     f"|LoG| σ={sigma}px — {label_a}",
                     f"|LoG| σ={sigma}px — {label_b}",
-                    diff_title=f"LoG diff (A−B), σ={sigma}px",
+                    diff_title=f"|LoG| log-ratio (A/B), σ={sigma}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                     display_roi=None,
@@ -615,7 +673,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(log_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
                     f"|LoG| (× noise floor) σ={sigma}px — {label_a}",
                     f"|LoG| (× noise floor) σ={sigma}px — {label_b}",
-                    diff_title=f"Diff (A−B), noise-normalised, σ={sigma}px",
+                    diff_title=f"Log ratio (A/B), noise-normalised, σ={sigma}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                 )
@@ -662,7 +720,7 @@ class SpatialDetailAnalyzer:
                 partial["gm_nc_score_b"][sigma] = nc_b
                 partial["gm_nc_noise_b"][sigma] = noise_b
 
-            diff = (gm_a - gm_b).astype(np.float32) if gm_b is not None else None
+            diff = self._log_ratio_map(gm_a, gm_b) if gm_b is not None else None
             partial["panels"][f"gradient_{sigma}"] = {
                 "a":    gm_a.astype(np.float32),
                 "b":    gm_b.astype(np.float32) if gm_b is not None else None,
@@ -671,6 +729,12 @@ class SpatialDetailAnalyzer:
             if diff is not None:
                 partial["diff_dist"][f"gradient_{sigma}"] = self._diff_distribution(
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+            if not single:
+                corr_fig = self._plot_metric_correlation(
+                    gm_a, gm_b, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Gradient |G| (σ={sigma}px)", diff_dist_rng)
+                if corr_fig is not None:
+                    figures[f"corr_gradient_{sigma}"] = corr_fig
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_gradient_{sigma}"] = {
                     "a": (gm_a / noise_a).astype(np.float32),
@@ -684,7 +748,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(gm_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Gradient |G| σ={sigma}px — {label_a}",
                     f"Gradient |G| σ={sigma}px — {label_b}",
-                    diff_title=f"Gradient diff (A−B), σ={sigma}px",
+                    diff_title=f"Gradient log-ratio (A/B), σ={sigma}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                     display_roi=None,
@@ -704,7 +768,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(gm_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Gradient (× noise floor) σ={sigma}px — {label_a}",
                     f"Gradient (× noise floor) σ={sigma}px — {label_b}",
-                    diff_title=f"Diff (A−B), noise-normalised, σ={sigma}px",
+                    diff_title=f"Log ratio (A/B), noise-normalised, σ={sigma}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                 )
@@ -780,7 +844,7 @@ class SpatialDetailAnalyzer:
                 continue   # display/panels only for levels 2-3, unchanged from prior behaviour
 
             display_level = human_level
-            diff = (rec_a - rec_b).astype(np.float32) if rec_b is not None else None
+            diff = self._log_ratio_map(rec_a, rec_b) if rec_b is not None else None
             partial["panels"][f"wavelet_{display_level}"] = {
                 "a":    rec_a.astype(np.float32),
                 "b":    rec_b.astype(np.float32) if rec_b is not None else None,
@@ -789,6 +853,15 @@ class SpatialDetailAnalyzer:
             if diff is not None:
                 partial["diff_dist"][f"wavelet_{display_level}"] = self._diff_distribution(
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+            if not single:
+                # Raw signed reconstructions (not abs()) — complementary to the
+                # sign-discarding log-ratio map, shows whether band-pass detail
+                # flips sign between the two filters at a given pixel.
+                corr_fig = self._plot_metric_correlation(
+                    rec_a, rec_b, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Wavelet level {display_level}", diff_dist_rng)
+                if corr_fig is not None:
+                    figures[f"corr_wavelet_{display_level}"] = corr_fig
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_wavelet_{display_level}"] = {
                     "a": (rec_a / noise_a).astype(np.float32),
@@ -801,7 +874,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Wavelet level {display_level} — {label_a}",
                     f"Wavelet level {display_level} — {label_b}",
-                    diff_title=f"Level {display_level} diff (A−B)",
+                    diff_title=f"Level {display_level} log-ratio (A/B)",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                 )
@@ -819,7 +892,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(rec_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Wavelet level {display_level} (× noise floor) — {label_a}",
                     f"Wavelet level {display_level} (× noise floor) — {label_b}",
-                    diff_title=f"Level {display_level} diff (A−B), noise-normalised",
+                    diff_title=f"Level {display_level} log-ratio (A/B), noise-normalised",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                 )
@@ -902,7 +975,7 @@ class SpatialDetailAnalyzer:
                 partial["weber_nc_score_b"][ks] = nc_b
                 partial["weber_nc_noise_b"][ks] = noise_b
 
-            diff = (wc_a - wc_b).astype(np.float32) if wc_b is not None else None
+            diff = self._log_ratio_map(wc_a, wc_b) if wc_b is not None else None
             partial["panels"][f"weber_{ks}px"] = {
                 "a":    wc_a.astype(np.float32),
                 "b":    wc_b.astype(np.float32) if wc_b is not None else None,
@@ -911,6 +984,12 @@ class SpatialDetailAnalyzer:
             if diff is not None:
                 partial["diff_dist"][f"weber_{ks}px"] = self._diff_distribution(
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+            if not single:
+                corr_fig = self._plot_metric_correlation(
+                    wc_a, wc_b, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Weber contrast (kernel {ks}px)", diff_dist_rng)
+                if corr_fig is not None:
+                    figures[f"corr_weber_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
                 partial["panels"][f"nrm_weber_{ks}px"] = {
                     "a": (wc_a / noise_a).astype(np.float32),
@@ -924,7 +1003,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(wc_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Weber contrast — kernel {ks}px — {label_a}",
                     f"Weber contrast — kernel {ks}px — {label_b}",
-                    diff_title=f"Weber diff (A−B), kernel {ks}px",
+                    diff_title=f"Weber log-ratio (A/B), kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,    # unbounded output; PowerNorm compresses dynamic range
                     display_roi=None,       # _crop_border already applied
@@ -944,7 +1023,7 @@ class SpatialDetailAnalyzer:
                     self._crop_border(wc_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
                     f"Weber (× noise floor) — kernel {ks}px — {label_a}",
                     f"Weber (× noise floor) — kernel {ks}px — {label_b}",
-                    diff_title=f"Diff (A−B), noise-normalised, kernel {ks}px",
+                    diff_title=f"Log ratio (A/B), noise-normalised, kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                 )
@@ -1009,10 +1088,8 @@ class SpatialDetailAnalyzer:
         # Sqrt (PowerNorm gamma=0.5) compresses bright stars, reveals faint nebula
         norm = mcolors.PowerNorm(gamma=0.5, vmin=vmin, vmax=vmax) if nonlinear_norm else None
 
-        # Difference panel (computed before any possible shape mismatch)
-        h_min = min(arr_a.shape[0], arr_b.shape[0])
-        w_min = min(arr_a.shape[1], arr_b.shape[1])
-        diff = arr_a[:h_min, :w_min] - arr_b[:h_min, :w_min]
+        # Log-ratio panel (helper handles any shape mismatch defensively)
+        diff = self._log_ratio_map(arr_a, arr_b)
 
         # Symmetric about zero so the "bwr" midpoint (white) always means no difference.
         d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
@@ -1072,6 +1149,48 @@ class SpatialDetailAnalyzer:
         ax.set_title(title_a, fontsize=10)
         ax.axis("off")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        return fig
+
+    def _plot_mask_illustration(self, base: np.ndarray, mask_neb: np.ndarray,
+                                 mask_bg: np.ndarray, alpha: float = 0.45) -> plt.Figure:
+        """Image A shown with a translucent nebula/background mask overlay.
+
+        Uses the same steelblue/tomato color convention as the Section 8a violin
+        plots (report_builder.py's palette = {"Nebula": "steelblue",
+        "Background": "tomato"}) so the two figures read as one visual language.
+        Unclassified pixels (neither mask) are left plain grayscale. mask_neb/
+        mask_bg are expected to already be the two-image shared classification
+        (mask_neb_a & mask_neb_b) — the exact masks that feed the violin plots
+        and correlation scatter plots — so this figure depicts what those plots
+        are actually gated on.
+        """
+        gray = self._stretch_for_display(base)
+        h = min(gray.shape[0], mask_neb.shape[0], mask_bg.shape[0])
+        w = min(gray.shape[1], mask_neb.shape[1], mask_bg.shape[1])
+        gray = gray[:h, :w]
+        mask_neb = mask_neb[:h, :w]
+        mask_bg = mask_bg[:h, :w]
+
+        rgb = np.stack([gray, gray, gray], axis=-1)
+        neb_color = np.array(mcolors.to_rgb("steelblue"))
+        bg_color = np.array(mcolors.to_rgb("tomato"))
+        rgb[mask_neb] = (1 - alpha) * rgb[mask_neb] + alpha * neb_color
+        rgb[mask_bg] = (1 - alpha) * rgb[mask_bg] + alpha * bg_color
+
+        aspect_ratio = h / max(w, 1)
+        panel_w = 8.0
+        fig, ax = plt.subplots(figsize=(panel_w, panel_w * aspect_ratio + 1.0))
+        ax.imshow(rgb, origin="upper", interpolation="nearest", aspect="equal")
+        ax.axis("off")
+        ax.set_title("Nebula / background mask regions (shared A∩B classification), "
+                      "shown on Image A", fontsize=10)
+        legend_handles = [
+            Patch(facecolor="steelblue", edgecolor="none", alpha=0.7, label="Nebula"),
+            Patch(facecolor="tomato", edgecolor="none", alpha=0.7, label="Background"),
+            Patch(facecolor="0.5", edgecolor="none", label="Unclassified"),
+        ]
+        ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.8)
+        fig.tight_layout()
         return fig
 
     def _plot_snr_bars(self, snr_a: dict, snr_b: dict,
@@ -1182,6 +1301,116 @@ class SpatialDetailAnalyzer:
         ax2.tick_params(axis="y", labelcolor="#2ca02c")
         ax2.legend(loc="upper right", fontsize=8)
         ax1.set_title(title, fontsize=10)
+        return fig
+
+    @staticmethod
+    def _plot_metric_correlation(map_a: np.ndarray, map_b: np.ndarray,
+                                  mask_neb_shared: np.ndarray, mask_bg_shared: np.ndarray,
+                                  label_a: str, label_b: str, metric_title: str,
+                                  rng: np.random.Generator,
+                                  max_samples: int = SECTION8_SCATTER_MAX_SAMPLES) -> plt.Figure | None:
+        """1x2 correlation scatter (Nebula | Background): metric value in A (y)
+        vs. metric value in B (x), with a dashed 1:1 reference line plus two
+        linear fits — an overall OLS fit over all points, and a second fit
+        restricted to the top (100 - SECTION8_SCATTER_TAIL_PERCENTILE)% of
+        points by combined magnitude ("tail fit"). The tail fit isolates the
+        high-detail regime's slope from the bulk's, since a whole-population
+        slope is dominated by leverage rather than point count and conflates
+        the two regimes into one ambiguous number.
+
+        Axis limits reflect the FULL pooled population range per subplot (not
+        percentile-clipped like the Section 8a violin plots) so upper-tail
+        divergence from the 1:1 line — the signal this plot exists to surface —
+        stays visible. Point clouds are randomly subsampled (up to max_samples)
+        for render cost only; the axis range and both fits are always computed
+        from the full, unsampled population. Returns None if both subplots have
+        too few points.
+        """
+        h = min(map_a.shape[0], map_b.shape[0], mask_neb_shared.shape[0], mask_bg_shared.shape[0])
+        w = min(map_a.shape[1], map_b.shape[1], mask_neb_shared.shape[1], mask_bg_shared.shape[1])
+        map_a = map_a[:h, :w]
+        map_b = map_b[:h, :w]
+        mask_neb_shared = mask_neb_shared[:h, :w]
+        mask_bg_shared = mask_bg_shared[:h, :w]
+
+        # Dark-mode-aware reference-line color (project convention).
+        is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if is_dark else "black"
+
+        fig, axes = plt.subplots(1, 2, figsize=(9, 4.5))
+        any_data = False
+        for ax, region_name, mask in zip(axes, ("Nebula", "Background"),
+                                          (mask_neb_shared, mask_bg_shared)):
+            a_vals = map_a[mask]
+            b_vals = map_b[mask]
+            n = a_vals.size
+            if n < 3:
+                ax.set_visible(False)
+                continue
+            any_data = True
+
+            lo = float(min(a_vals.min(), b_vals.min()))
+            hi = float(max(a_vals.max(), b_vals.max()))
+            pad = 0.1 * (hi - lo) if hi > lo else 1.0
+            lo -= pad
+            hi += pad
+
+            if n > max_samples:
+                idx = rng.choice(n, max_samples, replace=False)
+                a_plot, b_plot = a_vals[idx], b_vals[idx]
+            else:
+                a_plot, b_plot = a_vals, b_vals
+
+            # Linear fits computed on the FULL population (not the render subsample)
+            # for statistical accuracy. Two fits, not one: an overall OLS fit over
+            # all points is dominated by leverage, not point count, so it conflates
+            # "the bulk agrees near 1:1" with "the tail diverges" into one ambiguous
+            # number. A second fit restricted to the top (100 -
+            # SECTION8_SCATTER_TAIL_PERCENTILE)% of points by combined magnitude
+            # (A + B, a proxy for "how far out along the diagonal") isolates the
+            # high-detail regime specifically — that slope is the more direct
+            # answer to "does one filter show disproportionately more detail/
+            # contrast in the brightest/most-structured regions".
+            overall_fit = linregress(b_vals, a_vals)
+            m_all, c_all, r_all = overall_fit.slope, overall_fit.intercept, overall_fit.rvalue
+
+            combined = a_vals + b_vals
+            tail_thresh = np.percentile(combined, SECTION8_SCATTER_TAIL_PERCENTILE)
+            tail_mask = combined >= tail_thresh
+            tail_fit = None
+            if np.count_nonzero(tail_mask) >= 3:
+                tf = linregress(b_vals[tail_mask], a_vals[tail_mask])
+                tail_fit = (tf.slope, tf.intercept, tf.rvalue)
+
+            ax.scatter(b_plot, a_plot, alpha=0.55, s=8, color="steelblue",
+                       zorder=3, edgecolors="none", rasterized=True)
+            ax.plot([lo, hi], [lo, hi], color=orig_color, linestyle="--",
+                    linewidth=1.2, zorder=4, label="Slope = 1 (A = B)")
+            fit_x = np.array([lo, hi])
+            ax.plot(fit_x, m_all * fit_x + c_all, color="darkorange", linestyle="-",
+                     linewidth=1.6, zorder=5,
+                     label=f"Fit: y={m_all:.2f}x{c_all:+.2f} (R²={r_all ** 2:.2f})")
+            if tail_fit is not None:
+                m_t, c_t, r_t = tail_fit
+                tail_pct = 100 - SECTION8_SCATTER_TAIL_PERCENTILE
+                ax.plot(fit_x, m_t * fit_x + c_t, color="crimson", linestyle=":",
+                         linewidth=1.8, zorder=6,
+                         label=f"Tail fit (top {tail_pct:.0f}%): "
+                               f"y={m_t:.2f}x{c_t:+.2f} (R²={r_t ** 2:.2f})")
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_aspect("equal")
+            ax.set_xlabel(f"{metric_title} — {label_b} (x)", fontsize=8)
+            ax.set_ylabel(f"{metric_title} — {label_a} (y)", fontsize=8)
+            ax.set_title(f"{region_name} (n={n})", fontsize=9)
+            ax.tick_params(labelsize=7)
+            ax.legend(fontsize=6.5, loc="best", labelspacing=0.3)
+            ax.grid(True, alpha=0.3)
+
+        if not any_data:
+            plt.close(fig)
+            return None
+        fig.tight_layout()
         return fig
 
     @staticmethod

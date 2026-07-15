@@ -59,6 +59,9 @@ synthetic/
 | `_extract_cutout(data, xc, yc, radius)` | `gui/halo_dialog.py` | 2r×2r patch centred on star, zero-padded at image edges |
 | `_annular_rdf(log_data, xc, yc, radius)` | `gui/halo_dialog.py` | 1-px annular mean/std in log10 space; mirrors `HaloAnalyzer._annular_stats` |
 | `_power_ratio_db(freq_a, rp_a, freq_b, rp_b)` | `report_builder.py` | 10·log10 dB ratio between two radial power curves; returns `None` on missing data or misaligned frequency bins |
+| `_log_ratio_map(a, b)` | `analysis/image_filters.py` | Per-pixel `log10(\|A\|/\|B\|)` map with percentile-based epsilon floor and defensive shape crop — the Section 8 replacement for plain `A − B` diff |
+| `_plot_mask_illustration(base, mask_neb, mask_bg)` | `analysis/image_filters.py` | Translucent steelblue/tomato mask overlay on a grayscale base image |
+| `_plot_metric_correlation(map_a, map_b, mask_neb, mask_bg, ...)` | `analysis/image_filters.py` | 1×2 masked-region scatter (A vs B) with a 1:1 line plus overall + tail-restricted dual linear fits |
 
 ---
 
@@ -239,6 +242,16 @@ When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_rati
   guaranteed whenever an auto-selected ROI is involved (`_extract_roi` in
   `analysis/power_spectrum.py` computes `N` independently per image when no explicit
   ROI is set). Degrade gracefully — return `None` / skip the curve — rather than crash.
+- **Epsilon-flooring a per-pixel ratio map needs a percentile, not a raw minimum.**
+  `_power_ratio_db`'s `positive.min() * 0.01` floor is fine for small 1-D arrays
+  (frequency bins, ~10²–10³ samples) but fragile at per-pixel map scale (10⁵–10⁷
+  samples): the minimum order statistic over that many samples can be pathologically
+  tiny and let one spurious pixel dominate the ratio's dynamic range. `_log_ratio_map`
+  (`analysis/image_filters.py`) instead floors both operands at a low percentile
+  (`SECTION8_LOGRATIO_EPS_PERCENTILE`, default 1st) of the pooled positive `|A|,|B|`
+  values — same tool as the existing display-clipping precedent
+  (`_plot_side_by_side`'s `np.percentile(arr, 0.5)`), applied to the epsilon floor
+  instead of just the color scale.
 
 ---
 
@@ -337,6 +350,8 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Adding a float64 cast in analysis code | Don't. All image data is float32 after `AstroImage.load()`. The only float64 exception is `astroalign` in `gui/analysis_thread.py`. Redundant float64 casts waste memory and defeat the float32 performance gains. |
 | Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
 | `_section_snr` crashed when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) built a `panels` list filtered to non-`None` entries but never checked whether it was empty before calling `plt.subplots(1, len(panels), ...)` — 0 columns raised `ValueError: Number of columns must be a positive integer, not 0`. Hit whenever SNR is unchecked while another metric (e.g. Power Spectrum) is run. Fixed with an early `if not panels: return None` guard, matching `_plot_radial_overlay`/`_plot_radial_ratio_db`; both call sites already pipe the result through `_img_tag`, which turns `None` into `""`. |
+| Whole-population regression slope hides tail-specific divergence | A single OLS fit over an entire A-vs-B scatter is dominated by leverage (distance from the mean), not point count — it can show near-zero correlation even when a sparse high-value tail diverges sharply (or vice versa), because it blends "the bulk agrees" and "the tail diverges" into one ambiguous number. When the signal of interest lives specifically in the tail (Section 8g: "which filter shows more detail in the brightest/most-structured pixels"), fit two lines — an overall fit and a second fit restricted to the top N% by combined magnitude (`_plot_metric_correlation`, `SECTION8_SCATTER_TAIL_PERCENTILE`) — and report slope + R² for each. High tail R² with slope far from 1 is a real, systematic effect; low tail R² means the apparent divergence is mostly noise. |
+| New Section 8 panel key doesn't need Report Inspector code changes | `gui/report_inspector.py` is fully generic — driven entirely by a companion `<stem>_inspector.npz` (raw float32/uint8 arrays) plus an embedded `catalog_json` built in `report_builder.py::_write_inspector_file`. `_panel_display_name`/`_panel_concept` dynamically parse any `panels` dict key prefix, so a new `SpatialDetailAnalyzer` panel family auto-appears in the inspector with zero inspector-side changes. A genuinely new *visual type* is a different story: the inspector only knows how to `imshow` 2D/RGB arrays (side-by-side or slider-reveal), so scatter-style plots (Section 8g's `corr_*` figures) must stay static-HTML-only unless new inspector canvas code is written. |
 
 ---
 

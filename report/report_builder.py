@@ -449,6 +449,10 @@ _SPATIAL_DIFF_DIST_ROWS = [
     ("weber_9px",    "Weber contrast — 9 px"),
 ]
 
+# Same order/labels as above minus "original" (no kernel scale) — used for the
+# Section 8g per-scale correlation scatter plots.
+_SPATIAL_CORR_ROWS = [(k, label) for k, label in _SPATIAL_DIFF_DIST_ROWS if k != "original"]
+
 
 def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
     """Combined figure: one row per Section 8 calculation, each row showing a
@@ -507,8 +511,8 @@ def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
         _draw_boxwhisker(ax, [neb, bg])
 
         # Some detail maps (e.g. Weber contrast, unbounded near dark-sky pixels —
-        # see 8e methodology) have rare extreme-outlier diffs that stretch the axis
-        # so far the IQR box becomes an invisible sliver. Clip the *view* to the
+        # see 8e methodology) have rare extreme-outlier log-ratios that stretch the
+        # axis so far the IQR box becomes an invisible sliver. Clip the *view* to the
         # 1st-99th percentile of this row's own pooled data; the boxplot/violin
         # values themselves are unaffected, only what's visible is cropped.
         lo, hi = np.percentile(combined, [1.0, 99.0])
@@ -528,28 +532,33 @@ def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
 
     caption_html = (
         '<p class="caption">'
-        "<b>Pixel-wise A&minus;B difference distributions.</b> "
+        "<b>Pixel-wise log&#8321;&#8320;(A / B) ratio distributions.</b> "
         "Each row is one Section 8 calculation, shown as a "
-        "<b>violin plot</b> (kernel density estimate of the diff pixel values, "
+        "<b>violin plot</b> (kernel density estimate of the log-ratio pixel values, "
         "randomly subsampled for display) with an IQR box-plot overlay: "
         "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, "
         "a <span style='color:magenta'><b>magenta centre line</b></span> at the "
         "median. <span style='color:steelblue'><b>Nebula</b></span> = pixels both "
         "images classify as nebula; <span style='color:tomato'><b>Background</b></span> "
-        "= pixels both images classify as background sky — the same shared masks used "
-        "for the noise-corrected scores in 8b&ndash;8f, here shown as full distributions "
-        "rather than a single median ratio. "
+        "= pixels both images classify as background sky — the same shared masks "
+        "illustrated above and used for the noise-corrected scores in 8b&ndash;8f, here "
+        "shown as full distributions rather than a single median ratio. "
         "A <span style='color:red'><b>red dashed line</b></span> marks zero "
-        "(A&nbsp;=&nbsp;B, no difference). "
+        "(A&nbsp;=&nbsp;B, equal). Units are log&#8321;&#8320; — &plusmn;0.3 &asymp; a "
+        "2&times; difference, &plusmn;1.0 &asymp; a 10&times; difference. For the "
+        "Original and Wavelet rows specifically (the only two families that can go "
+        "negative), sign was discarded before the ratio — these rows compare the "
+        "<em>magnitude</em> of structure, not signed brightness. "
         "<b>How to read it:</b> a Background row centred at zero with a narrow IQR is "
         "the expected noise floor; a Nebula row with a similarly narrow, zero-centred "
         "distribution means the two filters agree at that scale. A Nebula median shifted "
         "away from zero, or an IQR visibly wider than the Background row's, indicates a "
         "real structural difference between the filters at that scale rather than noise. "
         "Each row's x-axis is independently clipped to its own 1st&ndash;99th percentile "
-        "range so the IQR box stays visible; rows with rare extreme-outlier diffs (e.g. "
+        "range so the IQR box stays visible; rows with rare extreme-outlier log-ratios (e.g. "
         "Weber contrast near dark-sky pixels, see 8e) may have a small fraction of the "
-        "violin's tail extend beyond the visible axis."
+        "violin's tail extend beyond the visible axis — see 8g for the full, unclipped "
+        "upper-tail behaviour."
         "</p>"
     )
     return img_html, caption_html
@@ -1099,7 +1108,7 @@ class ReportBuilder:
             if pa_panel.get("diff") is not None:
                 npz_diff = f"sp_{pkey}_diff"
                 _add(npz_diff, pa_panel["diff"])
-                sp_opts["Diff (A−B)"] = npz_diff
+                sp_opts["Log Ratio (A/B)"] = npz_diff
             _add_options_entry("Spatial Detail", img_set_name, sp_opts,
                                concept=_panel_concept(pkey))
 
@@ -4000,9 +4009,30 @@ curve is shown.</p>
         sm = ra.spatial_metrics or {}
         figs = sm.get("figures", {})
 
+        mask_fig = figs.get("mask_illustration")
         dist_img, dist_caption = _spatial_diff_distributions_figure(sm.get("diff_dist", {}))
+        mask_html = (
+            "<h4>Nebula / Background Mask Regions</h4>" +
+            _hires_img_tag(mask_fig, "Mask illustration") +
+            '<p class="caption">'
+            "<b>How the masks are detected.</b> Each image is independently classified "
+            "per-pixel from its own background-subtracted flux and noise RMS: a pixel is "
+            "<span style='color:steelblue'><b>Nebula</b></span> if its background-subtracted "
+            "value exceeds 2&times; the image's RMS, and "
+            "<span style='color:tomato'><b>Background</b></span> if it's below 0.5&times; the "
+            "RMS (a top-5% percentile fallback applies if no pixel clears the nebula threshold). "
+            "Pixels between the two thresholds are left unclassified (plain grayscale). "
+            "<b>How they're used below.</b> The log-ratio distributions and per-scale "
+            "correlation plots (8g) use the <b>two-image intersection</b> of these masks &mdash; "
+            "a pixel counts as Nebula only if <i>both</i> images classify it as Nebula (same for "
+            "Background). This is deliberately conservative: it excludes pixels where one "
+            f"image's registration, PSF, or local noise disagrees with the other's. Shown on "
+            f"{ra.label}, the same array as the &quot;Original&quot; row below."
+            "</p>"
+            if mask_fig else ""
+        )
         dist_html = (
-            "<h3>8a. Difference Distribution Overview (A&minus;B)</h3>" + dist_img + dist_caption
+            "<h3>8a. Log-Ratio Distribution &amp; Mask Overview</h3>" + mask_html + dist_img + dist_caption
             if dist_img else ""
         )
 
@@ -4112,6 +4142,47 @@ curve is shown.</p>
                     out += _hires_img_tag(figs[xs_key], xs_key) + "\n"
             return out
 
+        def corr_figs_html() -> str:
+            """Emit each present correlation scatter figure in _SPATIAL_CORR_ROWS
+            order (not alphabetic — e.g. std_10px must not sort before std_3px)."""
+            out = ""
+            for key, label in _SPATIAL_CORR_ROWS:
+                fig = figs.get(f"corr_{key}")
+                if fig:
+                    out += f"<h4>{label}</h4>" + _hires_img_tag(fig, f"corr_{key}") + "\n"
+            return out
+
+        _corr_figs = corr_figs_html()
+        corr_section_html = (
+            "<h3>8g. Per-Pixel Metric Correlation (A vs. B)</h3>"
+            + _info_box('Each row plots the raw (pre-ratio) metric value at every shared pixel: '
+                        f'{ra.label} on the y-axis vs. {rb.label} on the x-axis, split into a '
+                        'Nebula panel and a Background panel using the shared masks explained in 8a. '
+                        'The <strong>black dashed diagonal</strong> is the 1:1 line (perfect agreement, '
+                        'A = B). Axis limits span the <strong>full</strong> data range for that panel — '
+                        'unlike the 8a violin plots, they are <em>not</em> clipped to a percentile — so '
+                        'the behaviour of the upper tail is always visible. '
+                        '<p><strong>Two fitted lines are drawn on every panel:</strong> a solid '
+                        '<span style="color:darkorange"><b>orange overall fit</b></span> through every '
+                        'point, and a dotted <span style="color:crimson"><b>crimson tail fit</b></span> '
+                        'restricted to the brightest/most-structured points (the top fraction by '
+                        'combined A+B magnitude — see the legend for the exact percentage). A '
+                        'whole-population slope is dominated by leverage (distance from the mean), not '
+                        'point count, so it blends "the bulk agrees near 1:1" and "the tail diverges" '
+                        'into one ambiguous number. The <strong>tail fit\'s slope is the more direct '
+                        'answer to which filter shows disproportionately more detail/contrast in the '
+                        'brightest, most-structured pixels</strong> — a tail slope far from 1 with a '
+                        'high R² is strong, consistent evidence of a real difference; a tail slope near '
+                        '1 (even if the point cloud looks scattered) means the apparent divergence is '
+                        'mostly noise, not a systematic effect.</p>'
+                        'Point clouds are randomly subsampled for rendering; the axis range, both fits, '
+                        'and each panel\'s point count (n) are always computed from the full, unsampled '
+                        'population.',
+                        title="Per-pixel correlation methodology")
+            + _corr_figs
+            if _corr_figs else ""
+        )
+
         has_crosshair = sm.get("crosshair") is not None
         xs_note = _info_box(
             'ℹ Cross-section profiles below are extracted along '
@@ -4184,7 +4255,12 @@ curve is shown.</p>
 {_info_box('All maps below are computed on mean-signal-normalised data '
            '(each image divided by its own mean signal), making them dimensionless and comparable '
            'across different filter bandwidths. Images are shown side-by-side with a shared '
-           'colour scale; the third panel shows the difference A−B.',
+           'colour scale; the third panel shows the per-pixel log-ratio '
+           'log<sub>10</sub>(A / B): red (positive) means A is stronger at that pixel, blue '
+           '(negative) means B is stronger, white means the two are equal. ±0.3 ≈ a 2&times; '
+           'difference, ±1.0 ≈ a 10&times; difference. For the Original and Wavelet maps — the '
+           'only two families whose values can be negative — the ratio uses |A| and |B|, so it '
+           'compares the <em>magnitude</em> of structure rather than signed brightness.',
            title="Spatial detail maps overview")}
 {dist_html}
 {nc_methodology_box}
@@ -4213,7 +4289,7 @@ curve is shown.</p>
 {xs_note}{paired_figs_for("std_", "xs_std_")}
 <p class="caption">Side-by-side local σ maps at each kernel size (shared colour scale),
 each followed by its cross-section profile.
-The difference map (right) highlights where one filter preserves more local variation.</p>
+The log-ratio map (right) highlights where one filter preserves more local variation.</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_std_")}
 <h3>8c. Laplacian of Gaussian (LoG) Maps</h3>
@@ -4257,7 +4333,8 @@ A filter preserving more fine detail shows brighter, more defined boundaries at 
 {paired_figs_for("wavelet_level", "xs_wavelet_level")}
 <p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
 diverging colourmap), each followed by its cross-section profile.
-The difference panel (right) shows where fine structure differs between the two filters.</p>
+The log-ratio panel (right) shows where fine structure differs between the two filters
+(sign discarded — |A|/|B| — since wavelet reconstructions can be negative).</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_wavelet_")}
 
@@ -4295,7 +4372,7 @@ The difference panel (right) shows where fine structure differs between the two 
 {figs_for("weber_")}
 <p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root colour
 scale, viridis). Brighter regions have higher Weber contrast — the local intensity range
-is large relative to the local median luminance. The difference panel (A−B) shows where
+is large relative to the local median luminance. The log-ratio panel (A/B) shows where
 one image achieves greater relative contrast. High values over dark-sky regions are
 expected; use a nebula ROI for meaningful filter comparison.</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
@@ -4325,6 +4402,8 @@ each followed by its cross-section profile.
 A filter preserving sharper boundaries shows brighter, more defined gradient response.</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_gradient_")}
+
+{corr_section_html}
 
 <h3>8h. Noise-Corrected Contrast — Cross-Method Overview</h3>
 {_hires_img_tag(figs.get("nc_ratio_overview"), "NC ratio overview")}

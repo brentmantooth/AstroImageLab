@@ -315,3 +315,76 @@ class TestNcScoreHelper:
         score, noise = analyzer._nc_score(detail, mask_neb_shared, bg_mask)
         assert score == pytest.approx(5.0)
         assert noise == pytest.approx(2.0)
+
+
+class TestLogRatioHelper:
+    """Direct unit tests of _log_ratio_map's epsilon-floor and sign-discard contract."""
+
+    def test_equal_inputs_give_zero(self):
+        a = np.full((10, 10), 5.0, dtype=np.float32)
+        b = np.full((10, 10), 5.0, dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.allclose(result, 0.0, atol=1e-5)
+
+    def test_double_ratio_gives_log10_two(self):
+        b = np.full((10, 10), 3.0, dtype=np.float32)
+        a = 2.0 * b
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.allclose(result, np.log10(2.0), atol=1e-5)
+
+    def test_opposite_sign_equal_magnitude_gives_zero(self):
+        a = np.full((10, 10), -5.0, dtype=np.float32)
+        b = np.full((10, 10), 5.0, dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.allclose(result, 0.0, atol=1e-5)
+
+    def test_near_zero_pixel_amid_nonzero_data_stays_finite(self):
+        a = np.full((10, 10), 5.0, dtype=np.float32)
+        b = np.full((10, 10), 5.0, dtype=np.float32)
+        b[0, 0] = 0.0
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.all(np.isfinite(result))
+
+    def test_mismatched_shapes_crop_to_common_size(self):
+        a = np.full((10, 10), 5.0, dtype=np.float32)
+        b = np.full((8, 9), 5.0, dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert result.shape == (8, 9)
+
+    def test_all_zero_inputs_stay_finite(self):
+        a = np.zeros((10, 10), dtype=np.float32)
+        b = np.zeros((10, 10), dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.all(np.isfinite(result))
+
+
+class TestMaskIllustrationFigure:
+    def test_absent_in_single_image_mode(self, astro_image_a):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        assert "mask_illustration" not in result["figures"]
+
+    def test_present_in_two_image_mode(self, nc_result):
+        assert "mask_illustration" in nc_result["figures"]
+        assert isinstance(nc_result["figures"]["mask_illustration"], str)
+        assert len(nc_result["figures"]["mask_illustration"]) > 0
+
+
+class TestCorrelationScatterFigures:
+    _CORR_KEYS = (
+        [f"corr_std_{ks}px" for ks in STD_KERNEL_SIZES]
+        + [f"corr_log_{s}" for s in LOG_SIGMAS]
+        + [f"corr_gradient_{s}" for s in LOG_SIGMAS]
+        + ["corr_wavelet_2", "corr_wavelet_3"]
+        + [f"corr_weber_{ks}px" for ks in WEBER_KERNEL_SIZES]
+    )
+
+    @pytest.mark.parametrize("key", _CORR_KEYS)
+    def test_present_in_two_image_mode(self, nc_result, key):
+        assert key in nc_result["figures"]
+        assert isinstance(nc_result["figures"][key], str)
+        assert len(nc_result["figures"][key]) > 0
+
+    @pytest.mark.parametrize("key", _CORR_KEYS)
+    def test_absent_in_single_image_mode(self, astro_image_a, key):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        assert key not in result["figures"]

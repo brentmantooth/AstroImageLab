@@ -40,7 +40,10 @@ XS_SNR_REGION_WIDTH = 15   # px; width of bright/dark sample region for cross-se
 EPSF_MAX_STARS = 600   # maximum candidate stars passed to EPSFBuilder; limits computation time
 SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension cropped from perimeter in Section 8 display maps
 SECTION8_ANALYSIS_CMAP = "viridis"     # colormap for Section 8 A/B analysis map panels (std, LoG, wavelet)
-SECTION8_DIFF_DIST_MAX_SAMPLES = 64000  # per masked population, per scale — caps violin/KDE cost on full-res diff maps
+SECTION8_DIFF_DIST_MAX_SAMPLES = 1000000  # per masked population, per scale — caps violin/KDE cost on full-res diff maps
+SECTION8_LOGRATIO_EPS_PERCENTILE = 1.0   # percentile of pooled positive |A|,|B| values used as the epsilon floor in log10(|A|/|B|)
+SECTION8_SCATTER_MAX_SAMPLES = 50000     # per masked population, per scale — caps render cost of Section 8g correlation scatter plots
+SECTION8_SCATTER_TAIL_PERCENTILE = 80    # percentile of (A+B) combined magnitude above which points are fit separately as the "tail" regression in Section 8g
 
 PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
 PSF_SPATIAL_MAP_SMOOTH_SIGMA = 5.0   # Gaussian smoothing sigma (px) applied to spatial maps before display
