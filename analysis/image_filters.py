@@ -201,6 +201,7 @@ class SpatialDetailAnalyzer:
                 weber_kernel_sizes,
                 image_a.label, _label_b,
                 display_roi=display_roi,
+                crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
                 mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
             )
@@ -422,6 +423,13 @@ class SpatialDetailAnalyzer:
                     "diff": None,
                 }
 
+            xs_raw = None
+            if crosshair is not None and not single:
+                pos, pa = self._sample_line(std_a, **crosshair)
+                _, pb = self._sample_line(std_b, **crosshair)
+                xs_raw = (pos, pa, pb, label_a, label_b,
+                          f"Cross-section — Local σ, kernel {ks}px")
+
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(std_a, SECTION8_BORDER_CROP_FRACTION),
@@ -432,6 +440,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                     display_roi=None,
+                    xs_data=xs_raw,
                 )
             else:
                 fig = self._plot_single(
@@ -443,6 +452,12 @@ class SpatialDetailAnalyzer:
             figures[f"std_{ks}px"] = fig
 
             if not single and noise_a and noise_b:
+                xs_nrm = None
+                if crosshair is not None:
+                    pos_n, pa_n = self._sample_line(std_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(std_b / noise_b, **crosshair)
+                    xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
+                              f"Cross-section — Local σ (× noise floor), kernel {ks}px")
                 figures[f"nrm_std_{ks}px"] = self._plot_side_by_side(
                     self._crop_border(std_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
                     self._crop_border(std_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
@@ -451,15 +466,8 @@ class SpatialDetailAnalyzer:
                     diff_title=f"Log ratio (A/B), noise-normalised, kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
+                    xs_data=xs_nrm,
                 )
-
-            if crosshair is not None:
-                pos, pa = self._sample_line(std_a, **crosshair)
-                if not single:
-                    _, pb = self._sample_line(std_b, **crosshair)
-                    figures[f"xs_std_{ks}px"] = self._plot_cross_section(
-                        pos, pa, pb, label_a, label_b,
-                        f"Cross-section — Local σ, kernel {ks}px")
 
         return figs_to_b64(figures, dpi=150), partial
 
@@ -647,6 +655,13 @@ class SpatialDetailAnalyzer:
                     "diff": None,
                 }
 
+            xs_raw = None
+            if crosshair is not None and not single:
+                pos, pa = self._sample_line(log_a, **crosshair)
+                _, pb = self._sample_line(log_b, **crosshair)
+                xs_raw = (pos, pa, pb, label_a, label_b,
+                          f"Cross-section — |LoG|, σ={sigma}px")
+
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
@@ -657,6 +672,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                     display_roi=None,
+                    xs_data=xs_raw,
                 )
             else:
                 fig = self._plot_single(
@@ -668,6 +684,12 @@ class SpatialDetailAnalyzer:
             figures[f"log_sigma{sigma}"] = fig
 
             if not single and noise_a and noise_b:
+                xs_nrm = None
+                if crosshair is not None:
+                    pos_n, pa_n = self._sample_line(log_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(log_b / noise_b, **crosshair)
+                    xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
+                              f"Cross-section — |LoG| (× noise floor), σ={sigma}px")
                 figures[f"nrm_log_{sigma}"] = self._plot_side_by_side(
                     self._crop_border(log_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
                     self._crop_border(log_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
@@ -676,14 +698,8 @@ class SpatialDetailAnalyzer:
                     diff_title=f"Log ratio (A/B), noise-normalised, σ={sigma}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
+                    xs_data=xs_nrm,
                 )
-
-            if crosshair is not None and not single:
-                pos, pa = self._sample_line(log_a, **crosshair)
-                _, pb = self._sample_line(log_b, **crosshair)
-                figures[f"xs_log_sigma{sigma}"] = self._plot_cross_section(
-                    pos, pa, pb, label_a, label_b,
-                    f"Cross-section — |LoG|, σ={sigma}px")
         return figs_to_b64(figures, dpi=150), partial
 
     # ------------------------------------------------------------------
@@ -742,6 +758,13 @@ class SpatialDetailAnalyzer:
                     "diff": None,
                 }
 
+            xs_raw = None
+            if crosshair is not None and not single:
+                pos, pa = self._sample_line(gm_a, **crosshair)
+                _, pb = self._sample_line(gm_b, **crosshair)
+                xs_raw = (pos, pa, pb, label_a, label_b,
+                          f"Cross-section — Gradient, σ={sigma}px")
+
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
@@ -752,6 +775,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                     display_roi=None,
+                    xs_data=xs_raw,
                 )
             else:
                 fig = self._plot_single(
@@ -763,6 +787,12 @@ class SpatialDetailAnalyzer:
             figures[f"gradient_{sigma}"] = fig
 
             if not single and noise_a and noise_b:
+                xs_nrm = None
+                if crosshair is not None:
+                    pos_n, pa_n = self._sample_line(gm_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(gm_b / noise_b, **crosshair)
+                    xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
+                              f"Cross-section — Gradient (× noise floor), σ={sigma}px")
                 figures[f"nrm_gradient_{sigma}"] = self._plot_side_by_side(
                     self._crop_border(gm_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
                     self._crop_border(gm_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
@@ -771,14 +801,8 @@ class SpatialDetailAnalyzer:
                     diff_title=f"Log ratio (A/B), noise-normalised, σ={sigma}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
+                    xs_data=xs_nrm,
                 )
-
-            if crosshair is not None and not single:
-                pos, pa = self._sample_line(gm_a, **crosshair)
-                _, pb = self._sample_line(gm_b, **crosshair)
-                figures[f"xs_gradient_{sigma}"] = self._plot_cross_section(
-                    pos, pa, pb, label_a, label_b,
-                    f"Cross-section — Gradient, σ={sigma}px")
         return figs_to_b64(figures, dpi=150), partial
 
     # ------------------------------------------------------------------
@@ -868,6 +892,13 @@ class SpatialDetailAnalyzer:
                     "b": (rec_b / noise_b).astype(np.float32),
                     "diff": None,
                 }
+            xs_raw = None
+            if crosshair is not None and not single:
+                pos, pa = self._sample_line(rec_a, **crosshair)
+                _, pb = self._sample_line(rec_b, **crosshair)
+                xs_raw = (pos, pa, pb, label_a, label_b,
+                          f"Cross-section — Wavelet level {display_level}")
+
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
@@ -877,6 +908,7 @@ class SpatialDetailAnalyzer:
                     diff_title=f"Level {display_level} log-ratio (A/B)",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
+                    xs_data=xs_raw,
                 )
             else:
                 fig = self._plot_single(
@@ -887,6 +919,12 @@ class SpatialDetailAnalyzer:
             figures[f"wavelet_level{display_level}"] = fig
 
             if not single and noise_a and noise_b:
+                xs_nrm = None
+                if crosshair is not None:
+                    pos_n, pa_n = self._sample_line(rec_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(rec_b / noise_b, **crosshair)
+                    xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
+                              f"Cross-section — Wavelet level {display_level} (× noise floor)")
                 figures[f"nrm_wavelet_{display_level}"] = self._plot_side_by_side(
                     self._crop_border(rec_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
                     self._crop_border(rec_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
@@ -895,14 +933,8 @@ class SpatialDetailAnalyzer:
                     diff_title=f"Level {display_level} log-ratio (A/B), noise-normalised",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
+                    xs_data=xs_nrm,
                 )
-
-            if crosshair is not None and not single:
-                pos, pa = self._sample_line(rec_a, **crosshair)
-                _, pb = self._sample_line(rec_b, **crosshair)
-                figures[f"xs_wavelet_level{display_level}"] = self._plot_cross_section(
-                    pos, pa, pb, label_a, label_b,
-                    f"Cross-section — Wavelet level {display_level}")
 
         return figs_to_b64(figures, dpi=150), partial
 
@@ -945,6 +977,7 @@ class SpatialDetailAnalyzer:
     def _weber_analysis(self, norm_a, norm_b, kernel_sizes,
                         label_a, label_b,
                         display_roi=None,
+                        crosshair=None,
                         mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
                         mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
         figures = {}
@@ -997,6 +1030,13 @@ class SpatialDetailAnalyzer:
                     "diff": None,
                 }
 
+            xs_raw = None
+            if crosshair is not None and not single:
+                pos, pa = self._sample_line(wc_a, **crosshair)
+                _, pb = self._sample_line(wc_b, **crosshair)
+                xs_raw = (pos, pa, pb, label_a, label_b,
+                          f"Cross-section — Weber contrast, kernel {ks}px")
+
             if not single:
                 fig = self._plot_side_by_side(
                     self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
@@ -1007,6 +1047,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,    # unbounded output; PowerNorm compresses dynamic range
                     display_roi=None,       # _crop_border already applied
+                    xs_data=xs_raw,
                 )
             else:
                 fig = self._plot_single(
@@ -1018,6 +1059,12 @@ class SpatialDetailAnalyzer:
             figures[f"weber_{ks}px"] = fig
 
             if not single and noise_a and noise_b:
+                xs_nrm = None
+                if crosshair is not None:
+                    pos_n, pa_n = self._sample_line(wc_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(wc_b / noise_b, **crosshair)
+                    xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
+                              f"Cross-section — Weber contrast (× noise floor), kernel {ks}px")
                 figures[f"nrm_weber_{ks}px"] = self._plot_side_by_side(
                     self._crop_border(wc_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
                     self._crop_border(wc_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
@@ -1026,6 +1073,7 @@ class SpatialDetailAnalyzer:
                     diff_title=f"Log ratio (A/B), noise-normalised, kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
+                    xs_data=xs_nrm,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
@@ -1066,7 +1114,10 @@ class SpatialDetailAnalyzer:
                             cmap: str = "viridis",
                             nonlinear_norm: bool = False,
                             display_roi=None,
-                            smooth_display: bool = True) -> plt.Figure:
+                            smooth_display: bool = True,
+                            xs_data: tuple | None = None) -> plt.Figure:
+        """xs_data, if given, is (pos, prof_a, prof_b, label_a, label_b, xs_title)
+        for the embedded cross-section panel; None leaves that panel blank."""
         # Crop to bright-feature ROI if available
         if display_roi is not None:
             r0, r1, c0, c1 = display_roi
@@ -1095,16 +1146,18 @@ class SpatialDetailAnalyzer:
         d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
         dvmin, dvmax = -d_max, d_max
 
-        # 3×1 column layout — A, B, then diff stacked vertically.
-        # Use 1:1 pixel aspect; size figure based on the cropped array dimensions.
+        # 2×2 grid: A|B on top, log-ratio diff | cross-section on bottom. A/B/diff
+        # share the source array's pixel aspect ratio (aspect="equal" imshow); the
+        # cross-section panel is a line plot with no such constraint but occupies
+        # an equal-size grid cell so the other three panels stay geometrically
+        # identical whether or not a crosshair (and thus xs_data) is set.
         h, w = arr_a.shape[:2]
         aspect_ratio = h / max(w, 1)
-        panel_w = 10.0
+        panel_w = 5.0   # half the old single-column width — 2 columns now share it
         panel_h = panel_w * aspect_ratio
-        fig_h = panel_h * 3 + 2.0   # 3 panels + headroom for colorbars/titles
-        fig, axes = plt.subplots(3, 1, figsize=(panel_w, fig_h),
+        fig, axes = plt.subplots(2, 2, figsize=(panel_w * 2, panel_h * 2 + 1.5),
                                   constrained_layout=True)
-        ax_a, ax_b, ax_diff = axes
+        (ax_a, ax_b), (ax_diff, ax_xs) = axes
 
         for ax, arr, title in zip([ax_a, ax_b], [arr_a, arr_b], [title_a, title_b]):
             im = ax.imshow(arr, origin="upper", cmap=cmap,
@@ -1122,6 +1175,13 @@ class SpatialDetailAnalyzer:
         ax_diff.set_title(diff_title, fontsize=10)
         ax_diff.axis("off")
         fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
+
+        if xs_data is not None:
+            pos, prof_a, prof_b, xs_label_a, xs_label_b, xs_title = xs_data
+            self._draw_cross_section(ax_xs, pos, prof_a, prof_b,
+                                      xs_label_a, xs_label_b, xs_title)
+        else:
+            ax_xs.axis("off")
 
         return fig
 
@@ -1278,30 +1338,34 @@ class SpatialDetailAnalyzer:
         return positions, values
 
     @staticmethod
-    def _plot_cross_section(pos: np.ndarray, prof_a: np.ndarray, prof_b: np.ndarray,
-                             label_a: str, label_b: str, title: str) -> plt.Figure:
+    def _draw_cross_section(ax, pos: np.ndarray, prof_a: np.ndarray, prof_b: np.ndarray,
+                             label_a: str, label_b: str, title: str) -> None:
+        """Draw a cross-section profile (+ linear A−B diff on a twinx — CLAUDE.md's
+        sanctioned linear-vs-linear twinx precedent, unrelated to the log-ratio
+        metric used elsewhere in Section 8) into an existing Axes: the bottom-right
+        quadrant of _plot_side_by_side's 2×2 grid. Fonts/linewidths are tuned down
+        from the metric's old standalone-figure sizes since this panel is now
+        roughly a quarter the area."""
         # Images with slightly different pixel dimensions produce different-length profiles
         n = min(len(pos), len(prof_a), len(prof_b))
         pos, prof_a, prof_b = pos[:n], prof_a[:n], prof_b[:n]
-        fig, ax1 = plt.subplots(figsize=(9, 4), constrained_layout=True)
-        ax1.plot(pos, prof_a, color="steelblue", linewidth=1.5, alpha=XS_LINE_ALPHA, label=label_a)
-        ax1.plot(pos, prof_b, color="tomato", linewidth=1.5, alpha=XS_LINE_ALPHA, label=label_b)
-        ax1.set_xlabel("Position along line (px)")
-        ax1.set_ylabel("Map value")
-        ax1.legend(loc="upper left", fontsize=8)
-        ax1.grid(True, alpha=0.3)
+        ax.plot(pos, prof_a, color="steelblue", linewidth=1.1, alpha=XS_LINE_ALPHA, label=label_a)
+        ax.plot(pos, prof_b, color="tomato", linewidth=1.1, alpha=XS_LINE_ALPHA, label=label_b)
+        ax.set_xlabel("Position along line (px)", fontsize=8)
+        ax.set_ylabel("Map value", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.legend(loc="upper left", fontsize=6.5, labelspacing=0.3)
+        ax.grid(True, alpha=0.3)
 
-        ax2 = ax1.twinx()
-        n = min(len(prof_a), len(prof_b))
-        diff = prof_a[:n] - prof_b[:n]
-        ax2.plot(pos[:n], diff, color="#2ca02c", linewidth=1.2,
+        ax2 = ax.twinx()
+        diff = prof_a - prof_b
+        ax2.plot(pos, diff, color="#2ca02c", linewidth=0.9,
                  linestyle="--", alpha=0.85, label="A−B")
-        ax2.axhline(0, color="#2ca02c", linewidth=0.8, alpha=0.3)   # zero-crossing reference
-        ax2.set_ylabel("Difference (A−B)", color="#2ca02c")
-        ax2.tick_params(axis="y", labelcolor="#2ca02c")
-        ax2.legend(loc="upper right", fontsize=8)
-        ax1.set_title(title, fontsize=10)
-        return fig
+        ax2.axhline(0, color="#2ca02c", linewidth=0.6, alpha=0.3)   # zero-crossing reference
+        ax2.set_ylabel("Difference (A−B)", color="#2ca02c", fontsize=8)
+        ax2.tick_params(axis="y", labelcolor="#2ca02c", labelsize=7)
+        ax2.legend(loc="upper right", fontsize=6.5, labelspacing=0.3)
+        ax.set_title(title, fontsize=9)
 
     @staticmethod
     def _plot_metric_correlation(map_a: np.ndarray, map_b: np.ndarray,

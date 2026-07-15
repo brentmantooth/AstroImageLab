@@ -4124,24 +4124,6 @@ curve is shown.</p>
                     out += _hires_img_tag(figs[key], key) + "\n"
             return out
 
-        def xs_figs_for(prefix: str) -> str:
-            out = ""
-            for key in sorted(figs):
-                if key.startswith(prefix):
-                    out += _hires_img_tag(figs[key], key) + "\n"
-            return out
-
-        def paired_figs_for(img_prefix: str, xs_prefix: str) -> str:
-            """Emit each image immediately followed by its matching cross-section."""
-            out = ""
-            for img_key in sorted(k for k in figs if k.startswith(img_prefix)):
-                suffix = img_key[len(img_prefix):]
-                out += _hires_img_tag(figs[img_key], img_key) + "\n"
-                xs_key = xs_prefix + suffix
-                if xs_key in figs:
-                    out += _hires_img_tag(figs[xs_key], xs_key) + "\n"
-            return out
-
         def corr_figs_html() -> str:
             """Emit each present correlation scatter figure in _SPATIAL_CORR_ROWS
             order (not alphabetic — e.g. std_10px must not sort before std_3px)."""
@@ -4185,9 +4167,11 @@ curve is shown.</p>
 
         has_crosshair = sm.get("crosshair") is not None
         xs_note = _info_box(
-            'ℹ Cross-section profiles below are extracted along '
-            'the line selected in the viewer. Left axis: both images '
-            '(steelblue = A, tomato = B). Right axis (green dashed): difference A−B.',
+            'ℹ When a cross-section line is set in the viewer, its profile is embedded '
+            'as the bottom-right panel of each map-pair figure below (8b–8f): Image A '
+            '(top-left), Image B (top-right), log-ratio map (bottom-left), cross-section '
+            'profile (bottom-right). Left axis: both images (steelblue = A, tomato = B). '
+            'Right axis (green dashed): difference A−B.',
             title="Cross-section profiles",
             open=True,
         ) if has_crosshair else ""
@@ -4241,7 +4225,8 @@ curve is shown.</p>
             f'thin filaments), Level 3 ≈ 8 px (medium structures — emission knots, shell edges), '
             f'Level 4 ≈ 16 px (broader features). A higher SNR at Level 2 indicates the filter '
             f'preserves sub-arcsecond detail better; Level 3 reflects medium-scale structure. '
-            f'Cross-section profiles show how detail amplitude varies spatially along the selected line.',
+            f'When a cross-section line is set, its profile (embedded in each map figure below) '
+            f'shows how detail amplitude varies spatially along the selected line.',
             title="Wavelet decomposition",
         )
 
@@ -4254,17 +4239,20 @@ curve is shown.</p>
 {smooth_note}
 {_info_box('All maps below are computed on mean-signal-normalised data '
            '(each image divided by its own mean signal), making them dimensionless and comparable '
-           'across different filter bandwidths. Images are shown side-by-side with a shared '
-           'colour scale; the third panel shows the per-pixel log-ratio '
-           'log<sub>10</sub>(A / B): red (positive) means A is stronger at that pixel, blue '
-           '(negative) means B is stronger, white means the two are equal. ±0.3 ≈ a 2&times; '
-           'difference, ±1.0 ≈ a 10&times; difference. For the Original and Wavelet maps — the '
-           'only two families whose values can be negative — the ratio uses |A| and |B|, so it '
-           'compares the <em>magnitude</em> of structure rather than signed brightness.',
+           'across different filter bandwidths. Each figure is a 2&times;2 grid: Image A '
+           '(top-left) and Image B (top-right) share a colour scale; the bottom-left panel shows '
+           'the per-pixel log-ratio log<sub>10</sub>(A / B): red (positive) means A is stronger at '
+           'that pixel, blue (negative) means B is stronger, white means the two are equal. ±0.3 ≈ '
+           'a 2&times; difference, ±1.0 ≈ a 10&times; difference. For the Original and Wavelet maps '
+           '— the only two families whose values can be negative — the ratio uses |A| and |B|, so '
+           'it compares the <em>magnitude</em> of structure rather than signed brightness. The '
+           'bottom-right panel shows the cross-section profile along the selected line when one is '
+           'set, otherwise left blank.',
            title="Spatial detail maps overview")}
 {dist_html}
 {nc_methodology_box}
 {nc_empty_note}
+{xs_note}
 
 <h3>8b. Local Standard Deviation Maps</h3>
 {_info_box('Measures how much pixel values vary within a neighbourhood. '
@@ -4275,8 +4263,8 @@ curve is shown.</p>
            'window. Brighter regions contain more local variation — typically nebula filaments, '
            'star halos, or noise. A filter with higher std values in targeted emission regions '
            'preserves more structure; higher std in blank sky regions indicates more photon noise. '
-           'The cross-section profiles below each map pair show how local detail amplitude varies '
-           'along the selected line.',
+           'When a cross-section line is set, its profile is embedded in the bottom-right panel of '
+           'each map figure below, showing how local detail amplitude varies along the selected line.',
            title="Local standard deviation")}
 <table>
   <tr><th>Kernel size</th><th>{ra.label}</th><th>{rb.label}</th></tr>
@@ -4286,10 +4274,10 @@ curve is shown.</p>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {std_nc_rows}
 </table>
-{xs_note}{paired_figs_for("std_", "xs_std_")}
-<p class="caption">Side-by-side local σ maps at each kernel size (shared colour scale),
-each followed by its cross-section profile.
-The log-ratio map (right) highlights where one filter preserves more local variation.</p>
+{figs_for("std_")}
+<p class="caption">Local σ maps at each kernel size (shared colour scale): Image A (top-left),
+Image B (top-right), log-ratio map (bottom-left) highlighting where one filter preserves more
+local variation, and — when a cross-section line is set — its profile (bottom-right).</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_std_")}
 <h3>8c. Laplacian of Gaussian (LoG) Maps</h3>
@@ -4301,17 +4289,18 @@ The log-ratio map (right) highlights where one filter preserves more local varia
            'then computing the Laplacian (second spatial derivative), which peaks at intensity '
            'boundaries. |LoG| is shown so bright-to-dark and dark-to-bright edges are treated '
            'equally. Compare maps at each σ: a sharper or higher-contrast filter will show '
-           'brighter LoG response at small σ values. Cross-section profiles reveal subtle '
-           'differences in edge sharpness along the selected line.',
+           'brighter LoG response at small σ values. When a cross-section line is set, its profile '
+           'reveals subtle differences in edge sharpness along the selected line.',
            title="Laplacian of Gaussian (LoG)")}
 <table>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {log_nc_rows}
 </table>
-{paired_figs_for("log_", "xs_log_")}
-<p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
-each followed by its cross-section profile.
-A filter preserving more fine detail shows brighter, more defined boundaries at small σ.</p>
+{figs_for("log_")}
+<p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per figure):
+Image A (top-left), Image B (top-right), log-ratio map (bottom-left), and — when a
+cross-section line is set — its profile (bottom-right). A filter preserving more fine
+detail shows brighter, more defined boundaries at small σ.</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_log_")}
 <h3>8d. Wavelet Decomposition</h3>
@@ -4330,11 +4319,12 @@ A filter preserving more fine detail shows brighter, more defined boundaries at 
   {wavelet_nc_rows}
 </table>
 
-{paired_figs_for("wavelet_level", "xs_wavelet_level")}
+{figs_for("wavelet_level")}
 <p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
-diverging colourmap), each followed by its cross-section profile.
-The log-ratio panel (right) shows where fine structure differs between the two filters
-(sign discarded — |A|/|B| — since wavelet reconstructions can be negative).</p>
+diverging colourmap): Image A (top-left), Image B (top-right), log-ratio panel (bottom-left)
+showing where fine structure differs between the two filters (sign discarded — |A|/|B| —
+since wavelet reconstructions can be negative), and — when a cross-section line is set —
+its profile (bottom-right).</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_wavelet_")}
 
@@ -4371,10 +4361,11 @@ The log-ratio panel (right) shows where fine structure differs between the two f
 </table>
 {figs_for("weber_")}
 <p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root colour
-scale, viridis). Brighter regions have higher Weber contrast — the local intensity range
-is large relative to the local median luminance. The log-ratio panel (A/B) shows where
-one image achieves greater relative contrast. High values over dark-sky regions are
-expected; use a nebula ROI for meaningful filter comparison.</p>
+scale, viridis): Image A (top-left), Image B (top-right), log-ratio panel (bottom-left)
+showing where one image achieves greater relative contrast, and — when a cross-section
+line is set — its profile (bottom-right). Brighter regions have higher Weber contrast —
+the local intensity range is large relative to the local median luminance. High values
+over dark-sky regions are expected; use a nebula ROI for meaningful filter comparison.</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_weber_")}
 
@@ -4396,10 +4387,11 @@ expected; use a nebula ROI for meaningful filter comparison.</p>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {gm_nc_rows}
 </table>
-{paired_figs_for("gradient_", "xs_gradient_")}
-<p class="caption">Gradient magnitude maps at σ = 1.5, 3, and 6 px (shared colour scale per row),
-each followed by its cross-section profile.
-A filter preserving sharper boundaries shows brighter, more defined gradient response.</p>
+{figs_for("gradient_")}
+<p class="caption">Gradient magnitude maps at σ = 1.5, 3, and 6 px (shared colour scale per
+figure): Image A (top-left), Image B (top-right), log-ratio map (bottom-left), and — when a
+cross-section line is set — its profile (bottom-right). A filter preserving sharper
+boundaries shows brighter, more defined gradient response.</p>
 <p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
 {figs_for("nrm_gradient_")}
 

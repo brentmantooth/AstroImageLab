@@ -230,7 +230,7 @@ When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_rati
   exception, no obviously-wrong output, just a subtly incorrect number.
 - **Don't add the ratio via `ax.twinx()`** onto the existing absolute-value plot unless
   both axes are the same kind of quantity (linear-vs-linear, as in
-  `analysis/image_filters.py::_plot_cross_section`'s A−B difference line). A linear,
+  `analysis/image_filters.py::_draw_cross_section`'s A−B difference line). A linear,
   zero-centered ratio next to a log-scale absolute axis has no principled vertical
   alignment between the two scales — matplotlib's independent autoscaling invents a
   relationship that isn't in the data. Build a separate, dedicated figure/panel instead.

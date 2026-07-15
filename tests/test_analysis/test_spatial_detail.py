@@ -388,3 +388,47 @@ class TestCorrelationScatterFigures:
     def test_absent_in_single_image_mode(self, astro_image_a, key):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
         assert key not in result["figures"]
+
+
+@pytest.fixture(scope="module")
+def nc_result_with_crosshair(nc_image_pair) -> dict:
+    img_a, img_b = nc_image_pair
+    crosshair = {"x0": 0.1, "y0": 0.5, "x1": 0.9, "y1": 0.5}
+    return SpatialDetailAnalyzer().analyze(img_a, img_b, crosshair=crosshair)
+
+
+class TestCrosshairEmbeddedCrossSections:
+    """Section 8 cross-sections are embedded panels inside the 2x2 map figures,
+    not separate figures — no standalone xs_* keys should ever appear, and all
+    5 families (including Weber, newly crosshair-capable) must still produce
+    their usual figure keys with or without a crosshair, without crashing."""
+
+    def test_no_crash_with_crosshair(self, nc_result_with_crosshair):
+        assert isinstance(nc_result_with_crosshair, dict)
+
+    def test_no_standalone_xs_keys_with_crosshair(self, nc_result_with_crosshair):
+        figs = nc_result_with_crosshair["figures"]
+        assert not any(k.startswith(("xs_std_", "xs_log_", "xs_wavelet_",
+                                      "xs_gradient_", "xs_weber_")) for k in figs)
+
+    def test_no_standalone_xs_keys_without_crosshair(self, nc_result):
+        figs = nc_result["figures"]
+        assert not any(k.startswith(("xs_std_", "xs_log_", "xs_wavelet_",
+                                      "xs_gradient_", "xs_weber_")) for k in figs)
+
+    @pytest.mark.parametrize("key_prefix,scales", [
+        ("std_", STD_KERNEL_SIZES), ("weber_", WEBER_KERNEL_SIZES),
+    ])
+    def test_family_figures_present_with_crosshair(self, nc_result_with_crosshair,
+                                                     key_prefix, scales):
+        figs = nc_result_with_crosshair["figures"]
+        for scale in scales:
+            assert f"{key_prefix}{scale}px" in figs
+
+    def test_weber_no_crash_without_crosshair(self, nc_result):
+        # Regression: weber previously had no crosshair param at all.
+        assert all(f"weber_{ks}px" in nc_result["figures"] for ks in WEBER_KERNEL_SIZES)
+
+    def test_weber_nrm_figures_present_with_crosshair(self, nc_result_with_crosshair):
+        figs = nc_result_with_crosshair["figures"]
+        assert any(k.startswith("nrm_weber_") for k in figs)
