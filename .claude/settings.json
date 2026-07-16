@@ -4,7 +4,10 @@
       "PowerShell(cmd /c \"type C:\\\\Users\\\\bmant\\\\anaconda3\\\\envs\\\\astrolab\\\\qt6.conf\")",
       "PowerShell(cmd /c \"C:\\\\Users\\\\bmant\\\\anaconda3\\\\Scripts\\\\conda.exe run -n astrolab python -c \"\"import struct, sys; data = open\\(r'C:\\\\Users\\\\bmant\\\\anaconda3\\\\envs\\\\astrolab\\\\Lib\\\\site-packages\\\\PyQt6\\\\Qt6\\\\bin\\\\Qt6Core.dll', 'rb'\\).read\\(\\); print\\('DLL size:', len\\(data\\)\\)\"\" 2>&1\")",
       "PowerShell(cmd /c \"C:\\\\Users\\\\bmant\\\\anaconda3\\\\Scripts\\\\conda.exe run -n astrolab pip install pyqt6==6.11.0 pyqt6-qt6==6.11.0 pyqt6-sip==13.11.1 --force-reinstall --ignore-installed 2>&1\")",
-      "WebSearch"
+      "WebSearch",
+      "PowerShell(conda activate astrolab)",
+      "PowerShell(python -m pytest tests/ -m \"not slow\" -q 2>&1)",
+      "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\" -Filter \"condabin\" -Directory -ErrorAction SilentlyContinue -Recurse -Depth 2 | Select-Object -First 5 FullName; Get-ChildItem -Path \"C:\\\\ProgramData\" -Filter \"condabin\" -Directory -ErrorAction SilentlyContinue | Select-Object FullName)"
     ]
   }
 }
