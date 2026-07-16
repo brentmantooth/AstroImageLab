@@ -12,7 +12,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
-from scipy.stats import linregress
 import pywt
 
 from core.astro_image import AstroImage
@@ -21,8 +20,7 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          WEBER_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
                          XS_SNR_REGION_WIDTH, SECTION8_DIFF_DIST_MAX_SAMPLES,
-                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES,
-                         SECTION8_SCATTER_TAIL_PERCENTILE)
+                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -412,7 +410,7 @@ class SpatialDetailAnalyzer:
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single:
                 corr_fig = self._plot_metric_correlation(
-                    std_a, std_b, mask_neb_shared, mask_bg_shared,
+                    std_a, std_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Local σ (kernel {ks}px)", diff_dist_rng)
                 if corr_fig is not None:
                     figures[f"corr_std_{ks}px"] = corr_fig
@@ -563,6 +561,13 @@ class SpatialDetailAnalyzer:
         return np.log10(ratio).astype(np.float32)
 
     @staticmethod
+    def _log_ratio_color_range(diff: np.ndarray) -> tuple[float, float]:
+        """Symmetric (vmin, vmax) for the bwr log-ratio colormap, shared by the
+        log-ratio map panel, its histogram, and the correlation scatter dots."""
+        d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
+        return -d_max, d_max
+
+    @staticmethod
     def _diff_distribution(diff_map: np.ndarray,
                             mask_neb_shared: np.ndarray | None,
                             mask_bg_shared: np.ndarray | None,
@@ -644,7 +649,7 @@ class SpatialDetailAnalyzer:
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single:
                 corr_fig = self._plot_metric_correlation(
-                    log_a, log_b, mask_neb_shared, mask_bg_shared,
+                    log_a, log_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"|LoG| (σ={sigma}px)", diff_dist_rng)
                 if corr_fig is not None:
                     figures[f"corr_log_{sigma}"] = corr_fig
@@ -747,7 +752,7 @@ class SpatialDetailAnalyzer:
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single:
                 corr_fig = self._plot_metric_correlation(
-                    gm_a, gm_b, mask_neb_shared, mask_bg_shared,
+                    gm_a, gm_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Gradient |G| (σ={sigma}px)", diff_dist_rng)
                 if corr_fig is not None:
                     figures[f"corr_gradient_{sigma}"] = corr_fig
@@ -882,7 +887,7 @@ class SpatialDetailAnalyzer:
                 # sign-discarding log-ratio map, shows whether band-pass detail
                 # flips sign between the two filters at a given pixel.
                 corr_fig = self._plot_metric_correlation(
-                    rec_a, rec_b, mask_neb_shared, mask_bg_shared,
+                    rec_a, rec_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Wavelet level {display_level}", diff_dist_rng)
                 if corr_fig is not None:
                     figures[f"corr_wavelet_{display_level}"] = corr_fig
@@ -1019,7 +1024,7 @@ class SpatialDetailAnalyzer:
                     diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
             if not single:
                 corr_fig = self._plot_metric_correlation(
-                    wc_a, wc_b, mask_neb_shared, mask_bg_shared,
+                    wc_a, wc_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Weber contrast (kernel {ks}px)", diff_dist_rng)
                 if corr_fig is not None:
                     figures[f"corr_weber_{ks}px"] = corr_fig
@@ -1143,21 +1148,32 @@ class SpatialDetailAnalyzer:
         diff = self._log_ratio_map(arr_a, arr_b)
 
         # Symmetric about zero so the "bwr" midpoint (white) always means no difference.
-        d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
-        dvmin, dvmax = -d_max, d_max
+        dvmin, dvmax = self._log_ratio_color_range(diff)
 
-        # 2×2 grid: A|B on top, log-ratio diff | cross-section on bottom. A/B/diff
-        # share the source array's pixel aspect ratio (aspect="equal" imshow); the
-        # cross-section panel is a line plot with no such constraint but occupies
-        # an equal-size grid cell so the other three panels stay geometrically
-        # identical whether or not a crosshair (and thus xs_data) is set.
+        # Dark-mode-aware reference-line color (project convention).
+        is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if is_dark else "black"
+
+        # 3-row grid: A|B on top, log-ratio diff | cross-section in the middle,
+        # a log-ratio pixel-value histogram spanning both columns on the bottom.
+        # A/B/diff share the source array's pixel aspect ratio (aspect="equal"
+        # imshow); the cross-section panel is a line plot with no such constraint
+        # but occupies an equal-size grid cell so the other three panels stay
+        # geometrically identical whether or not a crosshair (and thus xs_data)
+        # is set.
         h, w = arr_a.shape[:2]
         aspect_ratio = h / max(w, 1)
         panel_w = 5.0   # half the old single-column width — 2 columns now share it
         panel_h = panel_w * aspect_ratio
-        fig, axes = plt.subplots(2, 2, figsize=(panel_w * 2, panel_h * 2 + 1.5),
-                                  constrained_layout=True)
-        (ax_a, ax_b), (ax_diff, ax_xs) = axes
+        hist_h = 2.2
+        fig = plt.figure(figsize=(panel_w * 2, panel_h * 2 + hist_h + 1.5),
+                          constrained_layout=True)
+        gs = fig.add_gridspec(3, 2, height_ratios=[panel_h, panel_h, hist_h])
+        ax_a = fig.add_subplot(gs[0, 0])
+        ax_b = fig.add_subplot(gs[0, 1])
+        ax_diff = fig.add_subplot(gs[1, 0])
+        ax_xs = fig.add_subplot(gs[1, 1])
+        ax_hist = fig.add_subplot(gs[2, :])
 
         for ax, arr, title in zip([ax_a, ax_b], [arr_a, arr_b], [title_a, title_b]):
             im = ax.imshow(arr, origin="upper", cmap=cmap,
@@ -1182,6 +1198,26 @@ class SpatialDetailAnalyzer:
                                       xs_label_a, xs_label_b, xs_title)
         else:
             ax_xs.axis("off")
+
+        # Histogram of the log-ratio map's pixel distribution, colored to match
+        # the diff panel above: full data range on the x-axis (no pixels hidden),
+        # but each bin's fill color is clipped to [dvmin, dvmax] so extreme-tail
+        # bins saturate to the same end colors imshow already uses for its own
+        # outliers.
+        counts, bin_edges, patches = ax_hist.hist(diff.ravel(), bins=60)
+        hist_norm = mcolors.Normalize(vmin=dvmin, vmax=dvmax, clip=True)
+        hist_cmap = plt.get_cmap("bwr")
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        for patch, center in zip(patches, bin_centers):
+            patch.set_facecolor(hist_cmap(hist_norm(center)))
+        ax_hist.axvline(0.0, color=orig_color, linestyle="--", linewidth=1.0, label="A = B")
+        ax_hist.set_yscale("log")
+        ax_hist.set_xlabel("Log ratio, log10(|A|/|B|)", fontsize=8)
+        ax_hist.set_ylabel("Pixel count", fontsize=8)
+        ax_hist.tick_params(labelsize=7)
+        ax_hist.legend(fontsize=6.5, loc="upper right")
+        ax_hist.grid(True, alpha=0.3)
+        ax_hist.set_title("Log-ratio pixel distribution", fontsize=9)
 
         return fig
 
@@ -1358,31 +1394,31 @@ class SpatialDetailAnalyzer:
 
     @staticmethod
     def _plot_metric_correlation(map_a: np.ndarray, map_b: np.ndarray,
+                                  log_ratio: np.ndarray,
                                   mask_neb_shared: np.ndarray, mask_bg_shared: np.ndarray,
                                   label_a: str, label_b: str, metric_title: str,
                                   rng: np.random.Generator,
                                   max_samples: int = SECTION8_SCATTER_MAX_SAMPLES) -> plt.Figure | None:
         """1x2 correlation scatter (Nebula | Background): metric value in A (y)
-        vs. metric value in B (x), with a dashed 1:1 reference line plus two
-        linear fits — an overall OLS fit over all points, and a second fit
-        restricted to the top (100 - SECTION8_SCATTER_TAIL_PERCENTILE)% of
-        points by combined magnitude ("tail fit"). The tail fit isolates the
-        high-detail regime's slope from the bulk's, since a whole-population
-        slope is dominated by leverage rather than point count and conflates
-        the two regimes into one ambiguous number.
+        vs. metric value in B (x), with a dashed 1:1 reference line. Each point
+        is colored by that pixel's log-ratio value (log_ratio — the same array
+        driving the adjacent log-ratio map panel), using the same bwr colormap
+        and range, so the scatter visually links back to the map.
 
         Axis limits reflect the FULL pooled population range per subplot (not
         percentile-clipped like the Section 8a violin plots) so upper-tail
         divergence from the 1:1 line — the signal this plot exists to surface —
         stays visible. Point clouds are randomly subsampled (up to max_samples)
-        for render cost only; the axis range and both fits are always computed
-        from the full, unsampled population. Returns None if both subplots have
-        too few points.
+        for render cost only; the axis range is always computed from the full,
+        unsampled population. Returns None if both subplots have too few points.
         """
-        h = min(map_a.shape[0], map_b.shape[0], mask_neb_shared.shape[0], mask_bg_shared.shape[0])
-        w = min(map_a.shape[1], map_b.shape[1], mask_neb_shared.shape[1], mask_bg_shared.shape[1])
+        h = min(map_a.shape[0], map_b.shape[0], log_ratio.shape[0],
+                mask_neb_shared.shape[0], mask_bg_shared.shape[0])
+        w = min(map_a.shape[1], map_b.shape[1], log_ratio.shape[1],
+                mask_neb_shared.shape[1], mask_bg_shared.shape[1])
         map_a = map_a[:h, :w]
         map_b = map_b[:h, :w]
+        log_ratio = log_ratio[:h, :w]
         mask_neb_shared = mask_neb_shared[:h, :w]
         mask_bg_shared = mask_bg_shared[:h, :w]
 
@@ -1390,12 +1426,17 @@ class SpatialDetailAnalyzer:
         is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
         orig_color = "white" if is_dark else "black"
 
+        # Shared across both panels so a given color always means the same
+        # log-ratio value, matching the adjacent map figure's own scale.
+        dvmin, dvmax = SpatialDetailAnalyzer._log_ratio_color_range(log_ratio)
+
         fig, axes = plt.subplots(1, 2, figsize=(9, 4.5))
         any_data = False
         for ax, region_name, mask in zip(axes, ("Nebula", "Background"),
                                           (mask_neb_shared, mask_bg_shared)):
             a_vals = map_a[mask]
             b_vals = map_b[mask]
+            c_vals = log_ratio[mask]
             n = a_vals.size
             if n < 3:
                 ax.set_visible(False)
@@ -1410,46 +1451,15 @@ class SpatialDetailAnalyzer:
 
             if n > max_samples:
                 idx = rng.choice(n, max_samples, replace=False)
-                a_plot, b_plot = a_vals[idx], b_vals[idx]
+                a_plot, b_plot, c_plot = a_vals[idx], b_vals[idx], c_vals[idx]
             else:
-                a_plot, b_plot = a_vals, b_vals
+                a_plot, b_plot, c_plot = a_vals, b_vals, c_vals
 
-            # Linear fits computed on the FULL population (not the render subsample)
-            # for statistical accuracy. Two fits, not one: an overall OLS fit over
-            # all points is dominated by leverage, not point count, so it conflates
-            # "the bulk agrees near 1:1" with "the tail diverges" into one ambiguous
-            # number. A second fit restricted to the top (100 -
-            # SECTION8_SCATTER_TAIL_PERCENTILE)% of points by combined magnitude
-            # (A + B, a proxy for "how far out along the diagonal") isolates the
-            # high-detail regime specifically — that slope is the more direct
-            # answer to "does one filter show disproportionately more detail/
-            # contrast in the brightest/most-structured regions".
-            overall_fit = linregress(b_vals, a_vals)
-            m_all, c_all, r_all = overall_fit.slope, overall_fit.intercept, overall_fit.rvalue
-
-            combined = a_vals + b_vals
-            tail_thresh = np.percentile(combined, SECTION8_SCATTER_TAIL_PERCENTILE)
-            tail_mask = combined >= tail_thresh
-            tail_fit = None
-            if np.count_nonzero(tail_mask) >= 3:
-                tf = linregress(b_vals[tail_mask], a_vals[tail_mask])
-                tail_fit = (tf.slope, tf.intercept, tf.rvalue)
-
-            ax.scatter(b_plot, a_plot, alpha=0.55, s=8, color="steelblue",
-                       zorder=3, edgecolors="none", rasterized=True)
+            sc = ax.scatter(b_plot, a_plot, c=c_plot, cmap="bwr", vmin=dvmin, vmax=dvmax,
+                             alpha=0.55, s=8, zorder=3, edgecolors="none", rasterized=True)
             ax.plot([lo, hi], [lo, hi], color=orig_color, linestyle="--",
                     linewidth=1.2, zorder=4, label="Slope = 1 (A = B)")
-            fit_x = np.array([lo, hi])
-            ax.plot(fit_x, m_all * fit_x + c_all, color="darkorange", linestyle="-",
-                     linewidth=1.6, zorder=5,
-                     label=f"Fit: y={m_all:.2f}x{c_all:+.2f} (R²={r_all ** 2:.2f})")
-            if tail_fit is not None:
-                m_t, c_t, r_t = tail_fit
-                tail_pct = 100 - SECTION8_SCATTER_TAIL_PERCENTILE
-                ax.plot(fit_x, m_t * fit_x + c_t, color="crimson", linestyle=":",
-                         linewidth=1.8, zorder=6,
-                         label=f"Tail fit (top {tail_pct:.0f}%): "
-                               f"y={m_t:.2f}x{c_t:+.2f} (R²={r_t ** 2:.2f})")
+            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="log10(|A|/|B|)")
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
             ax.set_aspect("equal")
