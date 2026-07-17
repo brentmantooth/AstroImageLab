@@ -296,6 +296,35 @@ class MainWindow(QMainWindow):
                 self._control.set_run_enabled(True)
                 return
 
+        # A previously-drawn ROI is never auto-cleared when a new image is loaded, so it
+        # can silently go out of bounds for a smaller replacement image. An out-of-range
+        # ROI slices to a zero-size array in every ROI-aware analyzer (Section 8, Power
+        # Spectrum, Edge Detection) with no exception at the slice itself — it fails much
+        # later with a confusing "index -1 is out of bounds for axis 0 with size 0" (or
+        # similar) deep inside a percentile/zoom/regression call. Validate once here so
+        # every analyzer downstream always receives either None or an ROI that fits.
+        if self._roi is not None:
+            rx0, ry0, rx1, ry1 = self._roi
+            roi_fits = True
+            for img in (img_a, img_b):
+                if img is None:
+                    continue
+                h, w = img.data.shape[:2]
+                if not (0 <= rx0 < rx1 <= w and 0 <= ry0 < ry1 <= h):
+                    roi_fits = False
+                    break
+            if not roi_fits:
+                self._roi = None
+                self._control.set_roi(None)
+                QMessageBox.warning(
+                    self, "ROI no longer fits loaded images",
+                    "The previously selected ROI no longer fits within the currently "
+                    "loaded image(s) and has been cleared. Analysis will proceed using "
+                    "the full image (or an auto-detected region) instead.\n\n"
+                    "Use \"Select ROI…\" to redraw a region if you want to restrict "
+                    "analysis to a specific area."
+                )
+
         # Merge ROI and crosshair from window state into settings
         settings["roi"] = self._roi
         settings["crosshair"] = self._crosshair

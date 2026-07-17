@@ -315,3 +315,120 @@ class TestNcScoreHelper:
         score, noise = analyzer._nc_score(detail, mask_neb_shared, bg_mask)
         assert score == pytest.approx(5.0)
         assert noise == pytest.approx(2.0)
+
+
+class TestLogRatioHelper:
+    """Direct unit tests of _log_ratio_map's epsilon-floor and sign-discard contract."""
+
+    def test_equal_inputs_give_zero(self):
+        a = np.full((10, 10), 5.0, dtype=np.float32)
+        b = np.full((10, 10), 5.0, dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.allclose(result, 0.0, atol=1e-5)
+
+    def test_double_ratio_gives_log10_two(self):
+        b = np.full((10, 10), 3.0, dtype=np.float32)
+        a = 2.0 * b
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.allclose(result, np.log10(2.0), atol=1e-5)
+
+    def test_opposite_sign_equal_magnitude_gives_zero(self):
+        a = np.full((10, 10), -5.0, dtype=np.float32)
+        b = np.full((10, 10), 5.0, dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.allclose(result, 0.0, atol=1e-5)
+
+    def test_near_zero_pixel_amid_nonzero_data_stays_finite(self):
+        a = np.full((10, 10), 5.0, dtype=np.float32)
+        b = np.full((10, 10), 5.0, dtype=np.float32)
+        b[0, 0] = 0.0
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.all(np.isfinite(result))
+
+    def test_mismatched_shapes_crop_to_common_size(self):
+        a = np.full((10, 10), 5.0, dtype=np.float32)
+        b = np.full((8, 9), 5.0, dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert result.shape == (8, 9)
+
+    def test_all_zero_inputs_stay_finite(self):
+        a = np.zeros((10, 10), dtype=np.float32)
+        b = np.zeros((10, 10), dtype=np.float32)
+        result = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        assert np.all(np.isfinite(result))
+
+
+class TestMaskIllustrationFigure:
+    def test_absent_in_single_image_mode(self, astro_image_a):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        assert "mask_illustration" not in result["figures"]
+
+    def test_present_in_two_image_mode(self, nc_result):
+        assert "mask_illustration" in nc_result["figures"]
+        assert isinstance(nc_result["figures"]["mask_illustration"], str)
+        assert len(nc_result["figures"]["mask_illustration"]) > 0
+
+
+class TestCorrelationScatterFigures:
+    _CORR_KEYS = (
+        [f"corr_std_{ks}px" for ks in STD_KERNEL_SIZES]
+        + [f"corr_log_{s}" for s in LOG_SIGMAS]
+        + [f"corr_gradient_{s}" for s in LOG_SIGMAS]
+        + ["corr_wavelet_2", "corr_wavelet_3"]
+        + [f"corr_weber_{ks}px" for ks in WEBER_KERNEL_SIZES]
+    )
+
+    @pytest.mark.parametrize("key", _CORR_KEYS)
+    def test_present_in_two_image_mode(self, nc_result, key):
+        assert key in nc_result["figures"]
+        assert isinstance(nc_result["figures"][key], str)
+        assert len(nc_result["figures"][key]) > 0
+
+    @pytest.mark.parametrize("key", _CORR_KEYS)
+    def test_absent_in_single_image_mode(self, astro_image_a, key):
+        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+        assert key not in result["figures"]
+
+
+@pytest.fixture(scope="module")
+def nc_result_with_crosshair(nc_image_pair) -> dict:
+    img_a, img_b = nc_image_pair
+    crosshair = {"x0": 0.1, "y0": 0.5, "x1": 0.9, "y1": 0.5}
+    return SpatialDetailAnalyzer().analyze(img_a, img_b, crosshair=crosshair)
+
+
+class TestCrosshairEmbeddedCrossSections:
+    """Section 8 cross-sections are embedded panels inside the 2x2 map figures,
+    not separate figures — no standalone xs_* keys should ever appear, and all
+    5 families (including Weber, newly crosshair-capable) must still produce
+    their usual figure keys with or without a crosshair, without crashing."""
+
+    def test_no_crash_with_crosshair(self, nc_result_with_crosshair):
+        assert isinstance(nc_result_with_crosshair, dict)
+
+    def test_no_standalone_xs_keys_with_crosshair(self, nc_result_with_crosshair):
+        figs = nc_result_with_crosshair["figures"]
+        assert not any(k.startswith(("xs_std_", "xs_log_", "xs_wavelet_",
+                                      "xs_gradient_", "xs_weber_")) for k in figs)
+
+    def test_no_standalone_xs_keys_without_crosshair(self, nc_result):
+        figs = nc_result["figures"]
+        assert not any(k.startswith(("xs_std_", "xs_log_", "xs_wavelet_",
+                                      "xs_gradient_", "xs_weber_")) for k in figs)
+
+    @pytest.mark.parametrize("key_prefix,scales", [
+        ("std_", STD_KERNEL_SIZES), ("weber_", WEBER_KERNEL_SIZES),
+    ])
+    def test_family_figures_present_with_crosshair(self, nc_result_with_crosshair,
+                                                     key_prefix, scales):
+        figs = nc_result_with_crosshair["figures"]
+        for scale in scales:
+            assert f"{key_prefix}{scale}px" in figs
+
+    def test_weber_no_crash_without_crosshair(self, nc_result):
+        # Regression: weber previously had no crosshair param at all.
+        assert all(f"weber_{ks}px" in nc_result["figures"] for ks in WEBER_KERNEL_SIZES)
+
+    def test_weber_nrm_figures_present_with_crosshair(self, nc_result_with_crosshair):
+        figs = nc_result_with_crosshair["figures"]
+        assert any(k.startswith("nrm_weber_") for k in figs)

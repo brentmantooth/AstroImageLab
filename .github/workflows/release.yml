@@ -16,6 +16,7 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +28,7 @@ jobs:
 
       - name: Install Linux Qt system libraries
         if: runner.os == 'Linux'
+        timeout-minutes: 5
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0

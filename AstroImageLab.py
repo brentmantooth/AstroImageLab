@@ -4,8 +4,8 @@
 #
 # PR → merge to main (CI runs tests + build to verify everything works)
 # Tag the merge commit on main → triggers the release workflow
-# git tag v0.0.7
-# git push origin v0.0.7
+# git tag v0.0.8
+# git push origin v0.0.8
 
 import sys
 import os
