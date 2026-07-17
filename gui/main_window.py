@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
 
         # Control panel below images
         self._control = AnalysisControlPanel()
-        self._control.setMaximumHeight(240)
+        self._control.setMaximumHeight(340)
         main_layout.addWidget(self._control)
 
         # Wire signals

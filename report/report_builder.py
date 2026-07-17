@@ -19,7 +19,9 @@ from PIL import Image as _PILImage
 from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX,
                           PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX,
                           LABEL_MAX_LEN, REF_SEEING_ARCSEC, REF_SEEING_BETA,
-                          ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC)
+                          ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC,
+                          SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
+                          SECTION8_NEBULA_MASK_MAX_HOLE_PX)
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -4013,6 +4015,9 @@ curve is shown.</p>
 
         mask_fig = figs.get("mask_illustration")
         dist_img, dist_caption = _spatial_diff_distributions_figure(sm.get("diff_dist", {}))
+        nebula_sigma = sm.get("nebula_sigma", SECTION8_NEBULA_MASK_SIGMA)
+        nebula_dilation_px = sm.get("nebula_dilation_px", SECTION8_NEBULA_MASK_DILATION_PX)
+        nebula_max_hole_px = sm.get("nebula_max_hole_px", SECTION8_NEBULA_MASK_MAX_HOLE_PX)
         mask_html = (
             "<h4>Nebula / Background Mask Regions</h4>" +
             _hires_img_tag(mask_fig, "Mask illustration") +
@@ -4020,16 +4025,21 @@ curve is shown.</p>
             "<b>How the masks are detected.</b> Each image is independently classified "
             "per-pixel from its own background-subtracted flux and noise RMS: a pixel is "
             "<span style='color:steelblue'><b>Nebula</b></span> if its background-subtracted "
-            "value exceeds 2&times; the image's RMS, and "
+            f"value exceeds {nebula_sigma:g}&times; the image's RMS, and "
             "<span style='color:tomato'><b>Background</b></span> if it's below 0.5&times; the "
             "RMS (a top-5% percentile fallback applies if no pixel clears the nebula threshold). "
             "Pixels between the two thresholds are left unclassified (plain grayscale). "
+            f"Enclosed background gaps up to {nebula_max_hole_px}&times;{nebula_max_hole_px} px "
+            "inside the nebula mask are filled, then the mask is grown outward by "
+            f"{nebula_dilation_px} px to capture dim transition regions at nebula edges, before "
+            "the two images' masks are combined below. "
             "<b>How they're used below.</b> The log-ratio distributions and the per-scale "
-            "correlation plots embedded in 8b&ndash;8f use the <b>two-image intersection</b> "
-            "of these masks &mdash; "
-            "a pixel counts as Nebula only if <i>both</i> images classify it as Nebula (same for "
-            "Background). This is deliberately conservative: it excludes pixels where one "
-            f"image's registration, PSF, or local noise disagrees with the other's. Shown on "
+            "correlation plots embedded in 8b&ndash;8f use the <b>two-image union</b> for Nebula "
+            "&mdash; a pixel counts as Nebula if <i>either</i> image classifies it that way, since "
+            "a pixel that's clearly nebula in one image but marginal in the other (e.g. due to "
+            "registration offset, PSF, or local noise) should still count as signal. Background "
+            "stays the <b>two-image intersection</b> &mdash; a pixel counts as Background only if "
+            "<i>both</i> images agree, keeping the noise-floor reference population clean. Shown on "
             f"{ra.label}, the same array as the &quot;Original&quot; row below."
             "</p>"
             if mask_fig else ""

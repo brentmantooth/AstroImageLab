@@ -14,7 +14,8 @@ from PyQt6.QtWidgets import (
 from core.models import (
     STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_LEVELS, DEFAULT_PIXEL_SCALE,
     MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC, XS_SNR_REGION_WIDTH,
-    EPSF_MAX_STARS,
+    EPSF_MAX_STARS, SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
+    SECTION8_NEBULA_MASK_MAX_HOLE_PX,
 )
 
 
@@ -173,6 +174,29 @@ class AnalysisControlPanel(QWidget):
         self._wavelet_levels.setValue(WAVELET_LEVELS)
         self._wavelet_levels.setToolTip("Number of wavelet layers used in spatial detail analysis.")
         params_layout.addRow("Wavelet levels:", self._wavelet_levels)
+
+        self._nebula_sigma = QDoubleSpinBox()
+        self._nebula_sigma.setRange(0.5, 5.0)
+        self._nebula_sigma.setSingleStep(0.1)
+        self._nebula_sigma.setDecimals(2)
+        self._nebula_sigma.setValue(SECTION8_NEBULA_MASK_SIGMA)
+        self._nebula_sigma.setToolTip("Nebula mask threshold for Section 8 spatial detail analysis.\n"
+                                       "Pixels above this many RMS units over background are classified as Nebula.")
+        params_layout.addRow("Nebula mask threshold (× RMS):", self._nebula_sigma)
+
+        self._nebula_dilation_px = QSpinBox()
+        self._nebula_dilation_px.setRange(0, 20)
+        self._nebula_dilation_px.setValue(SECTION8_NEBULA_MASK_DILATION_PX)
+        self._nebula_dilation_px.setToolTip("Grows the Section 8 nebula mask outward by this many pixels\n"
+                                             "to capture dim/dark transition regions at nebula edges.")
+        params_layout.addRow("Nebula mask dilation (px):", self._nebula_dilation_px)
+
+        self._nebula_max_hole_px = QSpinBox()
+        self._nebula_max_hole_px.setRange(0, 20)
+        self._nebula_max_hole_px.setValue(SECTION8_NEBULA_MASK_MAX_HOLE_PX)
+        self._nebula_max_hole_px.setToolTip("Fills enclosed background gaps up to this size (px per side)\n"
+                                             "inside the Section 8 nebula mask, before dilation.")
+        params_layout.addRow("Nebula mask hole-fill (px):", self._nebula_max_hole_px)
 
         self._pixel_scale_override = QDoubleSpinBox()
         self._pixel_scale_override.setRange(0.0, 20.0)
@@ -373,6 +397,9 @@ class AnalysisControlPanel(QWidget):
             "pixel_scale_override": pso if pso > 0 else None,
             "wavelet_levels": self._wavelet_levels.value(),
             "xs_snr_width": self._xs_snr_width.value(),
+            "nebula_sigma": self._nebula_sigma.value(),
+            "nebula_dilation_px": self._nebula_dilation_px.value(),
+            "nebula_max_hole_px": self._nebula_max_hole_px.value(),
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "epsf_max_stars": self._epsf_max_stars.value(),
             "roi": self._roi,

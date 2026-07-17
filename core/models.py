@@ -43,6 +43,9 @@ SECTION8_ANALYSIS_CMAP = "viridis"     # colormap for Section 8 A/B analysis map
 SECTION8_DIFF_DIST_MAX_SAMPLES = 1000000  # per masked population, per scale — caps violin/KDE cost on full-res diff maps
 SECTION8_LOGRATIO_EPS_PERCENTILE = 1.0   # percentile of pooled positive |A|,|B| values used as the epsilon floor in log10(|A|/|B|)
 SECTION8_SCATTER_MAX_SAMPLES = 50000     # per masked population, per scale — caps render cost of Section 8g correlation scatter plots
+SECTION8_NEBULA_MASK_SIGMA = 1.7   # ×RMS above background = "Nebula" pixel classification (Section 8 masks); background cut stays fixed at 0.5×RMS
+SECTION8_NEBULA_MASK_DILATION_PX = 3   # px; scipy.ndimage.binary_dilation iterations to grow the nebula mask into adjacent dim/dark nebula regions
+SECTION8_NEBULA_MASK_MAX_HOLE_PX = 5   # px; enclosed background gaps up to this many pixels per side (area ≤ N²) inside the nebula mask are filled before dilation
 
 PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
 PSF_SPATIAL_MAP_SMOOTH_SIGMA = 5.0   # Gaussian smoothing sigma (px) applied to spatial maps before display

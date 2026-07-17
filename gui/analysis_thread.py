@@ -11,7 +11,8 @@ from typing import Callable
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from core.astro_image import AstroImage
-from core.models import AnalysisResult, LABEL_MAX_LEN
+from core.models import (AnalysisResult, LABEL_MAX_LEN, SECTION8_NEBULA_MASK_SIGMA,
+                         SECTION8_NEBULA_MASK_DILATION_PX, SECTION8_NEBULA_MASK_MAX_HOLE_PX)
 from analysis.psf_analyzer import PSFAnalyzer
 from analysis.halo_analyzer import HaloAnalyzer
 from analysis.edge_analyzer import EdgeAnalyzer
@@ -245,13 +246,18 @@ class AnalysisThread(QThread):
             wavelet_levels = s.get("wavelet_levels", 4)
             crosshair = s.get("crosshair")
             xs_snr_width = s.get("xs_snr_width")
+            nebula_sigma = s.get("nebula_sigma", SECTION8_NEBULA_MASK_SIGMA)
+            nebula_dilation_px = s.get("nebula_dilation_px", SECTION8_NEBULA_MASK_DILATION_PX)
+            nebula_max_hole_px = s.get("nebula_max_hole_px", SECTION8_NEBULA_MASK_MAX_HOLE_PX)
             _sd_b_src = (self._starless_b or img_b) if img_b is not None else None
 
             def _spatial(sd_a=self._starless_a or img_a, sd_b=_sd_b_src,
                           _ch=crosshair, _roi=roi, _xs_snr_width=xs_snr_width):
                 sda = SpatialDetailAnalyzer()
                 spatial = sda.analyze(sd_a, sd_b, levels=wavelet_levels, crosshair=_ch, roi=_roi,
-                                      xs_snr_width=_xs_snr_width)
+                                      xs_snr_width=_xs_snr_width, nebula_sigma=nebula_sigma,
+                                      nebula_dilation_px=nebula_dilation_px,
+                                      nebula_max_hole_px=nebula_max_hole_px)
                 spatial["used_starless_a"] = self._starless_a is not None
                 spatial["used_starless_b"] = self._starless_b is not None
                 result_a.spatial_metrics = spatial

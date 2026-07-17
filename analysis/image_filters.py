@@ -11,7 +11,7 @@ import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
+from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter, binary_dilation, binary_fill_holes, label
 import pywt
 
 from core.astro_image import AstroImage
@@ -20,7 +20,9 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          WEBER_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
                          XS_SNR_REGION_WIDTH, SECTION8_DIFF_DIST_MAX_SAMPLES,
-                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES)
+                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES,
+                         SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
+                         SECTION8_NEBULA_MASK_MAX_HOLE_PX)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -41,7 +43,10 @@ class SpatialDetailAnalyzer:
                 weber_kernel_sizes: tuple = WEBER_KERNEL_SIZES,
                 crosshair: dict | None = None,
                 roi: tuple | None = None,
-                xs_snr_width: int | None = None) -> dict:
+                xs_snr_width: int | None = None,
+                nebula_sigma: float = SECTION8_NEBULA_MASK_SIGMA,
+                nebula_dilation_px: int = SECTION8_NEBULA_MASK_DILATION_PX,
+                nebula_max_hole_px: int = SECTION8_NEBULA_MASK_MAX_HOLE_PX) -> dict:
 
         image_a.estimate_background()
         if image_b is not None:
@@ -57,6 +62,9 @@ class SpatialDetailAnalyzer:
             "wavelet_snr_b": {},
             "sigma_noise_a": None,
             "sigma_noise_b": None,
+            "nebula_sigma": nebula_sigma,
+            "nebula_dilation_px": nebula_dilation_px,
+            "nebula_max_hole_px": nebula_max_hole_px,
             "weber_contrast_a": {},
             "weber_contrast_b": {},
             "panels": {},
@@ -80,10 +88,10 @@ class SpatialDetailAnalyzer:
             return result
 
         # Nebula / background masks (used for contrast ratio)
-        mask_neb_a, mask_bg_a = self._make_masks(image_a)
+        mask_neb_a, mask_bg_a = self._make_masks(image_a, nebula_sigma, nebula_dilation_px, nebula_max_hole_px)
         mask_neb_b = mask_bg_b = None
         if image_b is not None:
-            mask_neb_b, mask_bg_b = self._make_masks(image_b)
+            mask_neb_b, mask_bg_b = self._make_masks(image_b, nebula_sigma, nebula_dilation_px, nebula_max_hole_px)
 
         # When a user ROI is provided, crop the analysis arrays to that region after
         # normalisation so the global signal mean is used, not the ROI's local mean.
@@ -124,13 +132,19 @@ class SpatialDetailAnalyzer:
         result["display_roi"] = display_roi
 
         # Shared nebula/background regions for noise-corrected A/B scoring and diff
-        # distributions: pixels BOTH images independently classify the same way.
+        # distributions. Nebula is the two-image UNION: a pixel counts as Nebula if
+        # either image independently classifies it that way, so nebula signal that's
+        # marginal in one image (registration offset, PSF, local noise) still counts.
+        # Background stays the two-image INTERSECTION: a pixel counts as Background
+        # only if both images agree, keeping the noise-floor reference population
+        # clean. Per-image nebula-dominance in _make_masks (bg_mask excludes
+        # nebula_mask) guarantees these two combinations never overlap.
         # None in single-image mode.
         mask_neb_shared = mask_bg_shared = None
         if mask_neb_b is not None:
             h_s = min(mask_neb_a.shape[0], mask_neb_b.shape[0])
             w_s = min(mask_neb_a.shape[1], mask_neb_b.shape[1])
-            mask_neb_shared = mask_neb_a[:h_s, :w_s] & mask_neb_b[:h_s, :w_s]
+            mask_neb_shared = mask_neb_a[:h_s, :w_s] | mask_neb_b[:h_s, :w_s]
             mask_bg_shared = mask_bg_a[:h_s, :w_s] & mask_bg_b[:h_s, :w_s]
         result["nc_shared_nebula_pixels"] = (
             int(np.count_nonzero(mask_neb_shared)) if mask_neb_shared is not None else 0
@@ -313,7 +327,10 @@ class SpatialDetailAnalyzer:
             return None
         return bgsub / mean_signal
 
-    def _make_masks(self, image: AstroImage) -> tuple[np.ndarray, np.ndarray]:
+    def _make_masks(self, image: AstroImage,
+                     nebula_sigma: float = SECTION8_NEBULA_MASK_SIGMA,
+                     dilation_px: int = SECTION8_NEBULA_MASK_DILATION_PX,
+                     max_hole_px: int = SECTION8_NEBULA_MASK_MAX_HOLE_PX) -> tuple[np.ndarray, np.ndarray]:
         rms = image.background_rms
         if rms is None:
             rms_val = float(np.std(image.background_subtracted()))
@@ -321,7 +338,7 @@ class SpatialDetailAnalyzer:
             rms_val = float(np.median(rms))
 
         bgsub = image.background_subtracted()
-        nebula_mask = bgsub > 2.0 * rms_val
+        nebula_mask = bgsub > nebula_sigma * rms_val
         bg_mask = bgsub < 0.5 * rms_val
 
         # Fallback: use top-5% as nebula if no pixels pass threshold
@@ -329,7 +346,56 @@ class SpatialDetailAnalyzer:
             threshold = np.percentile(bgsub, 95)
             nebula_mask = bgsub >= threshold
 
+        # Fill small enclosed background gaps, strip small isolated noise-driven
+        # specks (same size threshold — a scattered 1-2px false positive at this
+        # sigma level would otherwise balloon into a ~(2*dilation_px+1)^2 blob per
+        # speck once dilated, polluting blank-sky area far from any real nebula),
+        # then grow into adjacent dim/dark transition regions at nebula edges.
+        # All three are applied before the bg_mask exclusion below, since any of
+        # them can pull previously bg-classified pixels into the nebula mask.
+        nebula_mask = self._fill_small_holes(nebula_mask, max_hole_px)
+        nebula_mask = self._remove_small_objects(nebula_mask, max_hole_px)
+        if dilation_px > 0:
+            nebula_mask = binary_dilation(nebula_mask, iterations=dilation_px)
+
+        # Nebula dominates: keep the two masks mutually exclusive after growth.
+        bg_mask = bg_mask & ~nebula_mask
+
         return nebula_mask, bg_mask
+
+    def _fill_small_holes(self, mask: np.ndarray, max_hole_px: int) -> np.ndarray:
+        """Fill enclosed background gaps inside mask up to (max_hole_px)**2 area."""
+        if max_hole_px <= 0:
+            return mask
+        filled = binary_fill_holes(mask)
+        holes = filled & ~mask
+        labeled, n_holes = label(holes)
+        if n_holes == 0:
+            return mask
+        sizes = np.bincount(labeled.ravel())
+        max_area = max_hole_px * max_hole_px
+        keep = np.zeros(sizes.size, dtype=bool)
+        keep[1:] = sizes[1:] <= max_area   # label 0 is background, not a hole
+        return mask | keep[labeled]
+
+    def _remove_small_objects(self, mask: np.ndarray, max_size_px: int) -> np.ndarray:
+        """Strip isolated foreground specks up to (max_size_px)**2 area.
+
+        Scattered single/few-pixel noise excursions above the nebula sigma
+        threshold are common at a loose (~1.7 sigma) cut. Left in place, dilation
+        would inflate each one into a much larger blob far from any real nebula
+        structure, so small islands are dropped before growth is applied.
+        """
+        if max_size_px <= 0:
+            return mask
+        labeled, n_objects = label(mask)
+        if n_objects == 0:
+            return mask
+        sizes = np.bincount(labeled.ravel())
+        max_area = max_size_px * max_size_px
+        keep = np.zeros(sizes.size, dtype=bool)
+        keep[1:] = sizes[1:] > max_area   # label 0 is background; drop small islands
+        return keep[labeled]
 
     def _nebula_bounding_box(self, mask: np.ndarray,
                               shape: tuple) -> tuple[int, int, int, int] | None:
@@ -506,7 +572,7 @@ class SpatialDetailAnalyzer:
                   mask_bg: np.ndarray) -> tuple[float | None, float | None]:
         """Noise-corrected local-contrast score for one detail map at one scale.
 
-        score = median(|detail|) over the pixels BOTH images classify as nebula
+        score = median(|detail|) over the pixels either image classifies as nebula
         (mask_neb_shared), divided by median(|detail|) over THIS image's own
         background mask — its empirical per-scale noise floor for this operator.
         Returns (score, noise_floor); either is None if a mask selects zero pixels,
@@ -1256,7 +1322,8 @@ class SpatialDetailAnalyzer:
         "Background": "tomato"}) so the two figures read as one visual language.
         Unclassified pixels (neither mask) are left plain grayscale. mask_neb/
         mask_bg are expected to already be the two-image shared classification
-        (mask_neb_a & mask_neb_b) — the exact masks that feed the violin plots
+        (mask_neb_a | mask_neb_b for Nebula, mask_bg_a & mask_bg_b for Background)
+        — the exact masks that feed the violin plots
         and correlation scatter plots — so this figure depicts what those plots
         are actually gated on.
         """

@@ -332,6 +332,167 @@ class TestLogRatioHelper:
         result = SpatialDetailAnalyzer._log_ratio_map(a, b)
         assert np.allclose(result, np.log10(2.0), atol=1e-5)
 
+
+class TestFillSmallHoles:
+    """Direct unit tests of _fill_small_holes's area-limited hole-filling contract."""
+
+    def test_fills_hole_within_size_limit(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.ones((20, 20), dtype=bool)
+        mask[5:8, 5:8] = False   # 3x3 hole, area 9 <= 5**2
+        result = analyzer._fill_small_holes(mask, max_hole_px=5)
+        assert result[5:8, 5:8].all()
+
+    def test_does_not_fill_hole_above_size_limit(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.ones((30, 30), dtype=bool)
+        mask[5:15, 5:15] = False   # 10x10 hole, area 100 > 5**2
+        result = analyzer._fill_small_holes(mask, max_hole_px=5)
+        assert not result[10, 10]
+
+    def test_zero_max_hole_px_is_noop(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.ones((10, 10), dtype=bool)
+        mask[3:5, 3:5] = False
+        result = analyzer._fill_small_holes(mask, max_hole_px=0)
+        assert np.array_equal(result, mask)
+
+    def test_hole_touching_border_is_not_filled(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.ones((20, 20), dtype=bool)
+        mask[0:3, 0:3] = False   # touches the array border -> not an enclosed hole
+        result = analyzer._fill_small_holes(mask, max_hole_px=5)
+        assert not result[0:3, 0:3].any()
+
+
+class TestRemoveSmallObjects:
+    """Direct unit tests of _remove_small_objects's area-limited speck-removal
+    contract — the fix for dilation amplifying isolated noise-driven pixels into
+    large blobs (see TestMakeMasksGrowth.test_dilation_does_not_amplify_noise_specks)."""
+
+    def test_removes_object_within_size_limit(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.zeros((20, 20), dtype=bool)
+        mask[5:8, 5:8] = True   # 3x3 speck, area 9 <= 5**2
+        result = analyzer._remove_small_objects(mask, max_size_px=5)
+        assert not result.any()
+
+    def test_keeps_object_above_size_limit(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.zeros((30, 30), dtype=bool)
+        mask[5:15, 5:15] = True   # 10x10 object, area 100 > 5**2
+        result = analyzer._remove_small_objects(mask, max_size_px=5)
+        assert result[10, 10]
+
+    def test_zero_max_size_px_is_noop(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.zeros((10, 10), dtype=bool)
+        mask[3:5, 3:5] = True
+        result = analyzer._remove_small_objects(mask, max_size_px=0)
+        assert np.array_equal(result, mask)
+
+    def test_mixed_sizes_keeps_only_large_object(self):
+        analyzer = SpatialDetailAnalyzer()
+        mask = np.zeros((30, 30), dtype=bool)
+        mask[2, 2] = True                 # isolated 1px speck
+        mask[20:28, 20:28] = True         # 8x8 real object, area 64 > 25
+        result = analyzer._remove_small_objects(mask, max_size_px=5)
+        assert not result[2, 2]
+        assert result[24, 24]
+
+
+class _FakeMaskImage:
+    """Minimal duck-typed stand-in for AstroImage, exposing only what
+    _make_masks reads (background_rms, background_subtracted())."""
+
+    def __init__(self, data: np.ndarray, rms: np.ndarray):
+        self._data = data
+        self.background_rms = rms
+
+    def background_subtracted(self) -> np.ndarray:
+        return self._data
+
+
+class TestMakeMasksGrowth:
+    """Direct unit tests of _make_masks's dilation and nebula-dominance contract."""
+
+    def _bright_square_image(self, size=40, lo=15, hi=25, value=100.0):
+        data = np.zeros((size, size), dtype=np.float32)
+        data[lo:hi, lo:hi] = value
+        rms = np.full((size, size), 1.0, dtype=np.float32)
+        return _FakeMaskImage(data, rms)
+
+    def test_dilation_grows_nebula_mask(self):
+        analyzer = SpatialDetailAnalyzer()
+        image = self._bright_square_image()
+        neb_none, _ = analyzer._make_masks(image, nebula_sigma=1.7, dilation_px=0, max_hole_px=0)
+        neb_grown, _ = analyzer._make_masks(image, nebula_sigma=1.7, dilation_px=3, max_hole_px=0)
+        assert np.count_nonzero(neb_grown) > np.count_nonzero(neb_none)
+        assert np.all(neb_grown[neb_none])   # superset of the ungrown mask
+
+    def test_background_excludes_dilated_nebula_pixels(self):
+        analyzer = SpatialDetailAnalyzer()
+        image = self._bright_square_image()
+        neb, bg = analyzer._make_masks(image, nebula_sigma=1.7, dilation_px=3, max_hole_px=0)
+        assert not np.any(neb & bg)   # masks stay mutually exclusive after growth
+        assert neb[14, 20]   # grown one row above the bright square's top edge
+        assert not bg[14, 20]   # nebula dominates: excluded from background
+
+    def test_zero_dilation_matches_undilated_threshold(self):
+        analyzer = SpatialDetailAnalyzer()
+        image = self._bright_square_image()
+        neb, _ = analyzer._make_masks(image, nebula_sigma=1.7, dilation_px=0, max_hole_px=0)
+        expected = image.background_subtracted() > 1.7 * 1.0
+        assert np.array_equal(neb, expected)
+
+    def test_dilation_does_not_amplify_isolated_noise_specks(self):
+        """Regression test: dilation must not inflate scattered single-pixel
+        threshold-crossings (expected at a loose ~1.7 sigma cut) into large blobs
+        far from any real nebula structure. _make_masks strips small islands via
+        _remove_small_objects before dilating, so an isolated speck should vanish
+        entirely rather than grow."""
+        analyzer = SpatialDetailAnalyzer()
+        size = 60
+        data = np.zeros((size, size), dtype=np.float32)
+        data[25:35, 25:35] = 100.0   # real nebula core
+        data[5, 5] = 100.0            # isolated single-pixel noise-like speck
+        rms = np.full((size, size), 1.0, dtype=np.float32)
+        image = _FakeMaskImage(data, rms)
+        neb, _ = analyzer._make_masks(image, nebula_sigma=1.7, dilation_px=3, max_hole_px=5)
+        assert not neb[2:9, 2:9].any()   # speck stripped before it could be dilated
+        assert neb[30, 30]   # the real core is still classified as nebula
+
+
+class TestSharedMaskCombination:
+    """mask_neb_shared changed from two-image AND to OR; mask_bg_shared stays AND.
+    _make_masks is monkeypatched to return controlled, disjoint per-image masks so
+    the combination formula in analyze() is tested in isolation from noise/threshold
+    behaviour, following the _auto_detect_top_rois monkeypatch precedent in
+    test_edge_analyzer.py."""
+
+    def test_nebula_union_counts_pixels_unique_to_either_image(self, astro_image_a, monkeypatch):
+        shape = astro_image_a.background_subtracted().shape
+
+        neb_a = np.zeros(shape, dtype=bool)
+        neb_a[0:10, 0:10] = True
+        bg_a = np.ones(shape, dtype=bool)
+        bg_a[0:10, 0:10] = False
+
+        neb_b = np.zeros(shape, dtype=bool)
+        neb_b[20:30, 20:30] = True   # disjoint from neb_a
+        bg_b = np.ones(shape, dtype=bool)
+        bg_b[20:30, 20:30] = False
+
+        calls = iter([(neb_a, bg_a), (neb_b, bg_b)])
+        monkeypatch.setattr(
+            SpatialDetailAnalyzer, "_make_masks",
+            lambda self, image, nebula_sigma=None, dilation_px=None, max_hole_px=None: next(calls))
+
+        result = SpatialDetailAnalyzer().analyze(astro_image_a, astro_image_a)
+        # Union of two disjoint 10x10 regions: under the old AND semantics this
+        # would be 0 (no true overlap); under OR it's the full 200-pixel footprint.
+        assert result["nc_shared_nebula_pixels"] == 200
+
     def test_opposite_sign_equal_magnitude_gives_zero(self):
         a = np.full((10, 10), -5.0, dtype=np.float32)
         b = np.full((10, 10), 5.0, dtype=np.float32)
