@@ -33,6 +33,8 @@ class TestAnalyze:
         assert original["a"] is not None
         assert original["b"] is None
         assert original["diff"] is None
+        assert "original" in result["figures"]
+        assert "corr_original" not in result["figures"]
 
     def test_contrast_ratios_are_positive(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
@@ -218,6 +220,8 @@ class TestNoiseCorrectedContrast:
         assert original["b"] is not None
         assert original["diff"] is not None
         assert original["a"].shape == original["b"].shape
+        assert "original" in nc_result["figures"]
+        assert "corr_original" in nc_result["figures"]
 
     def test_normalized_panel_values_differ_from_raw(self, nc_result):
         panels = nc_result["panels"]
@@ -532,7 +536,8 @@ class TestMaskIllustrationFigure:
 
 class TestCorrelationScatterFigures:
     _CORR_KEYS = (
-        [f"corr_std_{ks}px" for ks in STD_KERNEL_SIZES]
+        ["corr_original"]
+        + [f"corr_std_{ks}px" for ks in STD_KERNEL_SIZES]
         + [f"corr_log_{s}" for s in LOG_SIGMAS]
         + [f"corr_gradient_{s}" for s in LOG_SIGMAS]
         + ["corr_wavelet_2", "corr_wavelet_3"]
@@ -593,3 +598,96 @@ class TestCrosshairEmbeddedCrossSections:
     def test_weber_nrm_figures_present_with_crosshair(self, nc_result_with_crosshair):
         figs = nc_result_with_crosshair["figures"]
         assert any(k.startswith("nrm_weber_") for k in figs)
+
+    def test_original_present_with_crosshair(self, nc_result_with_crosshair):
+        assert "original" in nc_result_with_crosshair["figures"]
+
+
+class TestCrosshairToCroppedPx:
+    """Unit tests for the helper that overlays the user's cross-section line
+    directly onto the Image A/B map panels — converts a normalised [0,1]
+    crosshair into pixel coords matching _crop_border's own offset math."""
+
+    def test_none_crosshair_returns_none(self):
+        assert SpatialDetailAnalyzer._crosshair_to_cropped_px(None, (200, 200), 0.05) is None
+
+    def test_full_diagonal_line_cropped(self):
+        # 200x200 array, 5% crop -> n = 10 px removed from each edge.
+        crosshair = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+        result = SpatialDetailAnalyzer._crosshair_to_cropped_px(crosshair, (200, 200), 0.05)
+        assert result == pytest.approx((-10.0, -10.0, 190.0, 190.0))
+
+    def test_center_point_unaffected_by_crop_offset(self):
+        crosshair = {"x0": 0.5, "y0": 0.5, "x1": 0.5, "y1": 0.5}
+        x0, y0, x1, y1 = SpatialDetailAnalyzer._crosshair_to_cropped_px(
+            crosshair, (200, 200), 0.05)
+        assert x0 == pytest.approx(90.0)
+        assert y0 == pytest.approx(90.0)
+        assert (x0, y0) == pytest.approx((x1, y1))
+
+    def test_small_array_below_crop_threshold_no_offset(self):
+        # _crop_border only crops when shape > 2n; a tiny array stays uncropped,
+        # so the returned pixel coords must have zero offset applied.
+        crosshair = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+        result = SpatialDetailAnalyzer._crosshair_to_cropped_px(crosshair, (10, 10), 0.5)
+        assert result == pytest.approx((0.0, 0.0, 10.0, 10.0))
+
+
+class TestSectionSpatialReportOrder:
+    """Integration check on report/report_builder.py::_section_spatial's HTML
+    output: the reorganized subsection order (8a Background, 8b Original Image,
+    8c Log-Ratio Distribution, 8d LoG, 8e Wavelet, 8f Gradient, 8g Local Std,
+    8h Weber, 8i NC overview), and the fix for the alphabetic-sort bug that put
+    e.g. nrm_std_10px before nrm_std_3px/5px."""
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def section_html(cls, nc_result):
+        from core.models import AnalysisResult
+        from report.report_builder import ReportBuilder
+
+        ra = AnalysisResult(label="A", spatial_metrics=nc_result)
+        rb = AnalysisResult(label="B", spatial_metrics=nc_result)
+        return ReportBuilder()._section_spatial(ra, rb)
+
+    def test_headings_present_in_order(self, section_html):
+        import re
+        expected = ["8a", "8b", "8c", "8d", "8e", "8f", "8g", "8h", "8i"]
+        found = re.findall(r"<h3>(8[a-i])\.", section_html)
+        assert found == expected
+
+    def test_original_image_section_present(self, section_html):
+        assert "8b. Original Image" in section_html
+        assert 'alt="original"' in section_html or "original" in section_html
+
+    def test_local_std_now_in_contrast_group_after_gradient(self, section_html):
+        assert section_html.index("8f. Gradient Magnitude") < section_html.index(
+            "8g. Local Standard Deviation Maps")
+
+    def test_weber_after_local_std(self, section_html):
+        assert section_html.index("8g. Local Standard Deviation Maps") < section_html.index(
+            "8h. Weber Fraction Contrast Maps")
+
+    def test_nrm_std_figures_in_ascending_kernel_order(self, section_html):
+        # Regression test: figs_for()'s old lexicographic sorted(figs) rendered
+        # nrm_std_10px before nrm_std_3px/5px. _family_nrm_figs must not.
+        positions = {
+            ks: section_html.find(f'"nrm_std_{ks}px"')
+            for ks in STD_KERNEL_SIZES
+        }
+        assert all(p >= 0 for p in positions.values())
+        ordered = sorted(STD_KERNEL_SIZES)
+        for a, b in zip(ordered, ordered[1:]):
+            assert positions[a] < positions[b]
+
+    def test_no_stale_letter_references(self, section_html):
+        import re
+        # Strip embedded base64 image data first — long random-looking base64
+        # blobs incidentally contain "8<letter>" substrings that aren't section
+        # references at all.
+        prose = re.sub(r"data:image/png;base64,[A-Za-z0-9+/=]+", "", section_html)
+        # Every literal "8<letter>" reference must be one of the 9 valid new
+        # letters — a stray old letter (e.g. a missed "8e" -> "8h" rename)
+        # would show up here.
+        for m in re.finditer(r"\b8([a-z])\b", prose):
+            assert m.group(1) in "abcdefghi", f"unexpected section letter: 8{m.group(1)}"

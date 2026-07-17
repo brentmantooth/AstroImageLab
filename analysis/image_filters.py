@@ -177,6 +177,46 @@ class SpatialDetailAnalyzer:
 
         _label_b = image_b.label if image_b is not None else None
 
+        # Original image family: the raw source data itself, analysed with the same
+        # map-pair layout (A|B, log-ratio, cross-section, histogram, correlation) as
+        # every derived metric below — not a filter, just the input they all share.
+        xs_raw_orig = None
+        xs_line_orig = None
+        if crosshair_roi is not None and analysis_b is not None:
+            pos, pa = self._sample_line(analysis_a, **crosshair_roi)
+            _, pb = self._sample_line(analysis_b, **crosshair_roi)
+            xs_raw_orig = (pos, pa, pb, image_a.label, _label_b,
+                           "Cross-section — Original (normalised image)")
+            xs_line_orig = self._crosshair_to_cropped_px(
+                crosshair_roi, analysis_a.shape, SECTION8_BORDER_CROP_FRACTION)
+
+        if analysis_b is not None:
+            orig_fig = self._plot_side_by_side(
+                self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
+                self._crop_border(analysis_b, SECTION8_BORDER_CROP_FRACTION),
+                f"Original (normalised) — {image_a.label}",
+                f"Original (normalised) — {_label_b}",
+                diff_title="Log ratio (A/B), original image",
+                cmap=SECTION8_ANALYSIS_CMAP,
+                display_roi=None,
+                xs_data=xs_raw_orig,
+                xs_line=xs_line_orig,
+            )
+        else:
+            orig_fig = self._plot_single(
+                self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
+                f"Original (normalised) — {image_a.label}",
+                cmap=SECTION8_ANALYSIS_CMAP,
+            )
+        figures["original"] = fig_to_b64(orig_fig, dpi=150)
+
+        if mask_neb_shared is not None:
+            orig_corr_fig = self._plot_metric_correlation(
+                analysis_a, analysis_b, original_diff, mask_neb_shared, mask_bg_shared,
+                image_a.label, _label_b, "Original (normalised image)", diff_dist_rng)
+            if orig_corr_fig is not None:
+                figures["corr_original"] = fig_to_b64(orig_corr_fig, dpi=150)
+
         # 1-5. Local std, LoG, wavelet, Weber, gradient — all read norm_a/norm_b with no
         # shared mutable state, so they run concurrently. Each method returns
         # (b64_figs, partial_result).
@@ -488,11 +528,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(std_a, **crosshair)
                 _, pb = self._sample_line(std_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Local σ, kernel {ks}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, std_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -505,6 +547,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -531,6 +574,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
@@ -727,11 +771,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(log_a, **crosshair)
                 _, pb = self._sample_line(log_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — |LoG|, σ={sigma}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, log_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -744,6 +790,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -770,6 +817,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
         return figs_to_b64(figures, dpi=150), partial
 
@@ -830,11 +878,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(gm_a, **crosshair)
                 _, pb = self._sample_line(gm_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Gradient, σ={sigma}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, gm_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -847,6 +897,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -873,6 +924,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
         return figs_to_b64(figures, dpi=150), partial
 
@@ -964,11 +1016,13 @@ class SpatialDetailAnalyzer:
                     "diff": None,
                 }
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(rec_a, **crosshair)
                 _, pb = self._sample_line(rec_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Wavelet level {display_level}")
+                xs_line = self._crosshair_to_cropped_px(crosshair, rec_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -980,6 +1034,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -1005,6 +1060,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
@@ -1102,11 +1158,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(wc_a, **crosshair)
                 _, pb = self._sample_line(wc_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Weber contrast, kernel {ks}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, wc_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -1119,6 +1177,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,    # unbounded output; PowerNorm compresses dynamic range
                     display_roi=None,       # _crop_border already applied
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -1145,6 +1204,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
@@ -1186,9 +1246,13 @@ class SpatialDetailAnalyzer:
                             nonlinear_norm: bool = False,
                             display_roi=None,
                             smooth_display: bool = True,
-                            xs_data: tuple | None = None) -> plt.Figure:
+                            xs_data: tuple | None = None,
+                            xs_line: tuple | None = None) -> plt.Figure:
         """xs_data, if given, is (pos, prof_a, prof_b, label_a, label_b, xs_title)
-        for the embedded cross-section panel; None leaves that panel blank."""
+        for the embedded cross-section panel; None leaves that panel blank.
+        xs_line, if given, is (x0, y0, x1, y1) pixel coords (in arr_a/arr_b's own
+        frame, post any cropping already applied by the caller) of the user's
+        cross-section line, overlaid directly on the Image A/B panels above."""
         # Crop to bright-feature ROI if available
         if display_roi is not None:
             r0, r1, c0, c1 = display_roi
@@ -1247,6 +1311,15 @@ class SpatialDetailAnalyzer:
                            vmin=None if norm is not None else vmin,
                            vmax=None if norm is not None else vmax,
                            interpolation="nearest", aspect="equal")
+            if xs_line is not None:
+                # Lock the view before plotting — otherwise matplotlib autoscales to
+                # include line endpoints outside the (already-cropped) array, adding
+                # unwanted blank padding around the image.
+                ax.set_xlim(-0.5, arr.shape[1] - 0.5)
+                ax.set_ylim(arr.shape[0] - 0.5, -0.5)   # origin="upper"
+                lx0, ly0, lx1, ly1 = xs_line
+                ax.plot([lx0, lx1], [ly0, ly1], color="#ff7f0e",
+                        linewidth=1.5, alpha=XS_LINE_ALPHA, zorder=5)
             ax.set_title(title, fontsize=10)
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -1549,6 +1622,21 @@ class SpatialDetailAnalyzer:
         if arr.shape[0] > 2 * n and arr.shape[1] > 2 * n:
             return arr[n:-n, n:-n]
         return arr
+
+    @staticmethod
+    def _crosshair_to_cropped_px(crosshair: dict | None, shape: tuple,
+                                  crop_fraction: float) -> tuple[float, float, float, float] | None:
+        """Convert a normalised [0,1] crosshair dict (in the coordinate frame of an
+        array with `shape`) to pixel coords in the frame _crop_border(arr, crop_fraction)
+        produces for that array — mirrors _crop_border's own offset math exactly, so the
+        overlay lines up pixel-for-pixel with the already-cropped display arrays."""
+        if crosshair is None:
+            return None
+        H, W = shape[:2]
+        n = max(1, int(min(H, W) * crop_fraction))
+        off_y, off_x = (n, n) if (H > 2 * n and W > 2 * n) else (0, 0)
+        return (crosshair["x0"] * W - off_x, crosshair["y0"] * H - off_y,
+                crosshair["x1"] * W - off_x, crosshair["y1"] * H - off_y)
 
     @staticmethod
     def _stretch_for_display(arr: np.ndarray) -> np.ndarray:
