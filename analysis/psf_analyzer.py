@@ -6,9 +6,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from astropy.modeling import fitting
-from astropy.modeling.models import Moffat2D
-from astropy.stats import median_absolute_deviation as mad
+from astropy.stats import median_absolute_deviation as mad, mad_std
 from astropy.table import Table
 from photutils.psf import EPSFBuilder, extract_stars
 
@@ -16,16 +14,12 @@ from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
 from core.models import (SEEING_WARN_FWHM_ARCS, PSF_BETA_MIN, PSF_BETA_MAX, PSF_FWHM_CLIP_NSIGMA,
                           ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC, EPSF_MAX_STARS)
+from analysis.moffat_fit import fit_moffat2d_core
 from analysis.star_catalog import StarCatalogBuilder
 
 CUTOUT_SIZE = 25   # pixels per side for per-star cutouts
 EPSF_OVERSAMPLING = 2
 EPSF_MAXITERS = 15
-
-
-def _moffat_fwhm(gamma: float, alpha: float) -> float:
-    """FWHM from astropy Moffat2D gamma/alpha parameters."""
-    return 2.0 * gamma * np.sqrt(2.0 ** (1.0 / alpha) - 1.0)
 
 
 class PSFAnalyzer:
@@ -167,7 +161,6 @@ class PSFAnalyzer:
     # ------------------------------------------------------------------
 
     def _fit_moffat_all(self, bgsub: np.ndarray, stars: Table) -> list[dict]:
-        fitter = fitting.LevMarLSQFitter()
         results = []
         h, w = bgsub.shape
         half = CUTOUT_SIZE // 2
@@ -180,45 +173,33 @@ class PSFAnalyzer:
             x1 = min(w, xc + half + 1)
             y1 = min(h, yc + half + 1)
             cutout = bgsub[y0:y1, x0:x1].copy()
-            if cutout.size == 0:
-                continue
 
-            cy, cx = np.mgrid[0:cutout.shape[0], 0:cutout.shape[1]]
-            amp = float(np.max(cutout))
-            cx0 = cutout.shape[1] / 2.0
-            cy0 = cutout.shape[0] / 2.0
-
-            model = Moffat2D(amplitude=amp, x_0=cx0, y_0=cy0, gamma=2.0, alpha=2.5)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                try:
-                    fitted = fitter(model, cx, cy, cutout)
-                except Exception:
-                    continue
-
-            gamma = abs(fitted.gamma.value)
-            alpha = abs(fitted.alpha.value)
-            if not (PSF_BETA_MIN <= alpha <= PSF_BETA_MAX) or gamma < 0.1:
+            fit = fit_moffat2d_core(
+                cutout,
+                alpha_bounds=(PSF_BETA_MIN, PSF_BETA_MAX),
+                gamma_min=0.1,
+                fwhm_bounds=(0.5, CUTOUT_SIZE),
+            )
+            if fit is None:
                 continue
-            fwhm = _moffat_fwhm(gamma, alpha)
-            if fwhm < 0.5 or fwhm > CUTOUT_SIZE:
-                continue
-            results.append({"x": xc, "y": yc, "fwhm": fwhm, "alpha": alpha, "gamma": gamma,
-                            "peak": float(amp)})
+            results.append({"x": xc, "y": yc, **fit})
 
         return results
 
     @staticmethod
     def _sigma_clip_fwhm(fits: list[dict]) -> list[dict]:
-        """Remove fits whose FWHM deviates more than PSF_FWHM_CLIP_NSIGMA*MAD from median.
+        """Remove fits whose FWHM deviates more than PSF_FWHM_CLIP_NSIGMA*sigma from median.
 
-        Requires at least 5 fits; returns the list unchanged if MAD is zero.
+        Uses mad_std (the sigma-scaled MAD, ~1.4826x raw MAD) rather than the raw
+        median_absolute_deviation used for the reported *_mad dispersion fields, so
+        PSF_FWHM_CLIP_NSIGMA is an actual sigma multiple rather than a raw-MAD multiple.
+        Requires at least 5 fits; returns the list unchanged if the scaled MAD is zero.
         """
         if len(fits) < 5:
             return fits
         fwhms = np.array([f["fwhm"] for f in fits])
         med = float(np.median(fwhms))
-        m = float(mad(fwhms))
+        m = float(mad_std(fwhms))
         if m == 0:
             return fits
         return [f for f in fits if abs(f["fwhm"] - med) <= PSF_FWHM_CLIP_NSIGMA * m]
