@@ -5,6 +5,7 @@ from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QSplitter, QMessageBox, QFileDialog, QPushButton,
+    QToolBar,
 )
 
 from gui.image_panel import ImagePanel
@@ -18,7 +19,7 @@ class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Astro Image Lab")
-        self.resize(1400, 900)
+        self.resize(1600, 900)   # control panel's 2-col Parameters needs ~1473px natural width
 
         self._thread: AnalysisThread | None = None
         self._roi: tuple | None = None
@@ -26,6 +27,8 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_menu()
+        # Needs self._control (from _build_ui) and self._act_* (from _build_menu)
+        self._build_toolbar()
         self._start_update_check()
 
     # ------------------------------------------------------------------
@@ -49,7 +52,10 @@ class MainWindow(QMainWindow):
 
         # Control panel below images
         self._control = AnalysisControlPanel()
-        self._control.setMaximumHeight(444)   # 13 Parameters rows (was 410 for 12 rows) — bump proportionally when adding new QFormLayout rows
+        self._control.setMaximumHeight(300)   # 2-col Parameters (General/PSF | Nebula & Local-Maxima)
+                                               # is tallest at ~278px natural height (measured via
+                                               # QGroupBox.sizeHint()); Metrics ~234px, Region & Run
+                                               # ~232px. Re-measure and adjust if a column gains rows.
         main_layout.addWidget(self._control)
 
         # Wire signals
@@ -80,13 +86,13 @@ class MainWindow(QMainWindow):
         mb = self.menuBar()
 
         file_menu = mb.addMenu("&File")
-        act_open_a = QAction("Open Image &A…", self)
-        act_open_a.triggered.connect(self._panel_a._open_file)
-        file_menu.addAction(act_open_a)
+        self._act_open_a = QAction("Open Image &A…", self)
+        self._act_open_a.triggered.connect(self._panel_a._open_file)
+        file_menu.addAction(self._act_open_a)
 
-        act_open_b = QAction("Open Image &B…", self)
-        act_open_b.triggered.connect(self._panel_b._open_file)
-        file_menu.addAction(act_open_b)
+        self._act_open_b = QAction("Open Image &B…", self)
+        self._act_open_b.triggered.connect(self._panel_b._open_file)
+        file_menu.addAction(self._act_open_b)
 
         file_menu.addSeparator()
         act_open_inspector = QAction("Open Report &Inspector…", self)
@@ -99,9 +105,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_quit)
 
         analysis_menu = mb.addMenu("&Analysis")
-        act_run = QAction("&Run Analysis", self)
-        act_run.triggered.connect(lambda: self._control._on_run())
-        analysis_menu.addAction(act_run)
+        self._act_run = QAction("&Run Analysis", self)
+        self._act_run.triggered.connect(lambda: self._control._on_run())
+        analysis_menu.addAction(self._act_run)
 
         tools_menu = mb.addMenu("&Tools")
         act_synth = QAction("Synthetic Star &Data…", self)
@@ -125,6 +131,29 @@ class MainWindow(QMainWindow):
         act_about = QAction("&About", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
+
+    def _build_toolbar(self) -> None:
+        tb = QToolBar("Main", self)
+        tb.setMovable(False)
+        tb.setFloatable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.addToolBar(tb)
+
+        tb.addAction(self._act_open_a)
+        tb.addAction(self._act_open_b)
+        tb.addSeparator()
+
+        self._act_toolbar_roi = QAction("Select ROI…", self)
+        self._act_toolbar_roi.triggered.connect(lambda: self._control._roi_btn.click())
+        tb.addAction(self._act_toolbar_roi)
+
+        self._act_toolbar_line = QAction("Select Line…", self)
+        self._act_toolbar_line.triggered.connect(lambda: self._control._line_btn.click())
+        tb.addAction(self._act_toolbar_line)
+        tb.addSeparator()
+
+        tb.addAction(self._act_run)
+        self._act_run.setEnabled(False)   # matches Run button's initial disabled state
 
     # ------------------------------------------------------------------
     # Slots
@@ -173,10 +202,27 @@ class MainWindow(QMainWindow):
         elif mode == "deg_b":
             self._panel_b.load_path(degraded_path)
 
+    def _set_run_enabled(self, enabled: bool) -> None:
+        self._control.set_run_enabled(enabled)
+        self._act_run.setEnabled(enabled)
+
     def _on_image_loaded(self, img) -> None:
+        # A newly loaded image may not match the dimensions of whatever ROI/cross-section
+        # was drawn against the previous image pair — reset both outright rather than
+        # rely solely on _on_run's reactive out-of-bounds check (see CLAUDE.md's
+        # "Stale ROI crashes Section 8..." pitfall).
+        self._roi = None
+        self._crosshair = None
+        self._control.set_roi(None)
+        self._control.set_line(None)
+        self._panel_a.clear_roi_overlay()
+        self._panel_b.clear_roi_overlay()
+        self._panel_a.clear_line_overlay()
+        self._panel_b.clear_line_overlay()
+
         either_loaded = (self._panel_a.image is not None or
                          self._panel_b.image is not None)
-        self._control.set_run_enabled(either_loaded)
+        self._set_run_enabled(either_loaded)
         if self._panel_a.image is not None and self._panel_b.image is not None:
             self._control.set_alignment_status("Waiting for analysis…", ok=True)
         elif either_loaded:
@@ -185,6 +231,7 @@ class MainWindow(QMainWindow):
     def _on_roi_mode_toggled(self, enabled: bool) -> None:
         self._panel_a.set_roi_mode(enabled)
         self._panel_b.set_roi_mode(enabled)
+        self._act_toolbar_roi.setText("Cancel ROI" if enabled else "Select ROI…")
         if not enabled:
             self._control.set_roi(self._roi)
 
@@ -198,6 +245,7 @@ class MainWindow(QMainWindow):
     def _on_line_mode_toggled(self, enabled: bool) -> None:
         self._panel_a.set_line_mode(enabled)
         self._panel_b.set_line_mode(enabled)
+        self._act_toolbar_line.setText("Cancel Line" if enabled else "Select Line…")
 
     def _on_line_selected(self, x0n: float, y0n: float,
                            x1n: float, y1n: float) -> None:
@@ -234,7 +282,7 @@ class MainWindow(QMainWindow):
         if img_a is None and img_b is None:
             QMessageBox.warning(self, "Missing images",
                                 "Please load at least one image before running.")
-            self._control.set_run_enabled(True)
+            self._set_run_enabled(True)
             return
 
         # If only one image is loaded, confirm single-image mode
@@ -249,7 +297,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
             )
             if answer != QMessageBox.StandardButton.Yes:
-                self._control.set_run_enabled(True)
+                self._set_run_enabled(True)
                 return
             # Ensure img_a is always the loaded image so downstream code is uniform
             if img_a is None:
@@ -277,7 +325,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.No:
-                self._control.set_run_enabled(True)
+                self._set_run_enabled(True)
                 return
 
         # Warn if no cross-section line has been drawn
@@ -293,7 +341,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
             )
             if answer != QMessageBox.StandardButton.Yes:
-                self._control.set_run_enabled(True)
+                self._set_run_enabled(True)
                 return
 
         # A previously-drawn ROI is never auto-cleared when a new image is loaded, so it
@@ -355,7 +403,7 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, result_a, result_b, report_path: str) -> None:
         self._control.reset_progress()
-        self._control.set_run_enabled(True)
+        self._set_run_enabled(True)
         msg = "Analysis complete."
         if report_path:
             msg += f"\nReport saved to:\n{report_path}"
@@ -407,7 +455,7 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg: str) -> None:
         self._control.reset_progress()
-        self._control.set_run_enabled(True)
+        self._set_run_enabled(True)
         QMessageBox.critical(self, "Analysis error", msg)
 
     def _start_update_check(self) -> None:
