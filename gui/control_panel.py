@@ -16,6 +16,7 @@ from core.models import (
     MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC, XS_SNR_REGION_WIDTH,
     EPSF_MAX_STARS, SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
     SECTION8_NEBULA_MASK_MAX_HOLE_PX,
+    SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
 )
 
 
@@ -197,6 +198,26 @@ class AnalysisControlPanel(QWidget):
         self._nebula_max_hole_px.setToolTip("Fills enclosed background gaps up to this size (px per side)\n"
                                              "inside the Section 8 nebula mask, before dilation.")
         params_layout.addRow("Nebula mask hole-fill (px):", self._nebula_max_hole_px)
+
+        self._localmax_footprint_mult = QDoubleSpinBox()
+        self._localmax_footprint_mult.setRange(1.0, 6.0)
+        self._localmax_footprint_mult.setSingleStep(0.5)
+        self._localmax_footprint_mult.setDecimals(2)
+        self._localmax_footprint_mult.setValue(SECTION8_LOCALMAX_FOOTPRINT_MULT)
+        self._localmax_footprint_mult.setToolTip(
+            "Section 8j local-maxima mask: neighbourhood size, as a multiple of\n"
+            "each metric's own spatial scale, used to test whether a pixel is a local maximum.")
+        params_layout.addRow("Local-maxima footprint (× scale):", self._localmax_footprint_mult)
+
+        self._localmax_prominence_pctl = QDoubleSpinBox()
+        self._localmax_prominence_pctl.setRange(50.0, 99.9)
+        self._localmax_prominence_pctl.setSingleStep(1.0)
+        self._localmax_prominence_pctl.setDecimals(1)
+        self._localmax_prominence_pctl.setValue(SECTION8_LOCALMAX_PROMINENCE_PERCENTILE)
+        self._localmax_prominence_pctl.setToolTip(
+            "Section 8j local-maxima mask: minimum peak height, as a percentile of\n"
+            "each scale's own combined |A|,|B| peak-source values.")
+        params_layout.addRow("Local-maxima prominence (pctl):", self._localmax_prominence_pctl)
 
         self._pixel_scale_override = QDoubleSpinBox()
         self._pixel_scale_override.setRange(0.0, 20.0)
@@ -400,6 +421,8 @@ class AnalysisControlPanel(QWidget):
             "nebula_sigma": self._nebula_sigma.value(),
             "nebula_dilation_px": self._nebula_dilation_px.value(),
             "nebula_max_hole_px": self._nebula_max_hole_px.value(),
+            "localmax_footprint_mult": self._localmax_footprint_mult.value(),
+            "localmax_prominence_percentile": self._localmax_prominence_pctl.value(),
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "epsf_max_stars": self._epsf_max_stars.value(),
             "roi": self._roi,

@@ -40,12 +40,16 @@ XS_SNR_REGION_WIDTH = 15   # px; width of bright/dark sample region for cross-se
 EPSF_MAX_STARS = 600   # maximum candidate stars passed to EPSFBuilder; limits computation time
 SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension cropped from perimeter in Section 8 display maps
 SECTION8_ANALYSIS_CMAP = "viridis"     # colormap for Section 8 A/B analysis map panels (std, LoG, wavelet)
-SECTION8_DIFF_DIST_MAX_SAMPLES = 1000000  # per masked population, per scale — caps violin/KDE cost on full-res diff maps
 SECTION8_LOGRATIO_EPS_PERCENTILE = 1.0   # percentile of pooled positive |A|,|B| values used as the epsilon floor in log10(|A|/|B|)
 SECTION8_SCATTER_MAX_SAMPLES = 50000     # per masked population, per scale — caps render cost of Section 8g correlation scatter plots
 SECTION8_NEBULA_MASK_SIGMA = 1.7   # ×RMS above background = "Nebula" pixel classification (Section 8 masks); background cut stays fixed at 0.5×RMS
 SECTION8_NEBULA_MASK_DILATION_PX = 3   # px; scipy.ndimage.binary_dilation iterations to grow the nebula mask into adjacent dim/dark nebula regions
 SECTION8_NEBULA_MASK_MAX_HOLE_PX = 5   # px; enclosed background gaps up to this many pixels per side (area ≤ N²) inside the nebula mask are filled before dilation
+SECTION8_LOCALMAX_FOOTPRINT_MULT = 2.0           # multiplier on each metric's own characteristic scale (kernel px / sigma px / 2**level) used as the maximum_filter footprint (peak/non-max-suppression neighbourhood) for Section 8j local-maxima detection
+SECTION8_LOCALMAX_PROMINENCE_PERCENTILE = 99.0   # percentile of the (smoothed) per-scale |A|,|B|-combined peak-source array used as the minimum local-maximum height (Section 8j)
+SECTION8_LOCALMAX_PRESMOOTH_FRACTION = 0.5       # fraction of each metric's own scale used as the Gaussian pre-smoothing sigma applied to the peak-source array before maximum_filter detection, to suppress single-pixel noise-driven false maxima (Section 8j); detection only — masked-region statistics are still measured on the raw, unsmoothed maps
+SECTION8_LOCALMAX_REGION_FRACTION = 0.5          # fraction of the maximum_filter footprint used as the binary_dilation radius (px) grown around each detected peak pixel, so the mask covers the local neighbourhood around a peak rather than a single pixel (Section 8j)
+SECTION8_LOCALMAX_DIST_MAX_SAMPLES = 1000000     # per masked population, per scale — caps render cost of the Section 8j A/B distribution violin+box figure; mean/std/significance-test stats are computed from the full population, not this capped copy
 
 PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
 PSF_SPATIAL_MAP_SMOOTH_SIGMA = 5.0   # Gaussian smoothing sigma (px) applied to spatial maps before display

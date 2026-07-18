@@ -16,6 +16,8 @@ from report.report_builder import (
     _arr_to_b64_png,
     _fig_to_b64,
     _psf_stat_test,
+    _format_significance_html,
+    _sig_td,
     _power_ratio_db,
     _nc_ratio_rows,
     _panel_display_name,
@@ -139,6 +141,50 @@ class TestPsfStatTest:
         html, p = _psf_stat_test(a, a)
         # Identical lists have p=1.0
         assert p == pytest.approx(1.0, abs=0.01) or (p is not None and p > 0.05)
+
+
+class TestFormatSignificanceHtml:
+    def test_not_significant(self):
+        html = _format_significance_html(0.5, 0.05)
+        assert "n.s." in html
+        assert "p=0.500" in html
+
+    def test_trivial_effect(self):
+        html = _format_significance_html(0.01, 0.05)
+        assert "trivial" in html
+
+    def test_small_effect(self):
+        html = _format_significance_html(0.01, 0.2)
+        assert "small" in html
+
+    def test_medium_effect(self):
+        html = _format_significance_html(0.01, 0.4)
+        assert "medium" in html
+
+    def test_large_effect(self):
+        html = _format_significance_html(0.01, 0.6)
+        assert "large" in html
+
+    def test_p_below_threshold_formatted(self):
+        html = _format_significance_html(0.0001, 0.6)
+        assert "p&lt;0.001" in html
+
+    def test_delta_sign_shown(self):
+        html = _format_significance_html(0.01, -0.6)
+        assert "delta=-0.60" in html.replace("&delta;", "delta")
+
+
+class TestSigTd:
+    def test_none_p_plain_cell(self):
+        assert _sig_td("hello", None) == "<td>hello</td>"
+
+    def test_significant_p_blue_background(self):
+        td = _sig_td("hello", 0.01)
+        assert "background:#b3e5fc" in td
+
+    def test_nonsignificant_p_grey_background(self):
+        td = _sig_td("hello", 0.5)
+        assert "background:#e0e0e0" in td
 
 
 class TestArrToB64Png:

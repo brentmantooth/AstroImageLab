@@ -29,6 +29,7 @@ core/
   models.py            40+ constants + AnalysisResult dataclass
   fig_utils.py         fig_to_b64() — embeds matplotlib figure as base64 PNG
   stretch.py           STF stretch + normalize_for_display() for 8-bit display output
+  stats_utils.py       mannwhitney_effect() — Mann-Whitney U + Cliff's delta, shared by analysis/ and report/
 gui/
   analysis_thread.py   QThread orchestrator; dark-mode rcParams save/restore lives here
   control_panel.py     Settings UI; settings() returns dict consumed by the thread
@@ -66,6 +67,10 @@ synthetic/
 | `_family_figs_with_corr(rows, map_key_fn)` | `report_builder.py` | Emits a Section 8 family's map figure immediately followed by its `corr_*` correlation scatter, one scale at a time, in numeric order (`_SPATIAL_CORR_ROWS`) — the pattern to follow when adding any new per-scale Section 8 figure pair |
 | `_family_nrm_figs(rows)` | `report_builder.py` | Sibling of `_family_figs_with_corr` for the noise-normalised (`nrm_*`) trailer figures — same `_SPATIAL_CORR_ROWS`-ordered iteration, no `map_key_fn` needed since the nrm key is always `"nrm_" + row_key`. Always use this (never a raw `sorted(figs)` scan) for any new per-scale trailer block — `sorted()` on figure-key strings is lexicographic and puts `nrm_std_10px` before `nrm_std_3px`/`5px` |
 | `SpatialDetailAnalyzer._crosshair_to_cropped_px(crosshair, shape, crop_fraction)` | `image_filters.py` | Converts a normalised `[0,1]` crosshair dict into pixel coords in the frame `_crop_border(arr, crop_fraction)` produces — the pattern for overlaying the user's cross-section line directly onto a Section 8 map panel (`_plot_side_by_side`'s `xs_line` param), as opposed to `xs_data`'s separate line-chart profile panel |
+| `SpatialDetailAnalyzer._local_maxima_mask(data, footprint_px, prominence_percentile, region_px, presmooth_sigma)` | `analysis/image_filters.py` | Scale-adaptive peak mask: `maximum_filter` non-max suppression + percentile prominence threshold + optional pre-smoothing (suppresses noise-driven false peaks) + `binary_dilation` region growth. All params are relative to the caller's own characteristic scale, not fixed pixel counts — see the Local-maxima detection convention below |
+| `mannwhitney_effect(va, vb)` | `core/stats_utils.py` | Mann-Whitney U p-value + Cliff's delta in O(n log n) via `delta = 2·U/(n1·n2) − 1`; shared by `_psf_stat_test` (Section 4) and `SpatialDetailAnalyzer._localmax_stats` (Section 8j) — never reimplement Cliff's delta via a pairwise `arr_a[:, None] - arr_b[None, :]` matrix, it's O(n·m) memory |
+| `_format_significance_html(p, delta)` / `_sig_td(html, p)` | `report_builder.py` | Shared star-rating/p-value HTML cell + colored `<td>` wrapper for any Mann-Whitney significance column — used by both Section 4's PSF table and Section 8j's local-maxima table |
+| `SpatialDetailAnalyzer._ratio_series_with_errors(ratios_by_method, errors_by_method=None)` | `analysis/image_filters.py` | `{method: {scale: value}}` (+ optional matching errors) → sorted `{method: [(x_px, value, error_or_None), ...]}` point lists for a cross-method overview line plot; shared by `_plot_nc_ratio_overview` (8i) and `_plot_localmax_ratio_overview` (8j) |
 
 ---
 
@@ -280,6 +285,43 @@ analyzer that needs background stats, just call `image.estimate_background()` as
 normal at the top of `analyze()` — do not add another pre-pass call site; the existing
 one in `_execute()` already covers every image object the thread constructs.
 
+### Local-maxima / peak detection — scale-relative parameters, not fixed pixel values
+
+`SpatialDetailAnalyzer._local_maxima_mask` (Section 8j) detects peaks via
+`data == maximum_filter(data, size=footprint_px)` AND `data > percentile(data, prominence_percentile)`,
+then grows survivors with `binary_dilation(mask, iterations=region_px)`. All four
+tunables are expressed **relative to the caller's own characteristic scale**
+(`footprint_px = footprint_mult * scale_px`, `region_px = region_fraction * footprint_px`,
+`presmooth_sigma = presmooth_fraction * scale_px`), never as fixed absolute pixel
+counts — a std-3px kernel and a wavelet level-3 (~8px) feature need genuinely
+different "how local" and "how tall" thresholds, and one fixed setting either misses
+fine structure or over-merges coarse structure. Pre-smooth the peak-source array
+(`gaussian_filter`, sigma also scale-relative) **before** non-max suppression to
+prevent single-pixel noise from registering as spurious peaks — reuse this whenever
+applying the pattern to new noisy per-pixel data; skipping the pre-smooth step lets
+shot noise dominate the detected-peak count. See `core/models.py`'s four
+`SECTION8_LOCALMAX_*` constants for the current default multipliers/fractions.
+
+### Ratio uncertainty / error bars — exact when pixel-paired, approximate (CV-propagated) otherwise
+
+When adding an error bar to a ratio-vs-scale plot (precedent: Section 8i/8j's
+cross-method overview figures, `_plot_nc_ratio_overview` / `_plot_localmax_ratio_overview`
+in `image_filters.py`), first check whether the two populations behind the ratio are
+**pixel-paired** (same pixel coordinates in both images):
+
+- **Pixel-paired** (Section 8j: `diff[mask]` is a genuine per-pixel `log10(|A|/|B|)`
+  population) → take `std(diff[mask])` directly and delta-method-propagate it into
+  linear ratio units (`ratio * ln(10) * log_std`) — an exact spread measure.
+- **Not pixel-paired** (Section 8i: nebula vs. background populations, computed
+  independently per image) → there is no per-pixel ratio distribution to take a std
+  of. Use a standard relative-uncertainty (coefficient-of-variation) propagation
+  instead: `err = |ratio| * sqrt((std_a/median_a)² + (std_b/median_b)²)`. **This is
+  an approximation, not a formal confidence interval** — caption it as such in the
+  report (see 8i's methodology caption) rather than presenting it as exact.
+
+Both plot functions share `_ratio_series_with_errors` for the point-list-building
+loop; only the upstream computation of the error value differs by data source.
+
 ---
 
 ## Collaboration Rules
@@ -323,7 +365,7 @@ sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 ```bash
 conda activate astrolab
 pip install pytest pytest-cov pytest-timeout   # one-time setup; not in environment.yml
-pytest tests/ -m "not slow"                   # fast suite (~120 s, 205 tests)
+pytest tests/ -m "not slow"                   # fast suite (~7.5 min, 415 tests)
 pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
 pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 ```
@@ -378,10 +420,13 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
 | `_section_snr` crashed when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) built a `panels` list filtered to non-`None` entries but never checked whether it was empty before calling `plt.subplots(1, len(panels), ...)` — 0 columns raised `ValueError: Number of columns must be a positive integer, not 0`. Hit whenever SNR is unchecked while another metric (e.g. Power Spectrum) is run. Fixed with an early `if not panels: return None` guard, matching `_plot_radial_overlay`/`_plot_radial_ratio_db`; both call sites already pipe the result through `_img_tag`, which turns `None` into `""`. |
 | New Section 8 panel key doesn't need Report Inspector code changes | `gui/report_inspector.py` is fully generic — driven entirely by a companion `<stem>_inspector.npz` (raw float32/uint8 arrays) plus an embedded `catalog_json` built in `report_builder.py::_write_inspector_file`. `_panel_display_name`/`_panel_concept` dynamically parse any `panels` dict key prefix, so a new `SpatialDetailAnalyzer` panel family auto-appears in the inspector with zero inspector-side changes. A genuinely new *visual type* is a different story: the inspector only knows how to `imshow` 2D/RGB arrays (side-by-side or slider-reveal), so scatter-style plots (Section 8's `corr_*` correlation figures, interleaved into 8d–8h right after each map figure via `_family_figs_with_corr`) must stay static-HTML-only unless new inspector canvas code is written. |
-| Renumbering a Section 8 subsection misses caption cross-references | Section 8's sub-heading letters (currently 8a–8i: 8a Background/Key Terms, 8b Original Image, 8c Log-Ratio Distribution & Mask Overview, 8d–8f detail-based families [LoG, Wavelet, Gradient], 8g–8h contrast-based families [Local σ, Weber], 8i Noise-Corrected Cross-Method Overview) are referenced by literal string in caption/info-box text scattered throughout `_section_spatial` — not just in the `<h3>` tags (e.g. "see 8i for…", "(8d–8h, 8i)"). After adding, removing, or renumbering a subsection, `grep` the function (and `_SPATIAL_GLOSSARY_HTML`) for every old *and* new heading letter — HTML renders a stale cross-reference without error, it just silently misdirects the reader to the wrong subsection. A self-reference inside a family's own info box (e.g. Gradient's "same framework as the other N families") must enumerate the other letters explicitly rather than use a dash range — under a non-contiguous lettering (Gradient kept letter `8f` while Std/Weber moved past it into the Contrast group), a `8d–8h` range would wrongly include Gradient's own letter. |
+| Renumbering a Section 8 subsection misses caption cross-references | Section 8's sub-heading letters (currently 8a–8j: 8a Background/Key Terms, 8b Original Image, 8c Mask Overview, 8d–8f detail-based families [LoG, Wavelet, Gradient], 8g–8h contrast-based families [Local σ, Weber], 8i Noise-Corrected Cross-Method Overview, 8j Local-Maxima Masked Metrics) are referenced by literal string in caption/info-box text scattered throughout `_section_spatial` — not just in the `<h3>` tags (e.g. "see 8i for…", "(8d–8h, 8i)"). After adding, removing, or renumbering a subsection, `grep` the function (and `_SPATIAL_GLOSSARY_HTML`) for every old *and* new heading letter — HTML renders a stale cross-reference without error, it just silently misdirects the reader to the wrong subsection. A self-reference inside a family's own info box (e.g. Gradient's "same framework as the other N families") must enumerate the other letters explicitly rather than use a dash range — under a non-contiguous lettering (Gradient kept letter `8f` while Std/Weber moved past it into the Contrast group), a `8d–8h` range would wrongly include Gradient's own letter. |
 | Stale ROI crashes Section 8 with "index -1 is out of bounds for axis 0 with size 0" | `MainWindow._roi` (`gui/main_window.py`) is never cleared when a new image is loaded into either panel. If the user draws an ROI on one image pair, then loads a smaller replacement pair without clearing it, the stale coordinates go out of bounds for the new image. NumPy doesn't raise on an out-of-range slice — `norm_a[ry0:ry1, rx0:rx1]` silently returns a zero-size array — so the crash surfaces much later and far from the real cause: `SpatialDetailAnalyzer._plot_mask_illustration → _stretch_for_display → np.percentile(empty_array, ...)`. The same unguarded `bgsub[y0:y1, x0:x1]` pattern exists in `power_spectrum.py::_extract_roi` and `edge_analyzer.py::analyze`, so a stale ROI can corrupt those sections too (with different, equally misleading errors) if they happen to run. Fixed at the single real boundary — `MainWindow._on_run()`, which is the only path that constructs `AnalysisThread` — by validating `self._roi` against every loaded image's `data.shape` right before `settings["roi"]` is set; an out-of-bounds ROI is cleared (falls back to auto-detect/full-image) with a `QMessageBox` explaining why, rather than patching each analyzer's slice individually. |
 | `binary_dilation` on a loose sigma-threshold mask amplifies noise, not signal | Growing a boolean mask straight from a threshold cut (e.g. Section 8's nebula mask at 1.7σ) dilates *every* True pixel, including scattered single/few-pixel noise-driven false positives — expected in bulk at a loose sigma cut (~4.5% of pixels at 1.7σ one-sided). Each isolated speck balloons into a `~(2·dilation_px+1)²`-px blob, inflating the mask area by 4x+ and diluting any signal-vs-background metric computed over it. Fix: strip small isolated connected components (`scipy.ndimage.label` + `np.bincount` size filter, same size threshold used for hole-filling) *before* calling `binary_dilation` — see `SpatialDetailAnalyzer._remove_small_objects` / `_fill_small_holes` in `image_filters.py`. Caught by comparing mask pixel counts with dilation on vs off on real (noisy) fixture data — a clean synthetic square mask (no noise) will not reveal this bug. |
 | Adding GUI parameter rows clips existing text in the Parameters group | `gui/main_window.py`'s `AnalysisControlPanel.setMaximumHeight(...)` caps the whole control panel's height. Metrics / Parameters / Run are laid out side-by-side (`QHBoxLayout` in `control_panel.py::_build_ui`), so the cap must fit the *tallest* group box's natural content height. Adding new `QFormLayout` rows to any group box (e.g. three new spinboxes) grows that box's required height without growing the cap, clipping/compressing every row's text top-and-bottom. Bump `setMaximumHeight(...)` proportionally (roughly `old_cap * new_row_count / old_row_count`) whenever a group box gains rows. |
+| Cliff's delta via pairwise sign matrix doesn't scale past ~100s of samples | `arr_a[:, None] - arr_b[None, :]` is O(n1·n2) memory — fine for PSF's per-star counts, a multi-gigabyte blowup for per-pixel populations (Section 8j masks can hold 10⁴–10⁵+ pixels). Use the exact O(n log n) identity instead: `delta = 2·U/(n1·n2) − 1`, where `U` is the Mann-Whitney U statistic `scipy.stats.mannwhitneyu` already computes. See `core/stats_utils.py::mannwhitney_effect`. |
+| Section HTML block gated on the wrong figure's output | A conditional HTML block that wraps *multiple* pieces of content but gates on only *one* figure's presence (e.g. `dist_html = ("<h3>...</h3>" + mask_html + dist_img + ...) if dist_img else ""`) will silently delete the other content too if that one figure is ever removed or becomes empty — this hit Section 8c, whose Nebula/Background mask illustration disappeared along with the (later-removed) log-ratio violin figure it happened to share a block with. Gate on the actual content being wrapped (e.g. `mask_fig`, if that's what must be present for the block to be worth showing), not on a sibling figure that currently always co-occurs with it. |
+| Extending an analyzer method's return-tuple arity misses a call site | `_nc_score` gained a 3rd return value (`neb_std`) to support Section 8i's error bars; it has 10 call sites (2 per metric family × 5 families), each needing `nc_a, noise_a = ...` changed to `nc_a, noise_a, neb_std_a = ...`. `grep` for every call site before changing a shared method's return signature — a missed site raises `TypeError: cannot unpack non-sequence`, or worse, silently mis-assigns if old and new arity both happen to unpack without error. |
 
 ---
 

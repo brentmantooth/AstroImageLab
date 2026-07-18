@@ -21,7 +21,9 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           LABEL_MAX_LEN, REF_SEEING_ARCSEC, REF_SEEING_BETA,
                           ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC,
                           SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
-                          SECTION8_NEBULA_MASK_MAX_HOLE_PX)
+                          SECTION8_NEBULA_MASK_MAX_HOLE_PX,
+                          SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                          SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION)
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -224,25 +226,12 @@ def _val_pm(v, spread, fmt=".3f", fallback="—") -> str:
     return s
 
 
-def _psf_stat_test(va: list, vb: list) -> tuple[str, float | None]:
-    """Mann-Whitney U + Cliff's delta for two per-star metric distributions.
-
-    Returns (html, p_value). html is a compact two-line string: effect rating + stars
-    on line 1, p-value and delta on line 2. Returns ("", None) if either list < 3 values.
-    d > 0 means A values tend to be higher than B.
-    """
-    from scipy.stats import mannwhitneyu
-
-    if len(va) < 3 or len(vb) < 3:
-        return "", None
-
-    _, p = mannwhitneyu(va, vb, alternative="two-sided")
-
-    arr_a = np.array(va)
-    arr_b = np.array(vb)
-    delta = float(np.sign(arr_a[:, None] - arr_b[None, :]).sum()) / (len(va) * len(vb))
+def _format_significance_html(p: float, delta: float) -> str:
+    """Compact two-line significance cell: effect rating + stars on line 1,
+    p-value and Cliff's delta on line 2. Shared by _psf_stat_test (Section 4)
+    and the Section 8j local-maxima table. delta > 0 means the first sample's
+    values tend to be higher than the second's."""
     abs_d = abs(delta)
-
     if p >= 0.05:
         rating, stars = "n.s.", "~"
     elif abs_d >= 0.474:
@@ -255,7 +244,31 @@ def _psf_stat_test(va: list, vb: list) -> tuple[str, float | None]:
         rating, stars = "trivial", "~"
 
     p_str = "p&lt;0.001" if p < 0.001 else f"p={p:.3f}"
-    return f"{stars}&nbsp;{rating}<br><small>{p_str},&nbsp;&delta;={delta:+.2f}</small>", float(p)
+    return f"{stars}&nbsp;{rating}<br><small>{p_str},&nbsp;&delta;={delta:+.2f}</small>"
+
+
+def _sig_td(html: str, p: float | None) -> str:
+    """Table cell for a significance-test result: light blue if p<0.05, grey
+    otherwise, plain <td> if no test was run (p is None)."""
+    if p is None:
+        return f"<td>{html}</td>"
+    style = 'style="background:#b3e5fc"' if p < 0.05 else 'style="background:#e0e0e0"'
+    return f"<td {style}>{html}</td>"
+
+
+def _psf_stat_test(va: list, vb: list) -> tuple[str, float | None]:
+    """Mann-Whitney U + Cliff's delta for two per-star metric distributions.
+
+    Returns (html, p_value). html is a compact two-line string: effect rating + stars
+    on line 1, p-value and delta on line 2. Returns ("", None) if either list < 3 values.
+    d > 0 means A values tend to be higher than B.
+    """
+    from core.stats_utils import mannwhitney_effect
+
+    p, delta = mannwhitney_effect(va, vb)
+    if p is None:
+        return "", None
+    return _format_significance_html(p, delta), p
 
 
 def _psf_distributions_figure(sd_a: list, sd_b: list,
@@ -430,9 +443,11 @@ def _psf_distributions_figure(sd_a: list, sd_b: list,
     return img_html, caption_html
 
 
-# Display order and labels for _spatial_diff_distributions_figure. Keys must match
-# analysis/image_filters.py's partial["diff_dist"] keys exactly (same keys used for
-# partial["panels"], see SpatialDetailAnalyzer._std_analysis/_log_analysis/etc.).
+# Shared display order and labels for Section 8's per-scale figures/tables. Keys
+# must match analysis/image_filters.py's partial["panels"]/partial["localmax"] keys
+# exactly (see SpatialDetailAnalyzer._std_analysis/_log_analysis/etc.). Used to order
+# the correlation scatter plots interleaved into 8d-8h and the Section 8j
+# table/distribution figure.
 _SPATIAL_DIFF_DIST_ROWS = [
     ("original",     "Original (normalised image)"),
     ("std_3px",      "Local σ — 3 px"),
@@ -457,22 +472,27 @@ _SPATIAL_DIFF_DIST_ROWS = [
 _SPATIAL_CORR_ROWS = [(k, label) for k, label in _SPATIAL_DIFF_DIST_ROWS if k != "original"]
 
 
-def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
-    """Combined figure: one row per Section 8 calculation, each row showing a
-    nebula-region violin and a background-region violin of the A-B diff pixel
-    values, with an IQR box-plot overlay (median magenta, IQR cyan — same styling
-    as the ePSF section's _psf_distributions_figure). Always violin+box, never
-    strip/swarm — diff populations here are always high-N.
+def _localmax_distributions_figure(localmax: dict) -> tuple[str, str]:
+    """Combined figure: one row per Section 8j metric/scale, each row showing an
+    Image-A violin and an Image-B violin of the raw masked pixel magnitudes
+    (|A|, |B| within that row's local-maxima mask), with an IQR box-plot overlay
+    (median magenta, IQR cyan — same styling as the ePSF section's
+    _psf_distributions_figure). Reads the pre-subsampled
+    localmax[key]["vals_a"/"vals_b"] arrays (SECTION8_LOCALMAX_DIST_MAX_SAMPLES
+    cap, from image_filters.py) — the table's own mean/std/ratio/significance
+    values are computed from the full population upstream and are unaffected by
+    this figure's subsampling.
 
     Returns (img_html, caption_html), or ("", "") if no row has enough data
-    (including single-image mode, where diff_dist is empty).
+    (including single-image mode, where localmax is empty).
     """
     import seaborn as sns
     import pandas as pd
 
-    rows = [(k, label) for k, label in _SPATIAL_DIFF_DIST_ROWS if k in diff_dist]
+    rows = [(k, label) for k, label in _SPATIAL_CORR_ROWS if k in localmax]
     has_data = any(
-        diff_dist[k]["nebula"].size >= 3 and diff_dist[k]["background"].size >= 3
+        localmax[k].get("vals_a") is not None and localmax[k]["vals_a"].size >= 3
+        and localmax[k]["vals_b"].size >= 3
         for k, _ in rows
     )
     if not rows or not has_data:
@@ -480,8 +500,8 @@ def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
 
     fig, axes = plt.subplots(len(rows), 1, figsize=(7, 1.3 * len(rows) + 1))
     fig.subplots_adjust(hspace=0.65, left=0.22, right=0.97, top=0.97, bottom=0.04)
-    palette = {"Nebula": "steelblue", "Background": "tomato"}
-    order = ["Nebula", "Background"]
+    palette = {"Image A": "steelblue", "Image B": "tomato"}
+    order = ["Image A", "Image B"]
 
     def _draw_boxwhisker(ax, vals_list):
         for i, vals in enumerate(vals_list):
@@ -498,23 +518,23 @@ def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
             )
 
     for ax, (key, title) in zip(np.atleast_1d(axes), rows):
-        neb = diff_dist[key]["nebula"]
-        bg = diff_dist[key]["background"]
-        if neb.size < 3 or bg.size < 3:
+        va = localmax[key].get("vals_a")
+        vb = localmax[key].get("vals_b")
+        if va is None or va.size < 3 or vb.size < 3:
             ax.set_visible(False)
             continue
 
-        combined = np.concatenate([neb, bg])
+        combined = np.concatenate([va, vb])
         df = pd.DataFrame({
             "value": combined,
-            "region": (["Nebula"] * neb.size) + (["Background"] * bg.size),
+            "region": (["Image A"] * va.size) + (["Image B"] * vb.size),
         })
         sns.violinplot(data=df, x="value", y="region", order=order,
                        palette=palette, inner=None, linewidth=0.8, ax=ax)
-        _draw_boxwhisker(ax, [neb, bg])
+        _draw_boxwhisker(ax, [va, vb])
 
         # Some detail maps (e.g. Weber contrast, unbounded near dark-sky pixels —
-        # see 8h methodology) have rare extreme-outlier log-ratios that stretch the
+        # see 8h methodology) have rare extreme-outlier magnitudes that stretch the
         # axis so far the IQR box becomes an invisible sliver. Clip the *view* to the
         # 1st-99th percentile of this row's own pooled data; the boxplot/violin
         # values themselves are unaffected, only what's visible is cropped.
@@ -523,7 +543,6 @@ def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
             pad = 0.05 * (hi - lo)
             ax.set_xlim(lo - pad, hi + pad)
 
-        ax.axvline(0.0, color="red", linestyle="--", linewidth=1.0, alpha=0.8, zorder=3)
         ax.set_title(title, fontsize=8, loc="left", pad=2)
         ax.set_xlabel("", fontsize=7)
         ax.set_ylabel("", fontsize=7)
@@ -531,38 +550,24 @@ def _spatial_diff_distributions_figure(diff_dist: dict) -> tuple[str, str]:
         ax.tick_params(axis="y", labelsize=7, pad=1)
         ax.spines[["top", "right"]].set_visible(False)
 
-    img_html = _img_tag(fig, "spatial_diff_distributions")
+    img_html = _img_tag(fig, "localmax_distributions")
 
     caption_html = (
         '<p class="caption">'
-        "<b>Pixel-wise log&#8321;&#8320;(A / B) ratio distributions.</b> "
-        "Each row is one Section 8 calculation, shown as a "
-        "<b>violin plot</b> (kernel density estimate of the log-ratio pixel values, "
-        "randomly subsampled for display) with an IQR box-plot overlay: "
+        "<b>Masked-region pixel value distributions (Image A vs Image B).</b> "
+        "Each row is one Section 8j metric/scale, shown as a "
+        "<b>violin plot</b> (kernel density estimate, randomly subsampled for "
+        "display) with an IQR box-plot overlay: "
         "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, "
         "a <span style='color:magenta'><b>magenta centre line</b></span> at the "
-        "median. <span style='color:steelblue'><b>Nebula</b></span> = pixels both "
-        "images classify as nebula; <span style='color:tomato'><b>Background</b></span> "
-        "= pixels both images classify as background sky — the same shared masks "
-        "illustrated above and used for the noise-corrected scores in 8d&ndash;8h, here "
-        "shown as full distributions rather than a single median ratio. "
-        "A <span style='color:red'><b>red dashed line</b></span> marks zero "
-        "(A&nbsp;=&nbsp;B, equal). Units are log&#8321;&#8320; — &plusmn;0.3 &asymp; a "
-        "2&times; difference, &plusmn;1.0 &asymp; a 10&times; difference. For the "
-        "Original and Wavelet rows specifically (the only two families that can go "
-        "negative), sign was discarded before the ratio — these rows compare the "
-        "<em>magnitude</em> of structure, not signed brightness. "
-        "<b>How to read it:</b> a Background row centred at zero with a narrow IQR is "
-        "the expected noise floor; a Nebula row with a similarly narrow, zero-centred "
-        "distribution means the two filters agree at that scale. A Nebula median shifted "
-        "away from zero, or an IQR visibly wider than the Background row's, indicates a "
-        "real structural difference between the filters at that scale rather than noise. "
-        "Each row's x-axis is independently clipped to its own 1st&ndash;99th percentile "
-        "range so the IQR box stays visible; rows with rare extreme-outlier log-ratios (e.g. "
-        "Weber contrast near dark-sky pixels, see 8h) may have a small fraction of the "
-        "violin's tail extend beyond the visible axis — see the per-pixel correlation "
-        "scatter next to each map figure below (8d&ndash;8h) for the full, unclipped "
-        "upper-tail behaviour."
+        "median. These are the raw masked-pixel magnitude populations the "
+        "Mean/Std/Ratio/Significance columns above are computed from — see the "
+        "table for exact values (computed from the full, unsampled population, not "
+        "this figure's subsampled copy). "
+        "Each row's x-axis is independently clipped to its own 1st&ndash;99th "
+        "percentile range so the IQR box stays visible; rows with rare "
+        "extreme-outlier magnitudes (e.g. Weber contrast near dark-sky pixels) may "
+        "have a small fraction of the violin's tail extend beyond the visible axis."
         "</p>"
     )
     return img_html, caption_html
@@ -615,6 +620,38 @@ def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label, val_f
                  f"<td class='{cb}'>{_val(vb, val_fmt)}</td>"
                  f"<td class='{cr}'>{_val(vr, val_fmt)}</td></tr>")
     return rows
+
+
+def _localmax_rows(localmax: dict, rows: list, val_fmt: str = ".3f") -> str:
+    """Build <tr> rows for the Section 8j local-maxima masked-region summary
+    table: Scale | Mean A ± SD | Mean B ± SD | Ratio (A/B, geo. mean) |
+    Significance | N px / % area. `rows` is _SPATIAL_CORR_ROWS, reused
+    directly — partial['localmax'] keys are the exact same strings as
+    partial['panels']. Mean A/B colored against each other, Ratio colored
+    against parity (1.0) — same convention as _nc_ratio_rows. Significance is
+    a Mann-Whitney U + Cliff's delta test (image_filters.py::_localmax_stats,
+    core.stats_utils.mannwhitney_effect) on the full masked population,
+    rendered with the same star-rating/coloring as Section 4's PSF table.
+    Pixel-count/%-area column is informational only (no coloring)."""
+    out = ""
+    for key, label in rows:
+        entry = localmax.get(key)
+        if entry is None:
+            continue
+        va, vb, vr = entry.get("mean_a"), entry.get("mean_b"), entry.get("ratio")
+        sa, sb = entry.get("std_a"), entry.get("std_b")
+        n_px, pct = entry.get("n_px", 0), entry.get("pct_area", 0.0)
+        p, delta = entry.get("p_value"), entry.get("cliffs_delta")
+        ca, cb = _better_worse_class(va, vb)
+        cr, _ = _better_worse_class(vr, 1.0)
+        sig_html = _format_significance_html(p, delta) if p is not None else ""
+        out += (f"<tr><td>{label}</td>"
+                f"<td class='{ca}'>{_val_pm(va, sa, val_fmt)}</td>"
+                f"<td class='{cb}'>{_val_pm(vb, sb, val_fmt)}</td>"
+                f"<td class='{cr}'>{_val(vr, val_fmt)}</td>"
+                f"{_sig_td(sig_html, p)}"
+                f"<td>{n_px:,d} ({pct:.2f}%)</td></tr>")
+    return out
 
 
 _SPATIAL_GLOSSARY_HTML = (
@@ -1425,12 +1462,6 @@ class ReportBuilder:
             va = [s[key] for s in stars_a if s.get(key) is not None]
             vb = [s[key] for s in stars_b if s.get(key) is not None]
             return _psf_stat_test(va, vb)   # (html, p | None)
-
-        def _sig_td(html, p):
-            if p is None:
-                return f"<td>{html}</td>"
-            style = 'style="background:#b3e5fc"' if p < 0.05 else 'style="background:#e0e0e0"'
-            return f"<td {style}>{html}</td>"
 
         (sig_fwhm_px,     p_fwhm_px)     = _sig("fwhm")
         (sig_fwhm_arcsec, p_fwhm_arcsec) = _sig("fwhm_arcsec")
@@ -4014,7 +4045,6 @@ curve is shown.</p>
         figs = sm.get("figures", {})
 
         mask_fig = figs.get("mask_illustration")
-        dist_img, dist_caption = _spatial_diff_distributions_figure(sm.get("diff_dist", {}))
         nebula_sigma = sm.get("nebula_sigma", SECTION8_NEBULA_MASK_SIGMA)
         nebula_dilation_px = sm.get("nebula_dilation_px", SECTION8_NEBULA_MASK_DILATION_PX)
         nebula_max_hole_px = sm.get("nebula_max_hole_px", SECTION8_NEBULA_MASK_MAX_HOLE_PX)
@@ -4033,8 +4063,8 @@ curve is shown.</p>
             "inside the nebula mask are filled, then the mask is grown outward by "
             f"{nebula_dilation_px} px to capture dim transition regions at nebula edges, before "
             "the two images' masks are combined below. "
-            "<b>How they're used below.</b> The log-ratio distributions and the per-scale "
-            "correlation plots embedded in 8d&ndash;8h use the <b>two-image union</b> for Nebula "
+            "<b>How they're used below.</b> The per-scale correlation plots embedded in "
+            "8d&ndash;8h use the <b>two-image union</b> for Nebula "
             "&mdash; a pixel counts as Nebula if <i>either</i> image classifies it that way, since "
             "a pixel that's clearly nebula in one image but marginal in the other (e.g. due to "
             "registration offset, PSF, or local noise) should still count as signal. Background "
@@ -4045,8 +4075,8 @@ curve is shown.</p>
             if mask_fig else ""
         )
         dist_html = (
-            "<h3>8c. Log-Ratio Distribution &amp; Mask Overview</h3>" + mask_html + dist_img + dist_caption
-            if dist_img else ""
+            "<h3>8c. Mask Overview</h3>" + mask_html
+            if mask_fig else ""
         )
 
         cr_a = sm.get("contrast_ratios_a", {})
@@ -4130,6 +4160,36 @@ curve is shown.</p>
                 'scores below are unavailable (—) for every scale and method.',
                 title="No shared nebula region", open=True)
 
+        localmax_rows_html = _localmax_rows(sm.get("localmax", {}), _SPATIAL_CORR_ROWS)
+        localmax_dist_img, localmax_dist_caption = _localmax_distributions_figure(sm.get("localmax", {}))
+        lm_footprint_mult = sm.get("localmax_footprint_mult", SECTION8_LOCALMAX_FOOTPRINT_MULT)
+        lm_prominence_pctl = sm.get("localmax_prominence_percentile", SECTION8_LOCALMAX_PROMINENCE_PERCENTILE)
+        lm_region_fraction = sm.get("localmax_region_fraction", SECTION8_LOCALMAX_REGION_FRACTION)
+        lm_presmooth_fraction = sm.get("localmax_presmooth_fraction", SECTION8_LOCALMAX_PRESMOOTH_FRACTION)
+        localmax_methodology_box = _info_box(
+            'For each metric/scale combination in 8d–8h, a <strong>local-maxima mask</strong> is '
+            'built independently: the combined |A|,|B| peak-source array is lightly '
+            f'Gaussian-smoothed (sigma = {lm_presmooth_fraction:g} &times; the metric\'s own scale) to '
+            'suppress single-pixel noise-driven false peaks, then pixels that are the maximum of '
+            f'their own {lm_footprint_mult:g}&times;(scale) neighbourhood AND exceed the '
+            f'{lm_prominence_pctl:g}th percentile of the smoothed array are kept as peaks and grown '
+            f'by {lm_region_fraction:g}&times; that same neighbourhood size, so the mask covers the local '
+            'region of pixels around each peak rather than a single pixel. Unlike the Nebula/Background '
+            'masks in 8c, this mask is <strong>not</strong> restricted to the nebula region — the '
+            'prominence threshold already isolates prominent features on its own, and intersecting with '
+            'the coarser nebula mask could exclude legitimate sharp features (stars, edges) outside it. '
+            '<strong>Mean A / Mean B</strong> are the average metric magnitude &plusmn; standard deviation '
+            'over the masked pixels in each image; <strong>Ratio (A/B)</strong> is the geometric mean of '
+            'the per-pixel A/B ratio at those pixels (10<sup>mean(log-ratio)</sup>), a plain '
+            '&times;-factor. <strong>Significance</strong> is a Mann-Whitney U test (two-sided) with '
+            'Cliff\'s delta effect size, comparing the full masked-pixel populations of A vs B for that '
+            'row — the same test and star-rating legend (&#9733;&#9733;&#9733; large, &#9733;&#9733; '
+            'medium, &#9733; small, n.s. not significant; blue cell = p&lt;0.05) already used for the '
+            'per-star PSF comparisons in Section 4. <strong>N px / % area</strong> shows how much of the '
+            'image the reported means/ratio/significance are drawn from — mean, standard deviation, and '
+            'significance are all computed from the full masked population, not a subsampled copy.',
+            title="Local-maxima masked metrics (methodology)")
+
         def _family_figs_with_corr(rows, map_key_fn) -> str:
             """Emit each row's raw map figure immediately followed by its
             per-pixel correlation scatter (when present), in _SPATIAL_CORR_ROWS
@@ -4172,8 +4232,8 @@ curve is shown.</p>
                       'Nebula panel and a Background panel using the shared masks explained in 8c. '
                       'The <strong>black dashed diagonal</strong> is the 1:1 line (perfect agreement, '
                       'A = B). Axis limits span the <strong>full</strong> data range for that panel — '
-                      'unlike the 8c violin plots, they are <em>not</em> clipped to a percentile — so '
-                      'the behaviour of the upper tail is always visible. '
+                      'unlike the 8j distribution violin plots, they are <em>not</em> clipped to a '
+                      'percentile — so the behaviour of the upper tail is always visible. '
                       'Each point is colored by that pixel\'s log-ratio value '
                       '(log<sub>10</sub>(|A|/|B|)), using the same <b>bwr</b> colour scale as the '
                       'adjacent log-ratio map panel and its histogram — red points are pixels where A '
@@ -4460,7 +4520,34 @@ Each map is immediately followed by its per-pixel correlation scatter (see metho
 <p class="caption">Ratio A/B for every noise-corrected method plotted against its
 approximate spatial scale. Scale units differ by method (see 8d–8h methodology
 boxes) — use this chart to spot which spatial-scale regime favours which filter,
-not to compare absolute ratio values across methods.</p>"""
+not to compare absolute ratio values across methods. Error bars show an
+<strong>approximate</strong> relative uncertainty, propagated from the coefficient of
+variation (standard deviation &divide; median) of each image's own nebula-region pixel
+population — not a formal confidence interval on the median, since the nebula and
+background populations behind each score are not pixel-paired between A and B.</p>
+
+<h3>8j. Local-Maxima Masked Metrics</h3>
+{localmax_methodology_box}
+<table>
+  <tr><th>Scale</th><th>{ra.label} (mean &plusmn; SD)</th><th>{rb.label} (mean &plusmn; SD)</th>
+      <th>Ratio A/B (geo. mean)</th><th>Significance</th><th>N px / % area</th></tr>
+  {localmax_rows_html}
+</table>
+{_hires_img_tag(figs.get("localmax_ratio_overview"), "Local-maxima ratio overview")}
+<p class="caption">Local-maxima masked ratio A/B for every metric plotted against its
+approximate spatial scale (same scale convention as 8i). Compare within a method's own
+line, not numerically across methods. Error bars show &plusmn;1 standard deviation of
+the per-pixel log-ratio population within each scale's own mask, converted to linear
+ratio units — an exact spread measure, since the masked pixels are genuinely paired
+between Image A and Image B at each scale.</p>
+{localmax_dist_img}
+{localmax_dist_caption}
+{_hires_img_tag(figs.get("localmax_mask_illustration"), "Local-maxima mask grid")}
+<p class="caption">Local-maxima masks for every metric/scale row in the table above —
+one panel per combination, rows grouped by metric family, columns ordered
+smallest&rarr;largest kernel/scale (Wavelet has only 2 display scales, so its third
+column is blank). Each panel shows the exact mask used to compute that row's
+statistics, overlaid on that metric's own |A| magnitude map.</p>"""
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
