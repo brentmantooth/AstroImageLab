@@ -18,6 +18,7 @@ from PIL import Image as _PILImage
 
 from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX,
                           PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX,
+                          EDGE_N_TOP_EDGES,
                           LABEL_MAX_LEN, REF_SEEING_ARCSEC, REF_SEEING_BETA,
                           ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC,
                           SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
@@ -693,16 +694,21 @@ def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[st
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
 
 
-def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label, val_fmt: str = ".3f") -> str:
+def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label,
+                    val_fmt: str = ".3f", method_label: str | None = None) -> str:
     """Build <tr> rows for a noise-corrected score table: scale | A | B | Ratio A/B.
     scale_label(scale) -> row label string. Ratio cell is colored relative to
-    1.0 (parity), independently of the A/B columns' own coloring."""
+    1.0 (parity), independently of the A/B columns' own coloring. When
+    method_label is given, each row is prefixed with a <td> naming the metric
+    family (LoG/Wavelet/Gradient/etc.) -- used by the Section 8j combined
+    cross-method NC table."""
     rows = ""
+    method_td = f"<td>{method_label}</td>" if method_label is not None else ""
     for scale in sorted(set(list(score_a.keys()) + list(score_b.keys()))):
         va, vb, vr = score_a.get(scale), score_b.get(scale), ratio.get(scale)
         ca, cb = _better_worse_class(va, vb)
         cr, _ = _better_worse_class(vr, 1.0)
-        rows += (f"<tr><td>{scale_label(scale)}</td>"
+        rows += (f"<tr>{method_td}<td>{scale_label(scale)}</td>"
                  f"<td class='{ca}'>{_val(va, val_fmt)}</td>"
                  f"<td class='{cb}'>{_val(vb, val_fmt)}</td>"
                  f"<td class='{cr}'>{_val(vr, val_fmt)}</td></tr>")
@@ -1521,25 +1527,15 @@ class ReportBuilder:
         img_h_b, img_w_b = (img_b.data.shape[:2] if img_b is not None else (0, 0))
         stars_a = pa.get("star_data", [])
         stars_b = pb.get("star_data", [])
-        fwhm_vals_a = [s["fwhm"] for s in stars_a if s.get("fwhm") is not None]
-        fwhm_vals_b = [s["fwhm"] for s in stars_b if s.get("fwhm") is not None]
-        ecc_vals_a  = [s["eccentricity"] for s in stars_a if s.get("eccentricity") is not None]
-        ecc_vals_b  = [s["eccentricity"] for s in stars_b if s.get("eccentricity") is not None]
 
         img_fwhm_map  = _img_tag(self._plot_psf_spatial_map(
             stars_a, stars_b, "fwhm", ra.label, rb.label,
             img_h_a, img_w_a, img_h_b, img_w_b,
             "FWHM spatial map (px)", "viridis"), "FWHM spatial map")
-        img_fwhm_hist = _img_tag(self._plot_psf_histogram(
-            fwhm_vals_a, fwhm_vals_b, ra.label, rb.label,
-            "FWHM (px)", "FWHM distribution"), "FWHM histogram")
         img_ecc_map   = _img_tag(self._plot_psf_spatial_map(
             stars_a, stars_b, "eccentricity", ra.label, rb.label,
             img_h_a, img_w_a, img_h_b, img_w_b,
             "Eccentricity spatial map", "plasma"), "Eccentricity spatial map")
-        img_ecc_hist  = _img_tag(self._plot_psf_histogram(
-            ecc_vals_a, ecc_vals_b, ra.label, rb.label,
-            "Eccentricity", "Eccentricity distribution"), "Eccentricity histogram")
 
         dist_fig, dist_caption = _psf_distributions_figure(stars_a, stars_b, ra.label, rb.label)
         dist_html = (
@@ -1673,13 +1669,9 @@ class ReportBuilder:
 
 {img_fwhm_map}
 <p class="caption">Smoothed FWHM map (px) across the field. Shared colour scale between both images. Dots mark individual star measurements.</p>
-{img_fwhm_hist}
-<p class="caption">Distribution of per-star FWHM values.</p>
 
 {img_ecc_map}
 <p class="caption">Smoothed eccentricity map across the field. 0 = circular star, 1 = fully elongated.</p>
-{img_ecc_hist}
-<p class="caption">Distribution of per-star eccentricity values.</p>
 
 {img_scatter}
 <p class="caption">Per-star FWHM correlation. Points near the slope = 1 line indicate
@@ -2225,29 +2217,6 @@ Higher curve = better contrast preservation at fine scales.</p>
             ax.set_ylabel("y (px)")
         return fig
 
-    @staticmethod
-    def _plot_psf_histogram(
-            vals_a: list, vals_b: list,
-            label_a: str, label_b: str,
-            xlabel: str, title: str) -> "plt.Figure | None":
-        if not vals_a and not vals_b:
-            return None
-        all_vals = vals_a + vals_b
-        rng = (float(min(all_vals)), float(max(all_vals)))
-        fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
-        if vals_a:
-            ax.hist(vals_a, bins=40, range=rng, alpha=XS_LINE_ALPHA,
-                    color="#ff7f0e", label=label_a, edgecolor="none")
-        if vals_b:
-            ax.hist(vals_b, bins=40, range=rng, alpha=XS_LINE_ALPHA,
-                    color="#1f77b4", label=label_b, edgecolor="none")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("Count")
-        ax.set_title(title)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
-        return fig
-
     def _plot_fwhm_scatter(self, ra: AnalysisResult, rb: AnalysisResult) -> plt.Figure | None:
         """Scatter plot of per-star FWHM_A vs FWHM_B for matched stars."""
         data_a = (ra.psf_metrics or {}).get("star_data", [])
@@ -2597,8 +2566,8 @@ Higher curve = better contrast preservation at fine scales.</p>
         return fig
 
     def _plot_psf_band_modulation(self, sim: dict) -> "plt.Figure | None":
-        """Grouped bar chart: mean local contrast per spatial-frequency band, averaged
-        across the three contrast rows.  Four bands span fine → coarse bar periods."""
+        """Grouped bar chart: mean local contrast per spatial-frequency band, one 2x2
+        panel per band, with grouped bars across the up-to-three contrast rows."""
         xs_data = sim.get("xs_data", {})
         if not xs_data:
             return None
@@ -2613,10 +2582,10 @@ Higher curve = better contrast preservation at fine scales.</p>
 
         # Bands are index ranges into the *reversed* array (index 0 = finest bar).
         bands = [
-            ("Fine\n(1–40 px)",       slice(0,   40)),
-            ("Mid-fine\n(41–120 px)", slice(40,  120)),
-            ("Mid\n(121–300 px)",     slice(120, 300)),
-            ("Coarse\n(301+ px)",     slice(300, None)),
+            ("Fine (1–40 px)",       slice(0,   40)),
+            ("Mid-fine (41–120 px)", slice(40,  120)),
+            ("Mid (121–300 px)",     slice(120, 300)),
+            ("Coarse (301+ px)",     slice(300, None)),
         ]
         level_info = [
             ("high",   "High contrast"),
@@ -2628,46 +2597,52 @@ Higher curve = better contrast preservation at fine scales.</p>
             return None
 
         has_b = any(xs_data[lv].get("conv_b") is not None for lv in xs_data)
-        n_bands = len(bands)
-        x       = np.arange(n_bands)
-        width = 0.25 if has_b else 0.3
+
+        # Precompute envelopes once per contrast level -- shared across all four band panels.
+        envelopes = {}
+        for level, _title in available:
+            d = xs_data[level]
+            env_orig = _envelope(d["original"][::-1])
+            env_a    = _envelope(d["conv_a"][::-1])
+            env_b    = (_envelope(d["conv_b"][::-1])
+                        if has_b and d.get("conv_b") is not None else None)
+            envelopes[level] = (env_orig, env_a, env_b)
+
+        has_b_all = has_b and all(envelopes[lv][2] is not None for lv, _t in available)
+        n_levels = len(available)
+        x       = np.arange(n_levels)
+        width = 0.25 if has_b_all else 0.3
 
         import matplotlib
         _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
         orig_color = "white" if _is_dark else "black"
 
-        fig, axes = plt.subplots(len(available), 1,
-                                  figsize=(9, 4 * len(available)), squeeze=False)
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8))
 
-        for ax_row, (level, level_title) in zip(axes[:, 0], available):
-            d        = xs_data[level]
-            env_orig = _envelope(d["original"][::-1])
-            env_a    = _envelope(d["conv_a"][::-1])
-            orig_vals = [float(np.mean(env_orig[sl])) for _, sl in bands]
-            a_vals    = [float(np.mean(env_a[sl]))    for _, sl in bands]
+        for ax, (band_label, sl) in zip(axes.flatten(), bands):
+            orig_vals = [float(np.mean(envelopes[lv][0][sl])) for lv, _t in available]
+            a_vals    = [float(np.mean(envelopes[lv][1][sl])) for lv, _t in available]
 
-            if has_b and d.get("conv_b") is not None:
-                env_b  = _envelope(d["conv_b"][::-1])
-                b_vals = [float(np.mean(env_b[sl])) for _, sl in bands]
-                ax_row.bar(x - width, orig_vals, width, label="Original",
-                           color=orig_color,  alpha=0.75)
-                ax_row.bar(x,         a_vals,   width, label=sim["label_a"],
-                           color="steelblue", alpha=0.85)
-                ax_row.bar(x + width, b_vals,   width, label=sim["label_b"],
-                           color="tomato",    alpha=0.85)
+            if has_b_all:
+                b_vals = [float(np.mean(envelopes[lv][2][sl])) for lv, _t in available]
+                ax.bar(x - width, orig_vals, width, label="Original",
+                       color=orig_color,  alpha=0.75)
+                ax.bar(x,         a_vals,   width, label=sim["label_a"],
+                       color="steelblue", alpha=0.85)
+                ax.bar(x + width, b_vals,   width, label=sim["label_b"],
+                       color="tomato",    alpha=0.85)
             else:
-                ax_row.bar(x - width / 2, orig_vals, width, label="Original",
-                           color=orig_color,  alpha=0.75)
-                ax_row.bar(x + width / 2, a_vals,   width, label=sim["label_a"],
-                           color="steelblue", alpha=0.85)
-            ax_row.set_xticks(x)
-            ax_row.set_xticklabels([b[0] for b in bands], fontsize=8)
-            ax_row.set_ylabel("Mean local contrast\n(peak − valley)", fontsize=8)
-            ax_row.set_title(f"Contrast retention — {level_title}", fontsize=9)
-            ax_row.legend(fontsize=8)
-            ax_row.grid(True, alpha=0.3, axis="y")
+                ax.bar(x - width / 2, orig_vals, width, label="Original",
+                       color=orig_color,  alpha=0.75)
+                ax.bar(x + width / 2, a_vals,   width, label=sim["label_a"],
+                       color="steelblue", alpha=0.85)
+            ax.set_xticks(x)
+            ax.set_xticklabels([t for _lv, t in available], fontsize=8)
+            ax.set_ylabel("Mean local contrast\n(peak − valley)", fontsize=8)
+            ax.set_title(band_label, fontsize=9)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3, axis="y")
 
-        axes[-1, 0].set_xlabel("Spatial-frequency band (bar period in pixels)", fontsize=8)
         fig.tight_layout()
         return fig
 
@@ -3034,7 +3009,7 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
             + (panel(sim['conv_ref'], conv_ref_title) if sim.get('conv_ref') is not None else '')
             + diff_panel
         )
-        _testchart_images_box = _info_box(_testchart_images_html, title="Show test chart validation images", open=False)
+        _testchart_images_box = _info_box(_testchart_images_html, title="Show ePSF test chart convolution images", open=False)
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
@@ -3677,9 +3652,13 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
         if esf_a.size:
             ax_esf.plot(pos_a, esf_a, color="steelblue", linewidth=1.5,
                         alpha=XS_LINE_ALPHA, label=label_a)
+            ax_esf.plot(pos_a[0], esf_a[0], marker="s", markersize=5,
+                        color="red", zorder=6)
         if esf_b.size:
             ax_esf.plot(pos_b, esf_b, color="tomato", linewidth=1.5,
                         alpha=XS_LINE_ALPHA, label=label_b)
+            ax_esf.plot(pos_b[0], esf_b[0], marker="s", markersize=5,
+                        color="red", zorder=6)
         ax_esf.axhline(0.10, color="gray", linestyle="--", linewidth=0.8)
         ax_esf.axhline(0.90, color="gray", linestyle="--", linewidth=0.8)
         w_label = ""
@@ -3705,9 +3684,13 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
         if lsf_a.size:
             ax_lsf.plot(pos_a, lsf_a, color="steelblue", linewidth=1.5,
                         alpha=XS_LINE_ALPHA, label=label_a)
+            ax_lsf.plot(pos_a[0], lsf_a[0], marker="s", markersize=5,
+                        color="red", zorder=6)
         if lsf_b.size:
             ax_lsf.plot(pos_b, lsf_b, color="tomato", linewidth=1.5,
                         alpha=XS_LINE_ALPHA, label=label_b)
+            ax_lsf.plot(pos_b[0], lsf_b[0], marker="s", markersize=5,
+                        color="red", zorder=6)
         ax_lsf.set_title(f"Edge #{edge_num} LSF (derivative of ESF)", fontsize=9)
         ax_lsf.set_xlabel("Position (px)")
         ax_lsf.set_ylabel("d(ESF)/dx")
@@ -3824,7 +3807,8 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                 '<h4>Gradient magnitude (ROI auto-detection map)</h4>'
                 + _img_tag(pair_fig, "Gradient magnitude")
                 + '<p class="caption">Gaussian gradient magnitude used to locate '
-                'the strongest edge regions. Cyan boxes show the three selected '
+                'the strongest edge regions. Cyan boxes show the '
+                f'{EDGE_N_TOP_EDGES} selected '
                 'analysis ROI regions. Both images share the same color scale (P99 of the brighter '
                 'image) for direct comparison. Sigma is pixel-scale adaptive '
                 '(≈ 1.5 arcsec equivalent) so diffuse gradients in long-focal-length images '
@@ -3869,9 +3853,9 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
   'the whole frame. Using a Gaussian gradient rather than a fixed 3×3 Sobel kernel '
   'means that diffuse gradients in long-focal-length images are detected as reliably '
   'as sharp edges in short-focal-length data. '
-  'The <strong>three strongest, well-separated gradient peaks</strong> '
+  f'The <strong>{EDGE_N_TOP_EDGES} strongest, well-separated gradient peaks</strong> '
   'are located automatically (peaks are suppressed within a 90 px radius after each '
-  'detection to ensure the three regions sample distinct features). A 500 × 500 px '
+  f'detection to ensure the {EDGE_N_TOP_EDGES} regions sample distinct features). A 500 × 500 px '
   'context window is shown for each, centred on the gradient peak; the 60 × 60 px '
   'analysis region (cyan box) is highlighted within it. '
   'If a starless image was provided it is used in place of the stacked image, so the '
@@ -4177,63 +4161,28 @@ curve is shown.</p>
             if mask_fig else ""
         )
 
-        cr_a = sm.get("contrast_ratios_a", {})
-        cr_b = sm.get("contrast_ratios_b", {})
-
-        # Contrast ratio table
-        cr_rows = ""
-        for ks in sorted(set(list(cr_a.keys()) + list(cr_b.keys()))):
-            va = cr_a.get(ks)
-            vb = cr_b.get(ks)
-            ca, cb = _better_worse_class(va, vb)
-            cr_rows += (f"<tr><td>{ks} px</td>"
-                        f"<td class='{ca}'>{_val(va)}</td>"
-                        f"<td class='{cb}'>{_val(vb)}</td></tr>")
-
-        # Weber fraction contrast table
-        wc_a = sm.get("weber_contrast_a", {})
-        wc_b = sm.get("weber_contrast_b", {})
-        wc_rows = ""
-        for ks in sorted(set(list(wc_a.keys()) + list(wc_b.keys()))):
-            va = wc_a.get(ks)
-            vb = wc_b.get(ks)
-            ca, cb = _better_worse_class(va, vb)
-            wc_rows += (f"<tr><td>{ks} px</td>"
-                        f"<td class='{ca}'>{_val(va, '.4f')}</td>"
-                        f"<td class='{cb}'>{_val(vb, '.4f')}</td></tr>")
-
-        # Wavelet SNR table
-        snr_a = sm.get("wavelet_snr_a", {})
-        snr_b = sm.get("wavelet_snr_b", {})
-        snr_rows = ""
-        for lvl in sorted(set(list(snr_a.keys()) + list(snr_b.keys()))):
-            va = snr_a.get(lvl)
-            vb = snr_b.get(lvl)
-            ca, cb = _better_worse_class(va, vb)
-            scale_approx = 2 ** lvl
-            snr_rows += (f"<tr><td>Level {lvl} (~{scale_approx}px scale)</td>"
-                         f"<td class='{ca}'>{_val(va)}</td>"
-                         f"<td class='{cb}'>{_val(vb)}</td></tr>")
-
         sigma_a = _val(sm.get("sigma_noise_a"), ".5f")
         sigma_b = _val(sm.get("sigma_noise_b"), ".5f")
 
-        # Noise-corrected local contrast ratio tables (one per method)
+        # Noise-corrected local contrast ratio rows (one per method), consolidated
+        # into a single combined table in 8j rather than repeated per-family.
         std_nc_rows = _nc_ratio_rows(
             sm.get("std_nc_score_a", {}), sm.get("std_nc_score_b", {}),
-            sm.get("std_nc_ratio", {}), lambda ks: f"{ks} px")
+            sm.get("std_nc_ratio", {}), lambda ks: f"{ks} px", method_label="Local σ")
         log_nc_rows = _nc_ratio_rows(
             sm.get("log_nc_score_a", {}), sm.get("log_nc_score_b", {}),
-            sm.get("log_nc_ratio", {}), lambda s: f"σ = {s} px")
+            sm.get("log_nc_ratio", {}), lambda s: f"σ = {s} px", method_label="LoG")
         wavelet_nc_rows = _nc_ratio_rows(
             sm.get("wavelet_nc_score_a", {}), sm.get("wavelet_nc_score_b", {}),
-            sm.get("wavelet_nc_ratio", {}), lambda lvl: f"Level {lvl} (~{2 ** lvl}px scale)")
+            sm.get("wavelet_nc_ratio", {}), lambda lvl: f"Level {lvl} (~{2 ** lvl}px scale)",
+            method_label="Wavelet")
         weber_nc_rows = _nc_ratio_rows(
             sm.get("weber_nc_score_a", {}), sm.get("weber_nc_score_b", {}),
-            sm.get("weber_nc_ratio", {}), lambda ks: f"{ks} px")
+            sm.get("weber_nc_ratio", {}), lambda ks: f"{ks} px", method_label="Weber")
         gm_nc_rows = _nc_ratio_rows(
             sm.get("gm_nc_score_a", {}), sm.get("gm_nc_score_b", {}),
-            sm.get("gm_nc_ratio", {}), lambda s: f"σ = {s} px")
+            sm.get("gm_nc_ratio", {}), lambda s: f"σ = {s} px", method_label="Gradient")
+        combined_nc_rows = log_nc_rows + wavelet_nc_rows + gm_nc_rows + std_nc_rows + weber_nc_rows
 
         nc_methodology_box = _info_box(
             'Each detail map above additionally yields a <strong>noise-corrected local '
@@ -4547,7 +4496,6 @@ curve is shown.</p>
            title="Spatial detail maps overview")}
 {original_html}
 {dist_html}
-{nc_methodology_box}
 {nc_empty_note}
 {corr_methodology_box}
 {xs_note}
@@ -4564,22 +4512,9 @@ curve is shown.</p>
            'brighter LoG response at small σ values. When a cross-section line is set, its profile '
            'reveals subtle differences in edge sharpness along the selected line.',
            title="Laplacian of Gaussian (LoG)")}
-<table>
-  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
-  {log_nc_rows}
-</table>
 {_log_images_box}
 <h3>8e. Wavelet Decomposition</h3>
 {_wavelet_box}
-
-<table>
-  <tr><th>Wavelet level</th><th>{ra.label} SNR</th><th>{rb.label} SNR</th></tr>
-  {snr_rows}
-</table>
-<table>
-  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
-  {wavelet_nc_rows}
-</table>
 {_wavelet_images_box}
 
 <h3>8f. Gradient Magnitude (Edge Sharpness)</h3>
@@ -4596,10 +4531,6 @@ curve is shown.</p>
            'multi-scale sharpness score across the shared ROI, following the same '
            'noise-corrected framework as 8d, 8e, 8g, and 8h. They are complementary, not redundant.',
            title="Gradient magnitude / edge sharpness")}
-<table>
-  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
-  {gm_nc_rows}
-</table>
 {_gradient_images_box}
 
 <h3>8g. Local Standard Deviation Maps</h3>
@@ -4614,14 +4545,6 @@ curve is shown.</p>
            'When a cross-section line is set, its profile is embedded in the middle-right panel of '
            'each map figure below, showing how local detail amplitude varies along the selected line.',
            title="Local standard deviation")}
-<table>
-  <tr><th>Kernel size</th><th>{ra.label}</th><th>{rb.label}</th></tr>
-  {cr_rows}
-</table>
-<table>
-  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
-  {std_nc_rows}
-</table>
 {_std_images_box}
 <h3>8h. Weber Fraction Contrast Maps</h3>
 {_info_box(
@@ -4646,14 +4569,6 @@ curve is shown.</p>
     'the bright end. Selecting a star-free nebula ROI avoids dark-sky pixels that drive '
     'Weber values very high. Maps use a starless image when one is available.</p>',
     title="Weber fraction contrast")}
-<table>
-  <tr><th>Kernel size</th><th>{ra.label} (99th pct c)</th><th>{rb.label} (99th pct c)</th></tr>
-  {wc_rows}
-</table>
-<table>
-  <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
-  {weber_nc_rows}
-</table>
 {_weber_images_box}
 
 <h3>8i. Noise-Corrected Contrast — Cross-Method Overview</h3>
@@ -4673,6 +4588,13 @@ background populations behind each score are not pixel-paired between A and B.</
   <tr><th>Scale</th><th>{ra.label} (mean &plusmn; SD)</th><th>{rb.label} (mean &plusmn; SD)</th>
       <th>log ratio A/B (geo. mean &plusmn; SD)</th><th>Significance</th><th>N px / % area</th></tr>
   {localmax_rows_html}
+</table>
+
+<h4>Noise-corrected contrast scores — all methods</h4>
+{nc_methodology_box}
+<table>
+  <tr><th>Method</th><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
+  {combined_nc_rows}
 </table>
 {_hires_img_tag(figs.get("localmax_ratio_overview"), "Local-maxima ratio overview")}
 <p class="caption">Local-maxima masked log&#8321;&#8320;(A/B) for every metric plotted

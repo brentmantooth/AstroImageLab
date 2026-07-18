@@ -12,11 +12,11 @@ from scipy.interpolate import interp1d
 from core.astro_image import AstroImage
 from core.fig_utils import figs_to_b64
 from core.models import (EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX,
-                          SECTION8_BORDER_CROP_FRACTION, EDGE_ESF_MIN_MONOTONICITY)
+                          SECTION8_BORDER_CROP_FRACTION, EDGE_ESF_MIN_MONOTONICITY,
+                          EDGE_N_TOP_EDGES)
 
 EDGE_DISPLAY_HALF_WIDTH = 250   # half-side of the context window shown in the report figure
-N_TOP_EDGES = 3                  # number of gradient peaks to auto-detect
-N_CANDIDATE_EDGES = N_TOP_EDGES * 3   # extra auto-detect candidates so low-quality ones can be skipped
+N_CANDIDATE_EDGES = EDGE_N_TOP_EDGES * 3   # extra auto-detect candidates so low-quality ones can be skipped
 _ESF_DISC_MARGIN_PX = 2.0        # safety margin (px) subtracted from the inscribed-circle radius
 _ESF_QUALITY_SMOOTH_FRAC = 0.20  # smoothing window as a fraction of ESF length, for the quality metric only
 
@@ -35,7 +35,7 @@ class EdgeAnalyzer:
     """Extract edge spread function (ESF) and line spread function (LSF)
     from nebula edges to measure local contrast and resolution.
 
-    When roi is None, the top N_TOP_EDGES well-separated gradient peaks are
+    When roi is None, the top EDGE_N_TOP_EDGES well-separated gradient peaks are
     located automatically.  For each, a separate ESF/LSF measurement is run.
     The strongest edge's metrics are promoted to top-level keys for the summary
     table; all per-edge results are available in result["edges"].
@@ -61,7 +61,7 @@ class EdgeAnalyzer:
         bgsub = image.background_subtracted()
 
         # Build list of (roi_data_array, roi_tuple) pairs. Auto-detect mode
-        # searches more candidates than N_TOP_EDGES so low-quality ones (ESF
+        # searches more candidates than EDGE_N_TOP_EDGES so low-quality ones (ESF
         # crossed more than one physical edge) can be skipped in favour of the
         # next-strongest gradient peak; user-drawn/A-matched ROIs are fixed
         # and can't be swapped for an alternative, so quality is only flagged
@@ -88,7 +88,7 @@ class EdgeAnalyzer:
         edges: list[dict] = []
         rejected: list[dict] = []   # low-quality auto-detect candidates, kept only as a fallback
         for i, (roi_data, roi_tuple) in enumerate(roi_pairs):
-            if allow_skip and len(edges) >= N_TOP_EDGES:
+            if allow_skip and len(edges) >= EDGE_N_TOP_EDGES:
                 break
             if roi_data is None or roi_data.size == 0:
                 continue
@@ -101,7 +101,7 @@ class EdgeAnalyzer:
                 edge_info = dict(edge_info)
                 edge_info["angle_rad"] = forced_angles[i]
 
-            positions, esf = self._extract_esf(roi_data, edge_info)
+            positions, esf, start_xy = self._extract_esf(roi_data, edge_info)
             if esf is None or len(esf) < 5:
                 continue
 
@@ -109,7 +109,7 @@ class EdgeAnalyzer:
             low_confidence = quality < EDGE_ESF_MIN_MONOTONICITY
             entry = self._build_edge_entry(
                 image, bgsub, roi_data, roi_tuple, edge_info,
-                positions, esf, i, quality, low_confidence)
+                positions, esf, start_xy, i, quality, low_confidence)
 
             if allow_skip and low_confidence:
                 rejected.append(entry)
@@ -121,6 +121,11 @@ class EdgeAnalyzer:
             # bad one rather than showing nothing, clearly flagged.
             rejected.sort(key=lambda e: e["esf_quality"], reverse=True)
             edges.append(rejected[0])
+
+        # Overview map should only mark the edges actually analyzed, not every
+        # searched candidate (auto-detect searches N_CANDIDATE_EDGES > len(edges)
+        # so low-quality candidates can be skipped in favour of the next peak).
+        rois_used = [e["roi_used"] for e in edges]
 
         # Full-image gradient map for report visualisation
         from core.stretch import stf_stretch
@@ -172,6 +177,7 @@ class EdgeAnalyzer:
     def _build_edge_entry(self, image: AstroImage, bgsub: np.ndarray,
                            roi_data: np.ndarray, roi_tuple: tuple,
                            edge_info: dict, positions: np.ndarray, esf: np.ndarray,
+                           start_xy: tuple | None,
                            edge_num: int, quality: float, low_confidence: bool) -> dict:
         lsf   = self._compute_lsf(positions, esf)
         width = self._measure_edge_width(positions, esf)
@@ -192,6 +198,14 @@ class EdgeAnalyzer:
         edge_info_display["center_x"] = xc_full - dx0
         edge_info_display["center_y"] = yc_full - dy0
 
+        # ESF start point (position index 0), in the same display-frame
+        # coordinates as edge_info_display, for the directional marker.
+        start_xy_display = None
+        if start_xy is not None:
+            start_x_full = x0 + start_xy[0]
+            start_y_full = y0 + start_xy[1]
+            start_xy_display = (start_x_full - dx0, start_y_full - dy0)
+
         return {
             "roi_used":               roi_tuple,
             "gradient_magnitude":     edge_info["gradient_magnitude"],
@@ -211,6 +225,7 @@ class EdgeAnalyzer:
                     positions, esf, lsf, width, image.label,
                     edge_info_display, edge_num=edge_num + 1,
                     low_confidence=low_confidence,
+                    start_xy_display=start_xy_display,
                 )
             }),
         }
@@ -220,7 +235,7 @@ class EdgeAnalyzer:
     # ------------------------------------------------------------------
 
     def _auto_detect_top_rois(self, bgsub: np.ndarray, image: AstroImage,
-                               n: int = N_TOP_EDGES
+                               n: int = EDGE_N_TOP_EDGES
                                ) -> list[tuple[np.ndarray, tuple]]:
         """Find n well-separated patches centred on the strongest gradients."""
         from core.stretch import stf_stretch
@@ -281,7 +296,7 @@ class EdgeAnalyzer:
     # ------------------------------------------------------------------
 
     def _extract_esf(self, roi_data: np.ndarray,
-                      edge_info: dict) -> tuple[np.ndarray, np.ndarray | None]:
+                      edge_info: dict) -> tuple[np.ndarray, np.ndarray | None, tuple | None]:
         angle_deg = np.degrees(edge_info["angle_rad"])
         rotation_angle = -(90.0 - angle_deg)
         # cval=nan (not the default 0.0) marks pixels that rotate() had to
@@ -318,11 +333,11 @@ class EdgeAnalyzer:
 
         valid_idx = np.where(~np.isnan(esf_raw))[0]
         if len(valid_idx) < 5:
-            return positions, None
+            return positions, None, None
         lo = float(np.nanmin(esf_raw))
         hi = float(np.nanmax(esf_raw))
         if hi - lo < 1e-12:
-            return positions, None
+            return positions, None, None
         esf = (esf_raw - lo) / (hi - lo)
 
         if esf[valid_idx[0]] > esf[valid_idx[-1]]:
@@ -332,7 +347,19 @@ class EdgeAnalyzer:
         # near the two far ends can be NaN) so downstream LSF/width code never
         # has to handle missing values.
         i0, i1 = valid_idx[0], valid_idx[-1] + 1
-        return positions[i0:i1] - positions[i0], esf[i0:i1]
+
+        # Locate the ROI-local (pre-rotation) pixel corresponding to the ESF's
+        # start (position index 0), for a directional marker. Uses rotate()
+        # itself in reverse -- an impulse at the same rotated-frame column,
+        # inverse-rotated back -- rather than hand-deriving rotate()'s angle-
+        # sign convention, so this stays correct regardless of its handedness.
+        impulse = np.zeros((h, w), dtype=float)
+        impulse[int(round(cy)), i0] = 1.0
+        impulse_orig = rotate(impulse, -rotation_angle, reshape=False, order=1, cval=0.0)
+        start_ry, start_rx = np.unravel_index(np.argmax(impulse_orig), impulse_orig.shape)
+        start_xy = (int(start_rx), int(start_ry))
+
+        return positions[i0:i1] - positions[i0], esf[i0:i1], start_xy
 
     @staticmethod
     def _esf_quality(esf: np.ndarray) -> float:
@@ -456,7 +483,8 @@ class EdgeAnalyzer:
                        label: str,
                        edge_info: dict | None = None,
                        edge_num: int = 1,
-                       low_confidence: bool = False) -> plt.Figure:
+                       low_confidence: bool = False,
+                       start_xy_display: tuple | None = None) -> plt.Figure:
         from matplotlib.patches import Rectangle
 
         fig, ax = plt.subplots(figsize=(5, 5))
@@ -504,6 +532,11 @@ class EdgeAnalyzer:
             xs, ys = _clipped_line(xc, yc, perp)
             ax.plot(xs, ys, color="yellow", linewidth=1.2, linestyle="--",
                     alpha=0.75, label="Edge orientation")
+
+            if start_xy_display is not None:
+                ax.plot(start_xy_display[0], start_xy_display[1], marker="s",
+                        markersize=5, color="red", zorder=6,
+                        label="Scan start")
 
             ax.legend(fontsize=7, loc="lower right")
 

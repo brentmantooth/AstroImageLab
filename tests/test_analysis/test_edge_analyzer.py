@@ -65,14 +65,14 @@ class TestEsfQuality:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=30.0)
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert ea._esf_quality(esf) > 0.8
 
     def test_double_edge_scores_low(self):
         ea = EdgeAnalyzer()
         roi = _make_double_edge_roi()
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert ea._esf_quality(esf) < EDGE_ESF_MIN_MONOTONICITY
 
     def test_perfectly_flat_scores_zero(self):
@@ -93,7 +93,7 @@ class TestEsfQuality:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=angle_deg)
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert ea._esf_quality(esf) > 0.8
 
 
@@ -104,7 +104,7 @@ class TestExtractEsfDiscMask:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=45.0)
         edge_info = ea._detect_strongest_edge(roi)
-        positions, esf = ea._extract_esf(roi, edge_info)
+        positions, esf, _ = ea._extract_esf(roi, edge_info)
         assert esf is not None
         assert not np.any(np.isnan(esf))
         assert not np.any(np.isnan(positions))
@@ -113,14 +113,14 @@ class TestExtractEsfDiscMask:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=45.0)
         edge_info = ea._detect_strongest_edge(roi)
-        positions, _ = ea._extract_esf(roi, edge_info)
+        positions, _, _ = ea._extract_esf(roi, edge_info)
         assert positions[0] == 0.0
 
     def test_esf_normalised_to_unit_range(self):
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=30.0)
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert esf.min() >= -1e-9
         assert esf.max() <= 1.0 + 1e-9
 

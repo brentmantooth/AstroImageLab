@@ -72,6 +72,7 @@ synthetic/
 | `mannwhitney_effect(va, vb)` | `core/stats_utils.py` | Mann-Whitney U p-value + Cliff's delta in O(n log n) via `delta = 2·U/(n1·n2) − 1`; shared by `_psf_stat_test` (Section 4) and `SpatialDetailAnalyzer._localmax_stats` (Section 8j) — never reimplement Cliff's delta via a pairwise `arr_a[:, None] - arr_b[None, :]` matrix, it's O(n·m) memory |
 | `_format_significance_html(p, delta)` / `_sig_td(html, p)` | `report_builder.py` | Shared star-rating/p-value HTML cell + colored `<td>` wrapper for any Mann-Whitney significance column — used by both Section 4's PSF table and Section 8j's local-maxima table |
 | `SpatialDetailAnalyzer._ratio_series_with_errors(ratios_by_method, errors_by_method=None)` | `analysis/image_filters.py` | `{method: {scale: value}}` (+ optional matching errors) → sorted `{method: [(x_px, value, error_or_None), ...]}` point lists for a cross-method overview line plot; shared by `_plot_nc_ratio_overview` (8i) and `_plot_localmax_ratio_overview` (8j) |
+| `_nc_ratio_rows(score_a, score_b, ratio, scale_label, val_fmt=".3f", method_label=None)` | `report_builder.py` | `<tr>` rows for a noise-corrected score table (Scale \| A \| B \| Ratio A/B). Pass `method_label` to prepend a Method-name `<td>` when consolidating several per-family tables that share this schema into one combined table — precedent: Section 8j's cross-method NC table, which concatenates the row-strings from all five `_nc_ratio_rows` calls (LoG/Wavelet/Gradient/Std/Weber) into a single `<table>` |
 
 ---
 
@@ -395,6 +396,30 @@ existing widgets — extend this pattern for any future toolbar addition:
   spacer approach renders before relying on it — don't assume the common Qt idiom is
   safe in this codebase's environment without checking.
 
+### Fixed-size markers in report figures — matplotlib `markersize`, not a data-space patch
+
+When a marker must stay a constant *visual* size regardless of the image's zoom or
+pixel scale (precedent: the red "scan start" square in Section 6's edge ROI figure and
+its ESF/LSF profile chart, `EdgeAnalyzer._plot_results` / `_plot_esf_lsf_pair`), use
+`ax.plot(x, y, marker='s', markersize=N, color=...)` — `markersize` is in points
+(1/72 inch), independent of the axes' data-coordinate scaling. Do **not** use a
+`Rectangle` patch sized in data coordinates for this (e.g. `Rectangle((x, y), 5, 5)`)
+— its apparent size changes with the image's pixel scale/zoom, the opposite of what
+"fixed size" means here.
+
+### Locating a point across `scipy.ndimage.rotate()` without hand-deriving its angle-sign convention
+
+`EdgeAnalyzer._extract_esf` rotates an ROI so the edge runs vertical, then (to place
+the "scan start" marker) needs to know which point in the *original*, unrotated frame
+corresponds to a specific column of the *rotated* frame. Hand-deriving `rotate()`'s
+counter-clockwise-vs-clockwise / y-down handedness risks a silently mirrored result
+with no exception raised. Instead, use `rotate()` itself in both directions: place a
+single-pixel impulse at the target column in a same-shaped zero array, apply the
+**inverse** rotation (`rotate(impulse, -angle, reshape=False, order=1)`), and take
+`argmax` of the result. This is correct by construction — the same function, forward
+then backward — regardless of the library's sign convention, and generalizes to any
+"where did this rotated-frame coordinate come from" problem.
+
 ---
 
 ## Collaboration Rules
@@ -505,6 +530,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | `QGroupBox` title containing a bare `&` silently swallows it (mnemonic) | `QGroupBox("3. Region & Run")` rendered as "3. Region Run" — Qt interprets `&` in a group box title as a mnemonic prefix for the next character, same as `QAction`/`QPushButton` text. Escape a literal ampersand as `&&` (`QGroupBox("3. Region && Run")`). Plain `QLabel` text does **not** have this problem (no mnemonic support unless `setBuddy()` is used), so this is specific to titles/text that Qt treats as mnemonic-aware (menus, actions, buttons, group boxes). |
 | `QToolBar.addWidget(spacer)` with an `Expanding` size policy can make every action after it vanish | Adding a bare `QWidget` spacer (`QSizePolicy.Policy.Expanding` horizontal, tried both `Preferred` and `Expanding` vertical) to right-align a trailing toolbar action made that action disappear from the rendered toolbar entirely — not shifted, not overflowed into a `»` chevron, just absent — confirmed by re-rendering with the spacer removed (the action reappeared immediately, left-aligned after the preceding separator). Root cause not fully isolated; treat any `addWidget(spacer)`-for-right-alignment idiom in a `QToolBar` in this codebase as unverified until the rendered result is actually checked (see the next pitfall for how to check it without a real display). |
 | OS-level screenshots of the PyQt6 GUI are unreliable for verifying a layout change | `Get-WindowRect`/`SetWindowPos`/`Screen.Bounds` from a non-DPI-aware PowerShell process and the actual rendered window disagreed with each other by inconsistent ratios (not a single uniform scale factor) on a scaled Windows display, making a window that should fit on-screen appear clipped, and vice versa — even maximizing the window didn't reliably show all of it. Prefer `QWidget.grab()` (or `QMainWindow.grab()`) from a small headless script that constructs the widget/window directly and saves the returned `QPixmap` to a PNG — this renders through Qt's own coordinate system with a consistent `devicePixelRatio`, sidestepping OS/DPI virtualization entirely, and doesn't require a visible window at all. For precise sizing decisions (e.g. tuning a `setMaximumHeight`), read `QWidget.sizeHint()`/`minimumSizeHint()` directly instead of eyeballing a rendered image — see the "Adding GUI parameter rows..." pitfall above for the exact approach. |
+| Overview figure's box/marker count silently drifted from its own caption | `EdgeAnalyzer.analyze()`'s gradient-magnitude overview map was given `rois_used` — every *searched* candidate ROI (`N_CANDIDATE_EDGES = EDGE_N_TOP_EDGES * 3`, e.g. 9) — instead of only the edges actually *accepted* into `edges` (capped at `EDGE_N_TOP_EDGES`, e.g. 3), so the map drew 9 cyan boxes while its own caption said "three selected." Root cause: `rois_used` was assigned once, early, from the full candidate list, and never reassigned after low-quality candidates got filtered out of `edges`. Whenever a display figure loops over a list to draw one marker/box per entry, verify that list is the actually-used subset the caption describes, not the broader search/candidate pool that produced it — fixed by reassigning `rois_used = [e["roi_used"] for e in edges]` right after `edges` is finalized, before it's read by `_plot_gradient_map`/stored in the result dict. |
 
 ---
 
