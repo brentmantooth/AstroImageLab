@@ -25,7 +25,7 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          SECTION8_NEBULA_MASK_MAX_HOLE_PX,
                          SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                          SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
-                         SECTION8_LOCALMAX_DIST_MAX_SAMPLES)
+                         SECTION8_LOCALMAX_DIST_MAX_SAMPLES, SECTION8_LOCALMAX_TOP_PERCENT)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -53,7 +53,8 @@ class SpatialDetailAnalyzer:
                 localmax_footprint_mult: float = SECTION8_LOCALMAX_FOOTPRINT_MULT,
                 localmax_prominence_percentile: float = SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                 localmax_region_fraction: float = SECTION8_LOCALMAX_REGION_FRACTION,
-                localmax_presmooth_fraction: float = SECTION8_LOCALMAX_PRESMOOTH_FRACTION) -> dict:
+                localmax_presmooth_fraction: float = SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                localmax_top_percent: float = SECTION8_LOCALMAX_TOP_PERCENT) -> dict:
 
         image_a.estimate_background()
         if image_b is not None:
@@ -76,6 +77,7 @@ class SpatialDetailAnalyzer:
             "localmax_prominence_percentile": localmax_prominence_percentile,
             "localmax_region_fraction": localmax_region_fraction,
             "localmax_presmooth_fraction": localmax_presmooth_fraction,
+            "localmax_top_percent": localmax_top_percent,
             "weber_contrast_a": {},
             "weber_contrast_b": {},
             "panels": {},
@@ -247,6 +249,7 @@ class SpatialDetailAnalyzer:
                 localmax_prominence_percentile=localmax_prominence_percentile,
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_log = _ex.submit(self._log_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -259,6 +262,7 @@ class SpatialDetailAnalyzer:
                 localmax_prominence_percentile=localmax_prominence_percentile,
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_wav = _ex.submit(self._wavelet_analysis,
                 analysis_a, analysis_b, wavelet, levels,
@@ -271,6 +275,7 @@ class SpatialDetailAnalyzer:
                 localmax_prominence_percentile=localmax_prominence_percentile,
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_web = _ex.submit(self._weber_analysis,
                 analysis_a, analysis_b,
@@ -284,6 +289,7 @@ class SpatialDetailAnalyzer:
                 localmax_prominence_percentile=localmax_prominence_percentile,
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_grad = _ex.submit(self._gradient_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -296,6 +302,7 @@ class SpatialDetailAnalyzer:
                 localmax_prominence_percentile=localmax_prominence_percentile,
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             std_b64, std_partial = _f_std.result()
             log_b64, log_partial = _f_log.result()
@@ -357,30 +364,31 @@ class SpatialDetailAnalyzer:
             if nc_fig is not None:
                 figures["nc_ratio_overview"] = fig_to_b64(nc_fig, dpi=150)
 
-            localmax_ratios_by_method = {
-                "std": std_partial["localmax_ratio"],
-                "log": log_partial["localmax_ratio"],
-                "wavelet": wav_partial["localmax_ratio"],
-                "weber": web_partial["localmax_ratio"],
-                "gradient": grad_partial["localmax_ratio"],
+            localmax_log_ratios_by_method = {
+                "std": std_partial["localmax_log_ratio"],
+                "log": log_partial["localmax_log_ratio"],
+                "wavelet": wav_partial["localmax_log_ratio"],
+                "weber": web_partial["localmax_log_ratio"],
+                "gradient": grad_partial["localmax_log_ratio"],
             }
-            localmax_ratio_errors_by_method = {
-                "std": std_partial["localmax_ratio_err"],
-                "log": log_partial["localmax_ratio_err"],
-                "wavelet": wav_partial["localmax_ratio_err"],
-                "weber": web_partial["localmax_ratio_err"],
-                "gradient": grad_partial["localmax_ratio_err"],
+            localmax_log_ratio_errors_by_method = {
+                "std": std_partial["localmax_log_ratio_err"],
+                "log": log_partial["localmax_log_ratio_err"],
+                "wavelet": wav_partial["localmax_log_ratio_err"],
+                "weber": web_partial["localmax_log_ratio_err"],
+                "gradient": grad_partial["localmax_log_ratio_err"],
             }
             lm_ratio_fig = self._plot_localmax_ratio_overview(
-                localmax_ratios_by_method, localmax_ratio_errors_by_method)
+                localmax_log_ratios_by_method, localmax_log_ratio_errors_by_method)
             if lm_ratio_fig is not None:
                 figures["localmax_ratio_overview"] = fig_to_b64(lm_ratio_fig, dpi=150)
 
             # Local-maxima mask grid: one row per metric family, columns = kernel/scale
             # sizes smallest -> largest. Every panel's mask is computed with the same
-            # formula _localmax_entry uses for that row's own table statistics -- this
-            # reuses panels already cached in result["panels"], no new map computation.
-            # Wavelet has only 2 display scales, so its 3rd column is left blank.
+            # _combined_localmax_mask formula _localmax_entry uses for that row's own
+            # table statistics -- this reuses panels already cached in
+            # result["panels"], no new map computation. Wavelet has only 2 display
+            # scales, so its 3rd column is left blank.
             _grid_families = [
                 ("Local σ",        [(f"std_{ks}px",    float(ks),      f"Local σ — {ks} px")       for ks in kernel_sizes]),
                 ("|LoG|",          [(f"log_{s}",        float(s),       f"|LoG| — σ={s} px")        for s in log_sigmas]),
@@ -399,13 +407,13 @@ class SpatialDetailAnalyzer:
                     w_g = min(panel["a"].shape[1], panel["b"].shape[1])
                     abs_a = np.abs(panel["a"][:h_g, :w_g])
                     abs_b = np.abs(panel["b"][:h_g, :w_g])
-                    peak_source = np.maximum(abs_a, abs_b)
                     footprint_px = max(3, int(round(localmax_footprint_mult * scale_px)) | 1)
                     region_px = max(1, int(round(localmax_region_fraction * footprint_px)))
                     presmooth_sigma = max(0.5, localmax_presmooth_fraction * scale_px)
-                    mask = self._local_maxima_mask(peak_source, footprint_px,
-                                                    localmax_prominence_percentile,
-                                                    region_px, presmooth_sigma)
+                    mask = self._combined_localmax_mask(abs_a, abs_b, footprint_px,
+                                                          localmax_prominence_percentile,
+                                                          region_px, presmooth_sigma,
+                                                          localmax_top_percent)
                     cells.append((abs_a, mask, panel_title))
                 grid_rows.append((family_label, cells))
             grid_fig = self._plot_localmax_mask_grid(grid_rows)
@@ -570,6 +578,29 @@ class SpatialDetailAnalyzer:
         return mask
 
     @staticmethod
+    def _top_percent_mask(abs_a: np.ndarray, abs_b: np.ndarray, top_percent: float) -> np.ndarray:
+        """Boolean mask of pixels in the top `top_percent`% of Image A's OR Image B's
+        own value distribution -- catches broad bright regions that local-maxima peak
+        detection alone would miss (e.g. an extended plateau, not a sharp point peak)."""
+        thresh_a = np.percentile(abs_a, 100.0 - top_percent)
+        thresh_b = np.percentile(abs_b, 100.0 - top_percent)
+        return (abs_a >= thresh_a) | (abs_b >= thresh_b)
+
+    def _combined_localmax_mask(self, abs_a: np.ndarray, abs_b: np.ndarray,
+                                 footprint_px: int, prominence_percentile: float,
+                                 region_px: int, presmooth_sigma: float,
+                                 top_percent: float) -> np.ndarray:
+        """Local-maxima peak mask (_local_maxima_mask) unioned with a top-percent
+        brightness mask (_top_percent_mask). Used identically by _localmax_entry
+        (Section 8j table/figure stats) and the mask-grid figure builder in analyze(),
+        so every displayed panel matches the mask actually backing that row's numbers."""
+        peak_source = np.maximum(abs_a, abs_b)
+        mask = self._local_maxima_mask(peak_source, footprint_px, prominence_percentile,
+                                        region_px, presmooth_sigma)
+        mask |= self._top_percent_mask(abs_a, abs_b, top_percent)
+        return mask
+
+    @staticmethod
     def _localmax_stats(abs_a: np.ndarray, abs_b: np.ndarray,
                          diff: np.ndarray, mask: np.ndarray,
                          rng: np.random.Generator) -> dict:
@@ -585,14 +616,16 @@ class SpatialDetailAnalyzer:
         masked magnitudes. p_value/cliffs_delta are a Mann-Whitney U test
         (two-sided) + Cliff's delta comparing the full masked-pixel
         populations of A vs B (core.stats_utils.mannwhitney_effect) — delta
-        > 0 means A tends higher. log_ratio_std is the standard deviation of
-        the per-pixel log10(|A|/|B|) population at the masked pixels (diff[mask]
-        itself, a genuinely pixel-paired quantity) — used to propagate an
-        exact spread estimate onto the Section 8j cross-method overview's
-        ratio error bars. vals_a/vals_b are a
+        > 0 means A tends higher. log_ratio_mean/log_ratio_std are the mean/standard
+        deviation of the per-pixel log10(|A|/|B|) population at the masked pixels
+        (masked_diff itself, a genuinely pixel-paired quantity) — log_ratio_mean is
+        the same quantity `ratio` is exponentiated from (ratio = 10**log_ratio_mean),
+        kept unexponentiated for the Section 8j table/overview plot, which present
+        this column directly in log10 space rather than converting back to a linear
+        ×-factor. vals_a/vals_b/vals_log_ratio are each a
         SECTION8_LOCALMAX_DIST_MAX_SAMPLES-capped random subsample of the
-        same masked populations, retained only for the Section 8j
-        distribution figure; every other returned value is computed from the
+        corresponding masked population, retained only for the Section 8j
+        distribution figures; every other returned value is computed from the
         FULL population. Returns None values / n_px=0 when the mask selects
         no pixels.
         """
@@ -603,52 +636,59 @@ class SpatialDetailAnalyzer:
         n_px = int(np.count_nonzero(m))
         if n_px == 0:
             return {"mean_a": None, "mean_b": None, "std_a": None, "std_b": None,
-                    "ratio": None, "log_ratio_std": None, "p_value": None, "cliffs_delta": None,
+                    "ratio": None, "log_ratio_mean": None, "log_ratio_std": None,
+                    "p_value": None, "cliffs_delta": None,
                     "n_px": 0, "pct_area": 0.0,
-                    "vals_a": np.empty(0, dtype=np.float32), "vals_b": np.empty(0, dtype=np.float32)}
+                    "vals_a": np.empty(0, dtype=np.float32), "vals_b": np.empty(0, dtype=np.float32),
+                    "vals_log_ratio": np.empty(0, dtype=np.float32)}
         vals_a = abs_a[:h, :w][m]
         vals_b = abs_b[:h, :w][m]
         mean_a, std_a = float(np.mean(vals_a)), float(np.std(vals_a))
         mean_b, std_b = float(np.mean(vals_b)), float(np.std(vals_b))
         masked_diff = diff[:h, :w][m]
-        ratio = float(10.0 ** np.mean(masked_diff))
+        log_ratio_mean = float(np.mean(masked_diff))
         log_ratio_std = float(np.std(masked_diff))
+        ratio = float(10.0 ** log_ratio_mean)
         p_value, delta = mannwhitney_effect(vals_a, vals_b)
-        sub_a, sub_b = vals_a, vals_b
+        sub_a, sub_b, sub_log_ratio = vals_a, vals_b, masked_diff
         if vals_a.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
             sub_a = vals_a[rng.choice(vals_a.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
         if vals_b.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
             sub_b = vals_b[rng.choice(vals_b.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
+        if masked_diff.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
+            sub_log_ratio = masked_diff[rng.choice(masked_diff.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
         return {"mean_a": mean_a, "mean_b": mean_b, "std_a": std_a, "std_b": std_b,
-                "ratio": ratio, "log_ratio_std": log_ratio_std, "p_value": p_value, "cliffs_delta": delta,
+                "ratio": ratio, "log_ratio_mean": log_ratio_mean, "log_ratio_std": log_ratio_std,
+                "p_value": p_value, "cliffs_delta": delta,
                 "n_px": n_px, "pct_area": 100.0 * n_px / m.size,
-                "vals_a": sub_a.astype(np.float32), "vals_b": sub_b.astype(np.float32)}
+                "vals_a": sub_a.astype(np.float32), "vals_b": sub_b.astype(np.float32),
+                "vals_log_ratio": sub_log_ratio.astype(np.float32)}
 
     def _localmax_entry(self, map_a: np.ndarray, map_b: np.ndarray,
                          diff: np.ndarray, scale_px: float,
                          footprint_mult: float, prominence_percentile: float,
                          region_fraction: float, presmooth_fraction: float,
+                         top_percent: float,
                          rng: np.random.Generator) -> dict:
-        """One partial['localmax'][key] entry. Builds the local-maxima mask
-        from np.maximum(|A|, |B|) — a peak strong in either image counts,
-        mirroring the existing Nebula-mask union rationale — then returns its
-        masked stats measured from the raw (unsmoothed) magnitude maps.
-        footprint_px, region_px (the neighbourhood grown around each peak),
-        and presmooth_sigma (detection-only smoothing) all scale with this
-        call's own scale_px, so both "how local" and "how tall" a peak must
-        be, plus how much denoising happens before detection, auto-adapt per
-        metric/scale instead of using one fixed setting everywhere.
+        """One partial['localmax'][key] entry. Builds the local-maxima mask via
+        _combined_localmax_mask (peaks over np.maximum(|A|, |B|) — a peak strong in
+        either image counts, mirroring the existing Nebula-mask union rationale —
+        unioned with the top-percent brightness mask) then returns its masked stats
+        measured from the raw (unsmoothed) magnitude maps. footprint_px, region_px
+        (the neighbourhood grown around each peak), and presmooth_sigma
+        (detection-only smoothing) all scale with this call's own scale_px, so both
+        "how local" and "how tall" a peak must be, plus how much denoising happens
+        before detection, auto-adapt per metric/scale instead of using one fixed
+        setting everywhere.
         """
         h = min(map_a.shape[0], map_b.shape[0])
         w = min(map_a.shape[1], map_b.shape[1])
         abs_a, abs_b = np.abs(map_a[:h, :w]), np.abs(map_b[:h, :w])
-        peak_source = np.maximum(abs_a, abs_b)
         footprint_px = max(3, int(round(footprint_mult * scale_px)) | 1)
         region_px = max(1, int(round(region_fraction * footprint_px)))
         presmooth_sigma = max(0.5, presmooth_fraction * scale_px)
-        mask = self._local_maxima_mask(peak_source, footprint_px,
-                                        prominence_percentile, region_px,
-                                        presmooth_sigma)
+        mask = self._combined_localmax_mask(abs_a, abs_b, footprint_px, prominence_percentile,
+                                             region_px, presmooth_sigma, top_percent)
         return self._localmax_stats(abs_a, abs_b, diff, mask, rng)
 
     def _nebula_bounding_box(self, mask: np.ndarray,
@@ -693,7 +733,8 @@ class SpatialDetailAnalyzer:
                        localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
                        localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                        localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
-                       localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION) -> tuple[dict, dict]:
+                       localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "contrast_ratios_a": {}, "contrast_ratios_b": {},
@@ -702,8 +743,8 @@ class SpatialDetailAnalyzer:
             "std_nc_neb_std_a": {}, "std_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
-            "localmax_ratio": {},
-            "localmax_ratio_err": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
@@ -738,12 +779,11 @@ class SpatialDetailAnalyzer:
                 lm_entry = self._localmax_entry(
                     std_a, std_b, diff, ks,
                     localmax_footprint_mult, localmax_prominence_percentile,
-                    localmax_region_fraction, localmax_presmooth_fraction, rng)
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
                 partial["localmax"][f"std_{ks}px"] = lm_entry
-                partial["localmax_ratio"][ks] = lm_entry["ratio"]
-                partial["localmax_ratio_err"][ks] = (
-                    lm_entry["ratio"] * np.log(10) * lm_entry["log_ratio_std"]
-                    if lm_entry["ratio"] is not None and lm_entry["log_ratio_std"] is not None else None)
+                partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     std_a, std_b, diff, mask_neb_shared, mask_bg_shared,
@@ -966,7 +1006,8 @@ class SpatialDetailAnalyzer:
                        localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
                        localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                        localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
-                       localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION) -> tuple[dict, dict]:
+                       localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "log_nc_score_a": {}, "log_nc_score_b": {},
@@ -974,8 +1015,8 @@ class SpatialDetailAnalyzer:
             "log_nc_neb_std_a": {}, "log_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
-            "localmax_ratio": {},
-            "localmax_ratio_err": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for sigma in sigmas:
@@ -1003,12 +1044,11 @@ class SpatialDetailAnalyzer:
                 lm_entry = self._localmax_entry(
                     log_a, log_b, diff, sigma,
                     localmax_footprint_mult, localmax_prominence_percentile,
-                    localmax_region_fraction, localmax_presmooth_fraction, rng)
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
                 partial["localmax"][f"log_{sigma}"] = lm_entry
-                partial["localmax_ratio"][sigma] = lm_entry["ratio"]
-                partial["localmax_ratio_err"][sigma] = (
-                    lm_entry["ratio"] * np.log(10) * lm_entry["log_ratio_std"]
-                    if lm_entry["ratio"] is not None and lm_entry["log_ratio_std"] is not None else None)
+                partial["localmax_log_ratio"][sigma] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     log_a, log_b, diff, mask_neb_shared, mask_bg_shared,
@@ -1086,7 +1126,8 @@ class SpatialDetailAnalyzer:
                             localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
                             localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                             localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
-                            localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION) -> tuple[dict, dict]:
+                            localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                            localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         """G = |gradient| at Gaussian scale sigma (first spatial derivative magnitude).
         Reuses the LOG_SIGMAS scale set so gradient and |LoG| are directly comparable
         at identical spatial scales. Structured identically to _log_analysis."""
@@ -1097,8 +1138,8 @@ class SpatialDetailAnalyzer:
             "gm_nc_neb_std_a": {}, "gm_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
-            "localmax_ratio": {},
-            "localmax_ratio_err": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for sigma in sigmas:
@@ -1126,12 +1167,11 @@ class SpatialDetailAnalyzer:
                 lm_entry = self._localmax_entry(
                     gm_a, gm_b, diff, sigma,
                     localmax_footprint_mult, localmax_prominence_percentile,
-                    localmax_region_fraction, localmax_presmooth_fraction, rng)
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
                 partial["localmax"][f"gradient_{sigma}"] = lm_entry
-                partial["localmax_ratio"][sigma] = lm_entry["ratio"]
-                partial["localmax_ratio_err"][sigma] = (
-                    lm_entry["ratio"] * np.log(10) * lm_entry["log_ratio_std"]
-                    if lm_entry["ratio"] is not None and lm_entry["log_ratio_std"] is not None else None)
+                partial["localmax_log_ratio"][sigma] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     gm_a, gm_b, diff, mask_neb_shared, mask_bg_shared,
@@ -1209,7 +1249,8 @@ class SpatialDetailAnalyzer:
                            localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
                            localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                            localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
-                           localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION) -> tuple[dict, dict]:
+                           localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                           localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "sigma_noise_a": None, "sigma_noise_b": None,
@@ -1219,8 +1260,8 @@ class SpatialDetailAnalyzer:
             "wavelet_nc_neb_std_a": {}, "wavelet_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
-            "localmax_ratio": {},
-            "localmax_ratio_err": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
 
@@ -1278,12 +1319,11 @@ class SpatialDetailAnalyzer:
                 lm_entry = self._localmax_entry(
                     rec_a, rec_b, diff, 2 ** display_level,
                     localmax_footprint_mult, localmax_prominence_percentile,
-                    localmax_region_fraction, localmax_presmooth_fraction, rng)
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
                 partial["localmax"][f"wavelet_{display_level}"] = lm_entry
-                partial["localmax_ratio"][display_level] = lm_entry["ratio"]
-                partial["localmax_ratio_err"][display_level] = (
-                    lm_entry["ratio"] * np.log(10) * lm_entry["log_ratio_std"]
-                    if lm_entry["ratio"] is not None and lm_entry["log_ratio_std"] is not None else None)
+                partial["localmax_log_ratio"][display_level] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][display_level] = lm_entry["log_ratio_std"]
             if not single:
                 # Raw signed reconstructions (not abs()) — complementary to the
                 # sign-discarding log-ratio map, shows whether band-pass detail
@@ -1394,7 +1434,8 @@ class SpatialDetailAnalyzer:
                         localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
                         localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                         localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
-                        localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION) -> tuple[dict, dict]:
+                        localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                        localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "weber_contrast_a": {},
@@ -1404,8 +1445,8 @@ class SpatialDetailAnalyzer:
             "weber_nc_neb_std_a": {}, "weber_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
-            "localmax_ratio": {},
-            "localmax_ratio_err": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
@@ -1438,12 +1479,11 @@ class SpatialDetailAnalyzer:
                 lm_entry = self._localmax_entry(
                     wc_a, wc_b, diff, ks,
                     localmax_footprint_mult, localmax_prominence_percentile,
-                    localmax_region_fraction, localmax_presmooth_fraction, rng)
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
                 partial["localmax"][f"weber_{ks}px"] = lm_entry
-                partial["localmax_ratio"][ks] = lm_entry["ratio"]
-                partial["localmax_ratio_err"][ks] = (
-                    lm_entry["ratio"] * np.log(10) * lm_entry["log_ratio_std"]
-                    if lm_entry["ratio"] is not None and lm_entry["log_ratio_std"] is not None else None)
+                partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     wc_a, wc_b, diff, mask_neb_shared, mask_bg_shared,
@@ -1730,7 +1770,7 @@ class SpatialDetailAnalyzer:
         return fig
 
     def _plot_localmax_mask_grid(self, grid_rows: list,
-                                  color: str = "darkorange", alpha: float = 0.55) -> plt.Figure | None:
+                                  color: str = "magenta", alpha: float = 0.55) -> plt.Figure | None:
         """Grid figure: one row per metric family, columns = kernel/scale sizes
         smallest to largest. Each panel shows that exact scale's local-maxima
         mask (same computation _localmax_entry uses for the Section 8j table)
@@ -1764,7 +1804,7 @@ class SpatialDetailAnalyzer:
                 ax.set_title(panel_title, fontsize=8)
             axes[r, 0].text(-0.08, 0.5, family_label, transform=axes[r, 0].transAxes,
                              fontsize=9, fontweight="bold", ha="right", va="center", rotation=90)
-        legend_handle = Patch(facecolor=color, edgecolor="none", alpha=0.8, label="Local maxima (dilated)")
+        legend_handle = Patch(facecolor=color, edgecolor="none", alpha=0.8, label="Local maxima (dilated) ∪ top-N% bright")
         fig.legend(handles=[legend_handle], loc="lower center", fontsize=9, bbox_to_anchor=(0.5, -0.01))
         fig.suptitle("Local-maxima masks by metric (rows) and scale, smallest → largest (columns)", fontsize=11)
         fig.tight_layout(rect=[0.03, 0.02, 1, 0.96])
@@ -1859,17 +1899,19 @@ class SpatialDetailAnalyzer:
         fig.tight_layout()
         return fig
 
-    def _plot_localmax_ratio_overview(self, ratios_by_method: dict,
+    def _plot_localmax_ratio_overview(self, log_ratios_by_method: dict,
                                        errors_by_method: dict | None = None) -> plt.Figure | None:
-        """One line per method: local-maxima masked geometric-mean A/B ratio vs.
+        """One line per method: local-maxima masked log10(A/B) geometric-mean vs.
         approximate spatial scale (px, log-x). Structurally identical to
         _plot_nc_ratio_overview (Section 8i); y-axis is the local-maxima-masked
-        ratio (Section 8j) instead of the whole-nebula noise-corrected score
+        log-ratio (Section 8j) instead of the whole-nebula noise-corrected score
         ratio. None if no method has any usable (non-None) value.
         errors_by_method (optional): matching {method: {scale: error}} — ±1
-        standard deviation of the per-pixel log-ratio population within each
-        scale's mask, converted to linear ratio units (delta-method
-        propagation), rendered as error bars when present for a given point."""
+        standard deviation of the per-pixel log10(A/B) population within each
+        scale's mask, plotted directly with no unit conversion (both the value
+        and its error already live in log10 space, so this is an exact spread
+        measure, not an approximation), rendered as error bars when present for
+        a given point."""
         _SCALE_LABEL = {
             "std": "px", "weber": "px", "log": "σ px",
             "gradient": "σ px", "wavelet": "level (≈px)",
@@ -1878,7 +1920,7 @@ class SpatialDetailAnalyzer:
             "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
             "weber": "seagreen", "gradient": "goldenrod",
         }
-        series = self._ratio_series_with_errors(ratios_by_method, errors_by_method)
+        series = self._ratio_series_with_errors(log_ratios_by_method, errors_by_method)
         if not series:
             return None
 
@@ -1894,12 +1936,12 @@ class SpatialDetailAnalyzer:
                             label=label, color=_COLORS.get(method))
             else:
                 ax.plot(xs, ys, marker="o", label=label, color=_COLORS.get(method))
-        ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8,
-                   label="Ratio = 1 (A = B)")
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=0.8,
+                   label="log ratio = 0 (A = B)")
         ax.set_xscale("log")
         ax.set_xlabel("Approximate spatial scale (px)")
-        ax.set_ylabel("Local-maxima masked ratio (A / B, geometric mean)")
-        ax.set_title("Local-maxima masked contrast — cross-method overview")
+        ax.set_ylabel("Local-maxima masked log₁₀(A / B) (geometric mean ± SD)")
+        ax.set_title("Local-maxima masked contrast — cross-method overview (log ratio)")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()

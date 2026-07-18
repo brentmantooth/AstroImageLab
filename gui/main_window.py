@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
 
         # Control panel below images
         self._control = AnalysisControlPanel()
-        self._control.setMaximumHeight(410)   # 12 Parameters rows (was 340 for 10 rows) — bump proportionally when adding new QFormLayout rows
+        self._control.setMaximumHeight(444)   # 13 Parameters rows (was 410 for 12 rows) — bump proportionally when adding new QFormLayout rows
         main_layout.addWidget(self._control)
 
         # Wire signals

@@ -17,6 +17,7 @@ from core.models import (
     EPSF_MAX_STARS, SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
     SECTION8_NEBULA_MASK_MAX_HOLE_PX,
     SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+    SECTION8_LOCALMAX_TOP_PERCENT,
 )
 
 
@@ -218,6 +219,18 @@ class AnalysisControlPanel(QWidget):
             "Section 8j local-maxima mask: minimum peak height, as a percentile of\n"
             "each scale's own combined |A|,|B| peak-source values.")
         params_layout.addRow("Local-maxima prominence (pctl):", self._localmax_prominence_pctl)
+
+        self._localmax_top_percent = QDoubleSpinBox()
+        self._localmax_top_percent.setRange(0.5, 25.0)
+        self._localmax_top_percent.setSingleStep(0.5)
+        self._localmax_top_percent.setDecimals(1)
+        self._localmax_top_percent.setSuffix(" %")
+        self._localmax_top_percent.setValue(SECTION8_LOCALMAX_TOP_PERCENT)
+        self._localmax_top_percent.setToolTip(
+            "Section 8j local-maxima mask: pixels in the top N% of Image A's or Image B's\n"
+            "own value distribution are unioned (OR) into the mask, so broad bright plateaus\n"
+            "are captured even when they never register as an isolated local-maximum peak.")
+        params_layout.addRow("Local-maxima top-bright (%):", self._localmax_top_percent)
 
         self._pixel_scale_override = QDoubleSpinBox()
         self._pixel_scale_override.setRange(0.0, 20.0)
@@ -423,6 +436,7 @@ class AnalysisControlPanel(QWidget):
             "nebula_max_hole_px": self._nebula_max_hole_px.value(),
             "localmax_footprint_mult": self._localmax_footprint_mult.value(),
             "localmax_prominence_percentile": self._localmax_prominence_pctl.value(),
+            "localmax_top_percent": self._localmax_top_percent.value(),
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "epsf_max_stars": self._epsf_max_stars.value(),
             "roi": self._roi,

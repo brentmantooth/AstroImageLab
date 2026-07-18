@@ -23,7 +23,8 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
                           SECTION8_NEBULA_MASK_MAX_HOLE_PX,
                           SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
-                          SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION)
+                          SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
+                          SECTION8_LOCALMAX_TOP_PERCENT)
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -573,6 +574,92 @@ def _localmax_distributions_figure(localmax: dict) -> tuple[str, str]:
     return img_html, caption_html
 
 
+def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
+    """Combined figure: one row per Section 8j metric/scale, each row showing a
+    single violin of the per-pixel log10(|A|/|B|) population within that row's
+    local-maxima mask (vals_log_ratio), with an IQR box-plot overlay (median
+    magenta, IQR cyan — same styling as _localmax_distributions_figure) and a
+    dashed vertical reference line at 0 (A = B parity). This is the same masked
+    pixel population the "log ratio A/B (geo. mean ± SD)" table column and the
+    8j cross-method overview plot's error bars are computed from — visualising
+    its shape helps judge whether a mean ± SD summary is a reasonable one (e.g.
+    whether the underlying A/B ratio is approximately log-normal).
+
+    Returns (img_html, caption_html), or ("", "") if no row has enough data
+    (including single-image mode, where localmax is empty).
+    """
+    import seaborn as sns
+
+    rows = [(k, label) for k, label in _SPATIAL_CORR_ROWS if k in localmax]
+    has_data = any(
+        localmax[k].get("vals_log_ratio") is not None and localmax[k]["vals_log_ratio"].size >= 3
+        for k, _ in rows
+    )
+    if not rows or not has_data:
+        return "", ""
+
+    fig, axes = plt.subplots(len(rows), 1, figsize=(7, 1.1 * len(rows) + 1))
+    fig.subplots_adjust(hspace=0.65, left=0.22, right=0.97, top=0.97, bottom=0.04)
+
+    def _draw_boxwhisker(ax, vals_list):
+        for i, vals in enumerate(vals_list):
+            ax.boxplot(
+                [vals], positions=[i], vert=False,
+                widths=0.45, zorder=5,
+                patch_artist=True,
+                manage_ticks=False,
+                boxprops=dict(facecolor="none", edgecolor="#00e5ff", linewidth=1.5, alpha=0.9),
+                medianprops=dict(color="magenta", linewidth=2.0, alpha=0.9),
+                whiskerprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                capprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                flierprops=dict(marker="", visible=False),
+            )
+
+    for ax, (key, title) in zip(np.atleast_1d(axes), rows):
+        vlr = localmax[key].get("vals_log_ratio")
+        if vlr is None or vlr.size < 3:
+            ax.set_visible(False)
+            continue
+
+        sns.violinplot(x=vlr, orient="h", color="steelblue", inner=None, linewidth=0.8, ax=ax)
+        _draw_boxwhisker(ax, [vlr])
+        ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, zorder=4)
+
+        lo, hi = np.percentile(vlr, [1.0, 99.0])
+        if hi > lo:
+            pad = 0.05 * (hi - lo)
+            ax.set_xlim(lo - pad, hi + pad)
+
+        ax.set_title(title, fontsize=8, loc="left", pad=2)
+        ax.set_xlabel("", fontsize=7)
+        ax.set_ylabel("", fontsize=7)
+        ax.set_yticks([])
+        ax.tick_params(axis="x", labelsize=7)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    img_html = _img_tag(fig, "localmax_log_ratio_distributions")
+
+    caption_html = (
+        '<p class="caption">'
+        "<b>Masked-region log ratio distributions (log&#8321;&#8320;(A / B)).</b> "
+        "Each row is one Section 8j metric/scale, shown as a "
+        "<b>violin plot</b> (kernel density estimate, randomly subsampled for "
+        "display) of the per-pixel log10(|A|/|B|) population within that row's "
+        "local-maxima mask, with an IQR box-plot overlay: "
+        "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, "
+        "a <span style='color:magenta'><b>magenta centre line</b></span> at the "
+        "median. The dashed vertical line marks 0 (A = B). This is the same "
+        "masked pixel population the &ldquo;log ratio A/B (geo. mean &plusmn; SD)&rdquo; "
+        "table column and the cross-method overview plot's error bars are computed "
+        "from &mdash; a roughly symmetric, unimodal shape here supports summarising "
+        "it with a mean &plusmn; SD. "
+        "Each row's x-axis is independently clipped to its own 1st&ndash;99th "
+        "percentile range so the IQR box stays visible."
+        "</p>"
+    )
+    return img_html, caption_html
+
+
 def _epsf_stars_cell(psf_metrics: dict) -> str:
     """Format the number of stars used to build the ePSF."""
     n = psf_metrics.get("epsf_n_stars")
@@ -624,12 +711,15 @@ def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label, val_f
 
 def _localmax_rows(localmax: dict, rows: list, val_fmt: str = ".3f") -> str:
     """Build <tr> rows for the Section 8j local-maxima masked-region summary
-    table: Scale | Mean A ± SD | Mean B ± SD | Ratio (A/B, geo. mean) |
+    table: Scale | Mean A ± SD | Mean B ± SD | log ratio A/B (geo. mean ± SD) |
     Significance | N px / % area. `rows` is _SPATIAL_CORR_ROWS, reused
     directly — partial['localmax'] keys are the exact same strings as
-    partial['panels']. Mean A/B colored against each other, Ratio colored
-    against parity (1.0) — same convention as _nc_ratio_rows. Significance is
-    a Mann-Whitney U + Cliff's delta test (image_filters.py::_localmax_stats,
+    partial['panels']. Mean A/B colored against each other (same convention as
+    _nc_ratio_rows). The log-ratio column is sampled directly from the masked
+    log10(|A|/|B|) population (log_ratio_mean ± log_ratio_std, not derived from
+    Mean A/Mean B) and shaded a fixed neutral blue — it isn't an A-vs-B
+    comparison, so red/green better-worse coloring doesn't apply. Significance
+    is a Mann-Whitney U + Cliff's delta test (image_filters.py::_localmax_stats,
     core.stats_utils.mannwhitney_effect) on the full masked population,
     rendered with the same star-rating/coloring as Section 4's PSF table.
     Pixel-count/%-area column is informational only (no coloring)."""
@@ -638,17 +728,17 @@ def _localmax_rows(localmax: dict, rows: list, val_fmt: str = ".3f") -> str:
         entry = localmax.get(key)
         if entry is None:
             continue
-        va, vb, vr = entry.get("mean_a"), entry.get("mean_b"), entry.get("ratio")
+        va, vb = entry.get("mean_a"), entry.get("mean_b")
         sa, sb = entry.get("std_a"), entry.get("std_b")
+        log_mean, log_std = entry.get("log_ratio_mean"), entry.get("log_ratio_std")
         n_px, pct = entry.get("n_px", 0), entry.get("pct_area", 0.0)
         p, delta = entry.get("p_value"), entry.get("cliffs_delta")
         ca, cb = _better_worse_class(va, vb)
-        cr, _ = _better_worse_class(vr, 1.0)
         sig_html = _format_significance_html(p, delta) if p is not None else ""
         out += (f"<tr><td>{label}</td>"
                 f"<td class='{ca}'>{_val_pm(va, sa, val_fmt)}</td>"
                 f"<td class='{cb}'>{_val_pm(vb, sb, val_fmt)}</td>"
-                f"<td class='{cr}'>{_val(vr, val_fmt)}</td>"
+                f"<td style='background:#b3e5fc'>{_val_pm(log_mean, log_std, val_fmt)}</td>"
                 f"{_sig_td(sig_html, p)}"
                 f"<td>{n_px:,d} ({pct:.2f}%)</td></tr>")
     return out
@@ -2924,7 +3014,6 @@ retention; values below 1.0 indicate that the PSF reduces contrast at that spati
 lower bars = more blurring. Error bars show the standard deviation of the per-pixel ratios within
 each band. Colors identify contrast level (high / medium / low){retention_caption_b}</p>
 {self._psf_retention_table(sim)}"""
-            self._cached_retention_html = self._psf_retention_table(sim)
 
         diff_para = ("""<p>
   A pixel-level difference map (A &minus; B) is computed and displayed with the RdBu_r
@@ -2934,6 +3023,18 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
   isolate three contrast levels from Block&thinsp;1 of the chart and quantify the
   peak-to-valley swing preserved by each PSF.
 </p>""" if has_b else "")
+
+        conv_a_title = f"Convolved — {sim['label_a']}"
+        conv_b_title = f"Convolved — {sim['label_b']}"
+        conv_ref_title = f"Convolved — {sim['label_ref']}"
+        _testchart_images_html = (
+            panel(sim['original'], 'Original test chart')
+            + panel(sim['conv_a'], conv_a_title)
+            + (panel(sim['conv_b'], conv_b_title) if has_b else '')
+            + (panel(sim['conv_ref'], conv_ref_title) if sim.get('conv_ref') is not None else '')
+            + diff_panel
+        )
+        _testchart_images_box = _info_box(_testchart_images_html, title="Show test chart validation images", open=False)
 
         return f"""
 <h3>PSF Simulation — test chart convolved at native pixel resolution</h3>
@@ -2969,11 +3070,8 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
 </p>
 {diff_para}
 <p>Each image is rendered at 1 image-pixel&thinsp;:&thinsp;1 screen-pixel.</p>
-{panel(sim['original'], 'Original test chart')}
-{panel(sim['conv_a'],   f"Convolved — {sim['label_a']}")}
-{panel(sim['conv_b'],   f"Convolved — {sim['label_b']}") if has_b else ''}
-{panel(sim['conv_ref'], f"Convolved — {sim['label_ref']}") if sim.get('conv_ref') is not None else ''}
-{diff_panel}{xs_block}"""
+{_testchart_images_box}
+{xs_block}"""
 
     # ── Section 4: Halo ───────────────────────────────────────────────────────
 
@@ -4162,10 +4260,12 @@ curve is shown.</p>
 
         localmax_rows_html = _localmax_rows(sm.get("localmax", {}), _SPATIAL_CORR_ROWS)
         localmax_dist_img, localmax_dist_caption = _localmax_distributions_figure(sm.get("localmax", {}))
+        localmax_log_ratio_dist_img, localmax_log_ratio_dist_caption = _localmax_log_ratio_distribution_figure(sm.get("localmax", {}))
         lm_footprint_mult = sm.get("localmax_footprint_mult", SECTION8_LOCALMAX_FOOTPRINT_MULT)
         lm_prominence_pctl = sm.get("localmax_prominence_percentile", SECTION8_LOCALMAX_PROMINENCE_PERCENTILE)
         lm_region_fraction = sm.get("localmax_region_fraction", SECTION8_LOCALMAX_REGION_FRACTION)
         lm_presmooth_fraction = sm.get("localmax_presmooth_fraction", SECTION8_LOCALMAX_PRESMOOTH_FRACTION)
+        lm_top_percent = sm.get("localmax_top_percent", SECTION8_LOCALMAX_TOP_PERCENT)
         localmax_methodology_box = _info_box(
             'For each metric/scale combination in 8d–8h, a <strong>local-maxima mask</strong> is '
             'built independently: the combined |A|,|B| peak-source array is lightly '
@@ -4174,14 +4274,21 @@ curve is shown.</p>
             f'their own {lm_footprint_mult:g}&times;(scale) neighbourhood AND exceed the '
             f'{lm_prominence_pctl:g}th percentile of the smoothed array are kept as peaks and grown '
             f'by {lm_region_fraction:g}&times; that same neighbourhood size, so the mask covers the local '
-            'region of pixels around each peak rather than a single pixel. Unlike the Nebula/Background '
-            'masks in 8c, this mask is <strong>not</strong> restricted to the nebula region — the '
-            'prominence threshold already isolates prominent features on its own, and intersecting with '
-            'the coarser nebula mask could exclude legitimate sharp features (stars, edges) outside it. '
+            'region of pixels around each peak rather than a single pixel. This peak mask is then '
+            f'<strong>unioned (OR)</strong> with a top-{lm_top_percent:g}% brightness mask — pixels in the '
+            'top percentile of Image A\'s or Image B\'s own value distribution — so broad bright plateaus '
+            'that never register as a sharp local maximum are still captured, not just isolated peaks. '
+            'Unlike the Nebula/Background masks in 8c, this mask is <strong>not</strong> restricted to the '
+            'nebula region — the prominence threshold already isolates prominent features on its own, and '
+            'intersecting with the coarser nebula mask could exclude legitimate sharp features (stars, '
+            'edges) outside it. '
             '<strong>Mean A / Mean B</strong> are the average metric magnitude &plusmn; standard deviation '
-            'over the masked pixels in each image; <strong>Ratio (A/B)</strong> is the geometric mean of '
-            'the per-pixel A/B ratio at those pixels (10<sup>mean(log-ratio)</sup>), a plain '
-            '&times;-factor. <strong>Significance</strong> is a Mann-Whitney U test (two-sided) with '
+            'over the masked pixels in each image. <strong>log ratio A/B (geo. mean &plusmn; SD)</strong> '
+            'is sampled directly from the masked pixels\' per-pixel log10(|A|/|B|) population — not '
+            'derived from Mean A/Mean B — and reported in log10 units: 0 means A = B, positive means A is '
+            'brighter, negative means B is brighter, and the equivalent linear &times;-factor is '
+            '10<sup>value</sup>. It is shaded a neutral blue rather than red/green, since it is not an '
+            'A-vs-B comparison. <strong>Significance</strong> is a Mann-Whitney U test (two-sided) with '
             'Cliff\'s delta effect size, comparing the full masked-pixel populations of A vs B for that '
             'row — the same test and star-rating legend (&#9733;&#9733;&#9733; large, &#9733;&#9733; '
             'medium, &#9733; small, n.s. not significant; blue cell = p&lt;0.05) already used for the '
@@ -4336,6 +4443,87 @@ curve is shown.</p>
             if orig_fig else ""
         )
 
+        # Section 8d-8h figure-heavy content, collapsed by default (closed <details>),
+        # so the report stays compact and navigable — headings/methodology/tables above
+        # each family stay visible; only the map/correlation/noise-normalised figures
+        # (the bulk of each family's page length) live inside the collapsible box.
+        _log_images_html = (
+            _family_figs_with_corr(_log_rows, lambda k: "log_sigma" + k.split("_", 1)[1])
+            + '<p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per figure): '
+              'Image A (top-left), Image B (top-right), log-ratio map (middle-left), and — when a '
+              'cross-section line is set — its profile (middle-right), plus a bottom-row histogram of '
+              'the log-ratio map\'s pixel values (same colour scale). A filter preserving more fine '
+              'detail shows brighter, more defined boundaries at small σ. Each map is immediately '
+              'followed by its per-pixel correlation scatter (see methodology above).</p>'
+              '<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair '
+              'A/B comparison.</p>'
+            + _family_nrm_figs(_log_rows)
+        )
+        _log_images_box = _info_box(_log_images_html, title="Show LoG maps & figures", open=False)
+
+        _wavelet_images_html = (
+            _hires_img_tag(figs.get("wavelet_snr"), "Wavelet SNR")
+            + '<p class="caption">Per-level SNR for both filters. Level 1 SNR &lt; 1 is expected '
+              '(noise-dominated). A filter preserving more fine detail shows higher SNR at level 2.</p>'
+            + _family_figs_with_corr(_wavelet_rows, lambda k: "wavelet_level" + k.split("_", 1)[1])
+            + '<p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale, '
+              'diverging colourmap): Image A (top-left), Image B (top-right), log-ratio panel '
+              '(middle-left) showing where fine structure differs between the two filters (sign '
+              'discarded — |A|/|B| — since wavelet reconstructions can be negative), and — when a '
+              'cross-section line is set — its profile (middle-right), plus a bottom-row histogram '
+              'of the log-ratio map\'s pixel values (same colour scale). Each map is immediately '
+              'followed by its per-pixel correlation scatter (see methodology above).</p>'
+              '<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair '
+              'A/B comparison.</p>'
+            + _family_nrm_figs(_wavelet_rows)
+        )
+        _wavelet_images_box = _info_box(_wavelet_images_html, title="Show Wavelet maps & figures", open=False)
+
+        _gradient_images_html = (
+            _family_figs_with_corr(_gradient_rows, lambda k: k)
+            + '<p class="caption">Gradient magnitude maps at σ = 1.5, 3, and 6 px (shared colour scale '
+              'per figure): Image A (top-left), Image B (top-right), log-ratio map (middle-left), and '
+              '— when a cross-section line is set — its profile (middle-right), plus a bottom-row '
+              'histogram of the log-ratio map\'s pixel values (same colour scale). A filter preserving '
+              'sharper boundaries shows brighter, more defined gradient response. Each map is '
+              'immediately followed by its per-pixel correlation scatter (see methodology above).</p>'
+              '<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair '
+              'A/B comparison.</p>'
+            + _family_nrm_figs(_gradient_rows)
+        )
+        _gradient_images_box = _info_box(_gradient_images_html, title="Show Gradient maps & figures", open=False)
+
+        _std_images_html = (
+            _family_figs_with_corr(_std_rows, lambda k: k)
+            + '<p class="caption">Local σ maps at each kernel size (shared colour scale): Image A '
+              '(top-left), Image B (top-right), log-ratio map (middle-left) highlighting where one '
+              'filter preserves more local variation, and — when a cross-section line is set — its '
+              'profile (middle-right), plus a bottom-row histogram of the log-ratio map\'s pixel '
+              'values (same colour scale). Each map is immediately followed by its per-pixel '
+              'correlation scatter (see methodology above).</p>'
+              '<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair '
+              'A/B comparison.</p>'
+            + _family_nrm_figs(_std_rows)
+        )
+        _std_images_box = _info_box(_std_images_html, title="Show Local σ maps & figures", open=False)
+
+        _weber_images_html = (
+            _family_figs_with_corr(_weber_rows, lambda k: k)
+            + '<p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root '
+              'colour scale, viridis): Image A (top-left), Image B (top-right), log-ratio panel '
+              '(middle-left) showing where one image achieves greater relative contrast, and — when '
+              'a cross-section line is set — its profile (middle-right), plus a bottom-row histogram '
+              'of the log-ratio map\'s pixel values (same colour scale). Brighter regions have higher '
+              'Weber contrast — the local intensity range is large relative to the local median '
+              'luminance. High values over dark-sky regions are expected; use a nebula ROI for '
+              'meaningful filter comparison. Each map is immediately followed by its per-pixel '
+              'correlation scatter (see methodology above).</p>'
+              '<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair '
+              'A/B comparison.</p>'
+            + _family_nrm_figs(_weber_rows)
+        )
+        _weber_images_box = _info_box(_weber_images_html, title="Show Weber contrast maps & figures", open=False)
+
         return f"""
 <h2>8. Spatial Detail Comparison &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
 {err}
@@ -4380,21 +4568,9 @@ curve is shown.</p>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {log_nc_rows}
 </table>
-{_family_figs_with_corr(_log_rows, lambda k: "log_sigma" + k.split("_", 1)[1])}
-<p class="caption">|LoG| maps at σ = 1.5, 3, and 6 px (shared colour scale per figure):
-Image A (top-left), Image B (top-right), log-ratio map (middle-left), and — when a
-cross-section line is set — its profile (middle-right), plus a bottom-row histogram of
-the log-ratio map's pixel values (same colour scale). A filter preserving more fine
-detail shows brighter, more defined boundaries at small σ. Each map is immediately
-followed by its per-pixel correlation scatter (see methodology above).</p>
-<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
-{_family_nrm_figs(_log_rows)}
+{_log_images_box}
 <h3>8e. Wavelet Decomposition</h3>
 {_wavelet_box}
-
-{_hires_img_tag(figs.get("wavelet_snr"), "Wavelet SNR")}
-<p class="caption">Per-level SNR for both filters. Level 1 SNR &lt; 1 is expected
-(noise-dominated). A filter preserving more fine detail shows higher SNR at level 2.</p>
 
 <table>
   <tr><th>Wavelet level</th><th>{ra.label} SNR</th><th>{rb.label} SNR</th></tr>
@@ -4404,17 +4580,7 @@ followed by its per-pixel correlation scatter (see methodology above).</p>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {wavelet_nc_rows}
 </table>
-
-{_family_figs_with_corr(_wavelet_rows, lambda k: "wavelet_level" + k.split("_", 1)[1])}
-<p class="caption">Reconstructed detail images at levels 2 and 3 (shared colour scale,
-diverging colourmap): Image A (top-left), Image B (top-right), log-ratio panel (middle-left)
-showing where fine structure differs between the two filters (sign discarded — |A|/|B| —
-since wavelet reconstructions can be negative), and — when a cross-section line is set —
-its profile (middle-right), plus a bottom-row histogram of the log-ratio map's pixel values
-(same colour scale). Each map is immediately followed by its per-pixel correlation
-scatter (see methodology above).</p>
-<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
-{_family_nrm_figs(_wavelet_rows)}
+{_wavelet_images_box}
 
 <h3>8f. Gradient Magnitude (Edge Sharpness)</h3>
 {_info_box('The gradient magnitude G = |∇I| = sqrt((∂I/∂x)² + (∂I/∂y)²) highlights regions '
@@ -4434,15 +4600,7 @@ scatter (see methodology above).</p>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {gm_nc_rows}
 </table>
-{_family_figs_with_corr(_gradient_rows, lambda k: k)}
-<p class="caption">Gradient magnitude maps at σ = 1.5, 3, and 6 px (shared colour scale per
-figure): Image A (top-left), Image B (top-right), log-ratio map (middle-left), and — when a
-cross-section line is set — its profile (middle-right), plus a bottom-row histogram of the
-log-ratio map's pixel values (same colour scale). A filter preserving sharper
-boundaries shows brighter, more defined gradient response. Each map is immediately followed
-by its per-pixel correlation scatter (see methodology above).</p>
-<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
-{_family_nrm_figs(_gradient_rows)}
+{_gradient_images_box}
 
 <h3>8g. Local Standard Deviation Maps</h3>
 {_info_box('Measures how much pixel values vary within a neighbourhood. '
@@ -4464,14 +4622,7 @@ by its per-pixel correlation scatter (see methodology above).</p>
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {std_nc_rows}
 </table>
-{_family_figs_with_corr(_std_rows, lambda k: k)}
-<p class="caption">Local σ maps at each kernel size (shared colour scale): Image A (top-left),
-Image B (top-right), log-ratio map (middle-left) highlighting where one filter preserves more
-local variation, and — when a cross-section line is set — its profile (middle-right), plus a
-bottom-row histogram of the log-ratio map's pixel values (same colour scale). Each map
-is immediately followed by its per-pixel correlation scatter (see methodology above).</p>
-<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
-{_family_nrm_figs(_std_rows)}
+{_std_images_box}
 <h3>8h. Weber Fraction Contrast Maps</h3>
 {_info_box(
     '<p><strong>Formula:</strong> c = ΔL / L, '
@@ -4503,17 +4654,7 @@ is immediately followed by its per-pixel correlation scatter (see methodology ab
   <tr><th>Scale</th><th>{ra.label} (NC score)</th><th>{rb.label} (NC score)</th><th>Ratio A/B</th></tr>
   {weber_nc_rows}
 </table>
-{_family_figs_with_corr(_weber_rows, lambda k: k)}
-<p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root colour
-scale, viridis): Image A (top-left), Image B (top-right), log-ratio panel (middle-left)
-showing where one image achieves greater relative contrast, and — when a cross-section
-line is set — its profile (middle-right), plus a bottom-row histogram of the log-ratio
-map's pixel values (same colour scale). Brighter regions have higher Weber contrast —
-the local intensity range is large relative to the local median luminance. High values
-over dark-sky regions are expected; use a nebula ROI for meaningful filter comparison.
-Each map is immediately followed by its per-pixel correlation scatter (see methodology above).</p>
-<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair A/B comparison.</p>
-{_family_nrm_figs(_weber_rows)}
+{_weber_images_box}
 
 <h3>8i. Noise-Corrected Contrast — Cross-Method Overview</h3>
 {_hires_img_tag(figs.get("nc_ratio_overview"), "NC ratio overview")}
@@ -4530,24 +4671,27 @@ background populations behind each score are not pixel-paired between A and B.</
 {localmax_methodology_box}
 <table>
   <tr><th>Scale</th><th>{ra.label} (mean &plusmn; SD)</th><th>{rb.label} (mean &plusmn; SD)</th>
-      <th>Ratio A/B (geo. mean)</th><th>Significance</th><th>N px / % area</th></tr>
+      <th>log ratio A/B (geo. mean &plusmn; SD)</th><th>Significance</th><th>N px / % area</th></tr>
   {localmax_rows_html}
 </table>
 {_hires_img_tag(figs.get("localmax_ratio_overview"), "Local-maxima ratio overview")}
-<p class="caption">Local-maxima masked ratio A/B for every metric plotted against its
-approximate spatial scale (same scale convention as 8i). Compare within a method's own
-line, not numerically across methods. Error bars show &plusmn;1 standard deviation of
-the per-pixel log-ratio population within each scale's own mask, converted to linear
-ratio units — an exact spread measure, since the masked pixels are genuinely paired
-between Image A and Image B at each scale.</p>
+<p class="caption">Local-maxima masked log&#8321;&#8320;(A/B) for every metric plotted
+against its approximate spatial scale (same scale convention as 8i). Compare within a
+method's own line, not numerically across methods. Error bars show &plusmn;1 standard
+deviation of the per-pixel log10(A/B) population within each scale's own mask, plotted
+directly with no unit conversion — an exact spread measure, since the masked pixels are
+genuinely paired between Image A and Image B at each scale.</p>
 {localmax_dist_img}
 {localmax_dist_caption}
+{localmax_log_ratio_dist_img}
+{localmax_log_ratio_dist_caption}
 {_hires_img_tag(figs.get("localmax_mask_illustration"), "Local-maxima mask grid")}
 <p class="caption">Local-maxima masks for every metric/scale row in the table above —
 one panel per combination, rows grouped by metric family, columns ordered
 smallest&rarr;largest kernel/scale (Wavelet has only 2 display scales, so its third
 column is blank). Each panel shows the exact mask used to compute that row's
-statistics, overlaid on that metric's own |A| magnitude map.</p>"""
+statistics (isolated peaks unioned with the top-brightness mask — see the methodology
+box above), overlaid on that metric's own |A| magnitude map.</p>"""
 
     # ── Section 9: Signal-to-Noise Ratio ─────────────────────────────────────
 
@@ -5043,13 +5187,6 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                   '<span class="metric-label-warn">⚠</span> = interpret with bandwidth '
                   'context (filters had different bandwidths)</p>')
 
-        retention_block = getattr(self, "_cached_retention_html", "")
-        retention_section = (
-            "<h3>Contrast Retention Detail (convolved / original)</h3>"
-            + retention_block
-            if retention_block else ""
-        )
-
         return f"""
 <h2>9. Summary &amp; Recommendations</h2>
 {legend}
@@ -5061,5 +5198,4 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
            'Red cells indicate the worse value. Metrics marked ⚠ may be influenced by the '
            'difference in filter bandwidth and should not be used as the sole basis for '
            'comparison.',
-           title="How to read this table")}
-{retention_section}"""
+           title="How to read this table")}"""

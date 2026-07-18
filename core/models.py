@@ -50,6 +50,7 @@ SECTION8_LOCALMAX_PROMINENCE_PERCENTILE = 99.0   # percentile of the (smoothed) 
 SECTION8_LOCALMAX_PRESMOOTH_FRACTION = 0.5       # fraction of each metric's own scale used as the Gaussian pre-smoothing sigma applied to the peak-source array before maximum_filter detection, to suppress single-pixel noise-driven false maxima (Section 8j); detection only — masked-region statistics are still measured on the raw, unsmoothed maps
 SECTION8_LOCALMAX_REGION_FRACTION = 0.5          # fraction of the maximum_filter footprint used as the binary_dilation radius (px) grown around each detected peak pixel, so the mask covers the local neighbourhood around a peak rather than a single pixel (Section 8j)
 SECTION8_LOCALMAX_DIST_MAX_SAMPLES = 1000000     # per masked population, per scale — caps render cost of the Section 8j A/B distribution violin+box figure; mean/std/significance-test stats are computed from the full population, not this capped copy
+SECTION8_LOCALMAX_TOP_PERCENT = 5.0              # percentile of Image A's or Image B's own pixel-value distribution unioned (OR) into the local-maxima mask, so broad bright plateaus are captured even when they never register as an isolated local-maximum peak (Section 8j). E.g. 5.0 -> top 5% of values in A OR top 5% in B are included regardless of the peak-detection result
 
 PSF_SPATIAL_MAP_SIZE = 150       # px; long-axis resolution of FWHM / eccentricity spatial maps
 PSF_SPATIAL_MAP_SMOOTH_SIGMA = 5.0   # Gaussian smoothing sigma (px) applied to spatial maps before display

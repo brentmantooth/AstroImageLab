@@ -50,7 +50,7 @@ synthetic/
 
 | Utility | Location | Purpose |
 | --- | --- | --- |
-| `_info_box(body, title, open=False, style="")` | `report_builder.py` | Collapsible `<details>/<summary>` HTML panel |
+| `_info_box(body, title, open=False, style="")` | `report_builder.py:197` | Collapsible `<details>/<summary>` HTML panel — `body` is raw HTML, so it also wraps whole figure-heavy blocks (not just prose) closed by default to keep the report compact; see "Collapsible figure blocks" below |
 | `_val(v, fmt, fallback="—")` | `report_builder.py:184` | Null-safe table cell formatter |
 | `fig_to_b64(fig)` | `core/fig_utils.py` | Embeds matplotlib figure as base64 PNG string |
 | `normalize_for_display(arr)` | `core/stretch.py` | STF-stretch float32 array → uint8 [0,255] for QImage display |
@@ -68,6 +68,7 @@ synthetic/
 | `_family_nrm_figs(rows)` | `report_builder.py` | Sibling of `_family_figs_with_corr` for the noise-normalised (`nrm_*`) trailer figures — same `_SPATIAL_CORR_ROWS`-ordered iteration, no `map_key_fn` needed since the nrm key is always `"nrm_" + row_key`. Always use this (never a raw `sorted(figs)` scan) for any new per-scale trailer block — `sorted()` on figure-key strings is lexicographic and puts `nrm_std_10px` before `nrm_std_3px`/`5px` |
 | `SpatialDetailAnalyzer._crosshair_to_cropped_px(crosshair, shape, crop_fraction)` | `image_filters.py` | Converts a normalised `[0,1]` crosshair dict into pixel coords in the frame `_crop_border(arr, crop_fraction)` produces — the pattern for overlaying the user's cross-section line directly onto a Section 8 map panel (`_plot_side_by_side`'s `xs_line` param), as opposed to `xs_data`'s separate line-chart profile panel |
 | `SpatialDetailAnalyzer._local_maxima_mask(data, footprint_px, prominence_percentile, region_px, presmooth_sigma)` | `analysis/image_filters.py` | Scale-adaptive peak mask: `maximum_filter` non-max suppression + percentile prominence threshold + optional pre-smoothing (suppresses noise-driven false peaks) + `binary_dilation` region growth. All params are relative to the caller's own characteristic scale, not fixed pixel counts — see the Local-maxima detection convention below |
+| `SpatialDetailAnalyzer._combined_localmax_mask(abs_a, abs_b, footprint_px, prominence_percentile, region_px, presmooth_sigma, top_percent)` / `_top_percent_mask(abs_a, abs_b, top_percent)` | `analysis/image_filters.py` | `_local_maxima_mask` unioned (OR) with a top-`top_percent`% brightness mask — catches broad bright plateaus a sharp-peak detector alone would miss. Used identically by `_localmax_entry` (Section 8j table stats) and the mask-grid figure builder in `analyze()`, so the displayed mask always matches the mask backing that row's numbers |
 | `mannwhitney_effect(va, vb)` | `core/stats_utils.py` | Mann-Whitney U p-value + Cliff's delta in O(n log n) via `delta = 2·U/(n1·n2) − 1`; shared by `_psf_stat_test` (Section 4) and `SpatialDetailAnalyzer._localmax_stats` (Section 8j) — never reimplement Cliff's delta via a pairwise `arr_a[:, None] - arr_b[None, :]` matrix, it's O(n·m) memory |
 | `_format_significance_html(p, delta)` / `_sig_td(html, p)` | `report_builder.py` | Shared star-rating/p-value HTML cell + colored `<td>` wrapper for any Mann-Whitney significance column — used by both Section 4's PSF table and Section 8j's local-maxima table |
 | `SpatialDetailAnalyzer._ratio_series_with_errors(ratios_by_method, errors_by_method=None)` | `analysis/image_filters.py` | `{method: {scale: value}}` (+ optional matching errors) → sorted `{method: [(x_px, value, error_or_None), ...]}` point lists for a cross-method overview line plot; shared by `_plot_nc_ratio_overview` (8i) and `_plot_localmax_ratio_overview` (8j) |
@@ -136,6 +137,21 @@ Use significant-figure formats for any value that can span orders of magnitude:
 Pre-compute any Python variable **before** a `return f"""..."""` block. Do not nest
 `{f"...{var}..."}` substitutions — they cause confusing `UnboundLocalError` and
 syntax errors at runtime.
+
+### Collapsible figure blocks — reuse `_info_box` for images, not just text
+
+`_info_box(body, title, open=False, style="")` (`report_builder.py:197`) only ever
+wrapped prose/methodology text until Section 8's families got collapsed — its `body`
+parameter is raw HTML, so it works unchanged for a block of embedded `<img>` tags.
+To collapse a figure-heavy block (precedent: Section 8's five metric families 8d–8h,
+and Section 4's PSF test-chart image sequence in `_psf_simulation_html`), **pre-compute
+the image HTML as its own variable before the enclosing `return f"""..."""`** — same
+rule as "Long f-string HTML blocks" above, since an f-string expression can't contain
+statements — then interpolate `{_info_box(images_html, title="Show ...", open=False)}`
+in place of the raw figure calls. Keep the section heading, methodology `_info_box`,
+and any data table **outside** the collapsible: those are what a reader needs even with
+the images hidden, and default-closed means the collapsible content shouldn't be load-
+bearing for understanding the section at a glance.
 
 ### PyQt6 signal arity — declaration must match every emit()
 
@@ -299,8 +315,19 @@ fine structure or over-merges coarse structure. Pre-smooth the peak-source array
 (`gaussian_filter`, sigma also scale-relative) **before** non-max suppression to
 prevent single-pixel noise from registering as spurious peaks — reuse this whenever
 applying the pattern to new noisy per-pixel data; skipping the pre-smooth step lets
-shot noise dominate the detected-peak count. See `core/models.py`'s four
+shot noise dominate the detected-peak count. See `core/models.py`'s five
 `SECTION8_LOCALMAX_*` constants for the current default multipliers/fractions.
+
+A pure peak detector still undersamples broad bright plateaus that never register as a
+sharp local maximum (every pixel ties for "the max of its own neighbourhood").
+`_combined_localmax_mask` unions the peak mask with `_top_percent_mask` — pixels in the
+top `SECTION8_LOCALMAX_TOP_PERCENT`% of Image A's or Image B's own value distribution —
+so broad-but-real bright regions are still captured. Both the table's per-row
+statistics (`_localmax_entry`) and the mask-grid display figure (built inside
+`analyze()`) call this **one shared method**; never let the mask backing a statistic
+and the mask drawn in its illustrative figure be two independent implementations of
+the same idea — they will silently drift apart the next time either one gets a
+formula change.
 
 ### Ratio uncertainty / error bars — exact when pixel-paired, approximate (CV-propagated) otherwise
 
@@ -321,6 +348,18 @@ in `image_filters.py`), first check whether the two populations behind the ratio
 
 Both plot functions share `_ratio_series_with_errors` for the point-list-building
 loop; only the upstream computation of the error value differs by data source.
+
+**Prefer presenting a log-space quantity in log space throughout, rather than
+converting back to linear for display.** Section 8j's ratio column and cross-method
+overview originally stored `ratio = 10**mean(diff[mask])` and converted `log_ratio_std`
+into a linear error bar via the delta method (`ratio * ln(10) * log_std`) — correct,
+but an avoidable approximation-flavoured extra step. Since `diff[mask]` *is* a log10
+population, carrying `log_ratio_mean`/`log_ratio_std` straight through to the table
+(`_val_pm`) and the overview plot's y-axis removes the conversion entirely — the error
+bar becomes exact by construction instead of merely well-approximated, and the table
+header should say so (`"log ratio A/B (geo. mean ± SD)"`, not `"Ratio A/B"`). Shade
+this kind of column a fixed neutral color (not `_better_worse_class` red/green) when
+it isn't a value judgement between A and B, just a measured quantity.
 
 ---
 
@@ -365,7 +404,7 @@ sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 ```bash
 conda activate astrolab
 pip install pytest pytest-cov pytest-timeout   # one-time setup; not in environment.yml
-pytest tests/ -m "not slow"                   # fast suite (~7.5 min, 415 tests)
+pytest tests/ -m "not slow"                   # fast suite (~11 min, 430 tests)
 pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
 pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 ```
@@ -427,6 +466,8 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Cliff's delta via pairwise sign matrix doesn't scale past ~100s of samples | `arr_a[:, None] - arr_b[None, :]` is O(n1·n2) memory — fine for PSF's per-star counts, a multi-gigabyte blowup for per-pixel populations (Section 8j masks can hold 10⁴–10⁵+ pixels). Use the exact O(n log n) identity instead: `delta = 2·U/(n1·n2) − 1`, where `U` is the Mann-Whitney U statistic `scipy.stats.mannwhitneyu` already computes. See `core/stats_utils.py::mannwhitney_effect`. |
 | Section HTML block gated on the wrong figure's output | A conditional HTML block that wraps *multiple* pieces of content but gates on only *one* figure's presence (e.g. `dist_html = ("<h3>...</h3>" + mask_html + dist_img + ...) if dist_img else ""`) will silently delete the other content too if that one figure is ever removed or becomes empty — this hit Section 8c, whose Nebula/Background mask illustration disappeared along with the (later-removed) log-ratio violin figure it happened to share a block with. Gate on the actual content being wrapped (e.g. `mask_fig`, if that's what must be present for the block to be worth showing), not on a sibling figure that currently always co-occurs with it. |
 | Extending an analyzer method's return-tuple arity misses a call site | `_nc_score` gained a 3rd return value (`neb_std`) to support Section 8i's error bars; it has 10 call sites (2 per metric family × 5 families), each needing `nc_a, noise_a = ...` changed to `nc_a, noise_a, neb_std_a = ...`. `grep` for every call site before changing a shared method's return signature — a missed site raises `TypeError: cannot unpack non-sequence`, or worse, silently mis-assigns if old and new arity both happen to unpack without error. |
+| `np.percentile` threshold on a flat/constant array selects everything | A percentile-based `>=`-threshold mask (e.g. `_top_percent_mask`) degenerates when the source array has little/no spread: if every value is equal, every percentile equals that one value, so `arr >= threshold` matches 100% of pixels, not the intended top N%. Hit writing a unit test for `_top_percent_mask` with an all-zero second operand — its own 90th-percentile threshold was also `0`, making `arr_b >= 0` trivially true everywhere and swamping the assertion. When constructing a synthetic array to exercise percentile-threshold logic, give it genuine spread (or reuse the same non-flat array for both operands) rather than an all-zero/constant placeholder. |
+| A cached render-to-attribute call duplicates report content | `_psf_simulation_html` called `self._psf_retention_table(sim)` twice with identical arguments — once inline into its own returned HTML, once purely to populate `self._cached_retention_html` so `_section_summary` could re-splice the same table into Section 9 later. Both calls are pure functions of `sim`, so the two copies were byte-identical, and the report silently showed the same table twice. If a value needs to reach a second section, thread the already-computed *result* through (return value, parameter, or a plain instance attribute set once) rather than re-invoking the render function a second time purely as a caching side-effect. |
 
 ---
 

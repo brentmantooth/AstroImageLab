@@ -534,11 +534,14 @@ class TestLocalMaxStats:
         rng = np.random.default_rng(0)
         stats = SpatialDetailAnalyzer._localmax_stats(abs_a, abs_b, diff, mask, rng)
         vals_a, vals_b = stats.pop("vals_a"), stats.pop("vals_b")
+        vals_log_ratio = stats.pop("vals_log_ratio")
         assert stats == {"mean_a": None, "mean_b": None, "std_a": None, "std_b": None,
-                          "ratio": None, "log_ratio_std": None, "p_value": None, "cliffs_delta": None,
+                          "ratio": None, "log_ratio_mean": None, "log_ratio_std": None,
+                          "p_value": None, "cliffs_delta": None,
                           "n_px": 0, "pct_area": 0.0}
         assert vals_a.size == 0
         assert vals_b.size == 0
+        assert vals_log_ratio.size == 0
 
     def test_known_values_give_expected_means_and_ratio(self):
         abs_a = np.full((10, 10), 4.0, dtype=np.float32)
@@ -554,10 +557,13 @@ class TestLocalMaxStats:
         assert stats["std_a"] == 0.0   # constant array within the mask
         assert stats["std_b"] == 0.0
         assert np.isclose(stats["ratio"], 2.0, rtol=1e-5)
+        assert stats["log_ratio_mean"] == pytest.approx(np.log10(2.0), rel=1e-5)
+        assert np.isclose(10.0 ** stats["log_ratio_mean"], stats["ratio"])
         assert stats["log_ratio_std"] == pytest.approx(0.0)   # diff is constant within the mask
         assert np.isclose(stats["pct_area"], 9.0)   # 9 of 100 px
         assert stats["vals_a"].size == 9
         assert stats["vals_b"].size == 9
+        assert stats["vals_log_ratio"].size == 9
         # A is uniformly higher than B within the mask -> fully separable.
         assert stats["p_value"] is not None and stats["p_value"] < 0.05
         assert stats["cliffs_delta"] is not None and stats["cliffs_delta"] > 0.9
@@ -597,6 +603,91 @@ class TestLocalMaxStats:
         assert stats["n_px"] == 400   # true, uncapped count
         assert stats["vals_a"].size == 10
         assert stats["vals_b"].size == 10
+        assert stats["vals_log_ratio"].size == 10
+
+
+class TestTopPercentMask:
+    """Direct unit tests of _top_percent_mask's OR-brightness-threshold contract."""
+
+    def test_top_percent_selects_expected_count(self):
+        # abs_b == abs_a makes the OR a no-op, isolating abs_a's own contribution
+        # (a genuinely flat abs_b, e.g. all-zero, is a degenerate case: its own
+        # 90th-percentile threshold equals its only value, so "abs_b >= threshold"
+        # trivially matches every pixel and would swamp this assertion).
+        abs_a = np.arange(100, dtype=np.float32).reshape(10, 10)
+        abs_b = abs_a.copy()
+        mask = SpatialDetailAnalyzer._top_percent_mask(abs_a, abs_b, top_percent=10.0)
+        # Top 10% of a 0..99 uniform ramp is roughly the top 10 values.
+        assert mask.sum() == pytest.approx(10, abs=2)
+        assert mask[9, 9]   # the single brightest pixel (value 99) is always included
+
+    def test_or_across_both_images(self):
+        abs_a = np.zeros((10, 10), dtype=np.float32)
+        abs_b = np.zeros((10, 10), dtype=np.float32)
+        abs_a[0, 0] = 100.0   # bright only in A
+        abs_b[9, 9] = 100.0   # bright only in B
+        mask = SpatialDetailAnalyzer._top_percent_mask(abs_a, abs_b, top_percent=5.0)
+        assert mask[0, 0] and mask[9, 9]
+
+    def test_larger_top_percent_selects_more_pixels(self):
+        rng = np.random.default_rng(0)
+        abs_a = rng.uniform(0, 1, size=(30, 30)).astype(np.float32)
+        abs_b = rng.uniform(0, 1, size=(30, 30)).astype(np.float32)
+        loose = SpatialDetailAnalyzer._top_percent_mask(abs_a, abs_b, top_percent=20.0)
+        strict = SpatialDetailAnalyzer._top_percent_mask(abs_a, abs_b, top_percent=2.0)
+        assert loose.sum() > strict.sum()
+
+
+class TestCombinedLocalMaxMask:
+    """_combined_localmax_mask: local-maxima peak mask (_local_maxima_mask) unioned
+    (OR) with a top-percent brightness mask (_top_percent_mask) -- catches both
+    sharp isolated peaks and broad bright plateaus that peak detection alone
+    would miss. Used identically by _localmax_entry and the mask-grid builder."""
+
+    def test_union_includes_peak_only_pixel(self):
+        abs_a = np.zeros((30, 30), dtype=np.float32)
+        abs_a[15, 15] = 100.0   # isolated sharp peak
+        abs_b = np.zeros((30, 30), dtype=np.float32)
+        analyzer = SpatialDetailAnalyzer()
+        mask = analyzer._combined_localmax_mask(
+            abs_a, abs_b, footprint_px=5, prominence_percentile=90.0,
+            region_px=0, presmooth_sigma=0.0, top_percent=1.0)
+        assert mask[15, 15]
+
+    def test_union_includes_top_percent_only_pixel(self):
+        # A broad plateau that never registers as an isolated local maximum
+        # (every pixel ties for "the max of its own neighbourhood"), but is
+        # well within the top-percent brightness threshold.
+        abs_a = np.zeros((30, 30), dtype=np.float32)
+        abs_a[10:20, 10:20] = 50.0   # flat plateau, no single dominant peak
+        abs_b = np.zeros((30, 30), dtype=np.float32)
+        analyzer = SpatialDetailAnalyzer()
+        mask = analyzer._combined_localmax_mask(
+            abs_a, abs_b, footprint_px=5, prominence_percentile=99.9,
+            region_px=0, presmooth_sigma=0.0, top_percent=50.0)
+        assert mask[15, 15]   # inside the plateau, selected via top-percent only
+
+
+class TestLocalMaxTopPercentWiring:
+    """Confirms localmax_top_percent is actually threaded from analyze() through
+    to each family's mask, not just accepted and discarded."""
+
+    def test_higher_top_percent_does_not_shrink_masked_pixel_count(self, nc_image_pair):
+        img_a, img_b = nc_image_pair
+        low = SpatialDetailAnalyzer().analyze(img_a, img_b, localmax_top_percent=1.0)
+        high = SpatialDetailAnalyzer().analyze(img_a, img_b, localmax_top_percent=40.0)
+        # A looser top-percent threshold can only add pixels to the OR'd mask,
+        # never remove any -- every scale/metric's n_px must be non-decreasing,
+        # and at least one must strictly grow (proves the parameter reaches
+        # the mask, not just accepted and ignored).
+        assert all(
+            high["localmax"][key]["n_px"] >= low["localmax"][key]["n_px"]
+            for key in low["localmax"]
+        )
+        assert any(
+            high["localmax"][key]["n_px"] > low["localmax"][key]["n_px"]
+            for key in low["localmax"]
+        )
 
 
 class _FakeMaskImage:
@@ -774,6 +865,10 @@ class TestLocalMaxIntegration:
         assert entry["cliffs_delta"] is None or -1.0 <= entry["cliffs_delta"] <= 1.0
         assert entry["vals_a"].size <= entry["n_px"]
         assert entry["vals_b"].size <= entry["n_px"]
+        assert entry["vals_log_ratio"].size <= entry["n_px"]
+        if entry["ratio"] is not None:
+            assert entry["log_ratio_mean"] is not None
+            assert np.isclose(10.0 ** entry["log_ratio_mean"], entry["ratio"])
 
     def test_empty_in_single_image_mode(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
@@ -818,6 +913,24 @@ class TestLocalMaxFigures:
             for entry in nc_result["localmax"].values()
         )
         assert any_present
+
+    def test_localmax_entries_carry_vals_log_ratio_for_distribution_figure(self, nc_result):
+        # Same contract as vals_a/vals_b above, for the log-ratio distribution
+        # figure (report_builder.py::_localmax_log_ratio_distribution_figure),
+        # which reads result["localmax"][key]["vals_log_ratio"].
+        any_present = any(
+            entry.get("vals_log_ratio") is not None and entry["vals_log_ratio"].size > 0
+            for entry in nc_result["localmax"].values()
+        )
+        assert any_present
+
+    def test_mask_grid_default_color_is_high_contrast(self):
+        # Regression guard: the mask overlay used to default to "darkorange",
+        # which is hard to distinguish against bright nebula regions in the
+        # grayscale-stretched base image. Confirm the more contrasting default.
+        import inspect
+        sig = inspect.signature(SpatialDetailAnalyzer._plot_localmax_mask_grid)
+        assert sig.parameters["color"].default == "magenta"
 
 
 @pytest.fixture(scope="module")
@@ -967,9 +1080,13 @@ class TestSectionSpatialReportOrder:
     def test_old_violin_caption_removed(self, section_html):
         # Direct regression test for the removal request: the old 8c
         # Nebula-vs-Background log-ratio violin figure's distinctive caption
-        # text must no longer appear anywhere in the section.
+        # text must no longer appear anywhere in the section. "ratio
+        # distributions" alone is no longer a safe substring to check on its
+        # own -- the (legitimate, newer) 8j log-ratio distribution figure's
+        # caption also contains that phrase -- so match the old figure's
+        # full distinctive title instead.
         assert "Pixel-wise log" not in section_html
-        assert "ratio distributions" not in section_html
+        assert "Pixel-wise log₁₀(A / B) ratio distributions" not in section_html
 
     def test_localmax_distribution_figure_present(self, section_html):
         assert 'alt="localmax_distributions"' in section_html
@@ -981,3 +1098,32 @@ class TestSectionSpatialReportOrder:
         assert "Illustrative only" not in section_html
         assert "single representative scale" not in section_html
         assert "smallest" in section_html and "largest" in section_html
+
+    @pytest.mark.parametrize("title", [
+        "Show LoG maps & figures",
+        "Show Wavelet maps & figures",
+        "Show Gradient maps & figures",
+        "Show Local σ maps & figures",
+        "Show Weber contrast maps & figures",
+    ])
+    def test_family_images_are_collapsed_by_default(self, section_html, title):
+        # Each of the 5 metric families' map/correlation/noise-normalised figures
+        # (8d-8h) must be wrapped in a closed-by-default <details> box, keeping
+        # the report compact. The heading/methodology/table above each family
+        # stay outside the box (checked implicitly: the table for that family
+        # still appears earlier in section_html than this collapsible summary).
+        idx = section_html.find(f"<summary>{title}</summary>")
+        assert idx > 0, f"collapsible box with title {title!r} not found"
+        # The <details> tag immediately preceding this <summary> must not carry
+        # an "open" attribute -- default closed.
+        details_start = section_html.rfind("<details", 0, idx)
+        assert details_start > 0
+        details_tag = section_html[details_start:idx]
+        assert " open" not in details_tag
+
+    def test_localmax_log_ratio_distribution_figure_present(self, section_html):
+        assert 'alt="localmax_log_ratio_distributions"' in section_html
+
+    def test_log_ratio_table_column_present(self, section_html):
+        assert "log ratio A/B (geo. mean" in section_html
+        assert "<th>Ratio A/B (geo. mean)</th>" not in section_html
