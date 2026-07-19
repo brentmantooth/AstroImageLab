@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
+from scipy.special import erfinv
 
 from analysis.edge_analyzer import EdgeAnalyzer
 from core.models import EDGE_ESF_MIN_MONOTONICITY
@@ -11,7 +12,8 @@ from core.models import EDGE_ESF_MIN_MONOTONICITY
 _RESULT_KEYS = {"edges", "n_edges", "rois_used"}
 
 
-def _make_clean_edge_roi(angle_deg: float = 30.0, size: int = 60) -> np.ndarray:
+def _make_clean_edge_roi(angle_deg: float = 30.0, size: int = 60,
+                          sigma: float = 1.5) -> np.ndarray:
     """Single straight edge through the box center, background-subtracted
     semantics (background ~ 0, signal positive) -- matches real bgsub data."""
     yy, xx = np.mgrid[0:size, 0:size]
@@ -19,7 +21,7 @@ def _make_clean_edge_roi(angle_deg: float = 30.0, size: int = 60) -> np.ndarray:
     theta = np.radians(angle_deg)
     d = (xx - c) * np.cos(theta) + (yy - c) * np.sin(theta)
     roi = np.where(d > 0, 200.0, 0.0).astype(float)
-    return gaussian_filter(roi, sigma=1.5)
+    return gaussian_filter(roi, sigma=sigma)
 
 
 def _make_double_edge_roi(size: int = 60) -> np.ndarray:
@@ -123,6 +125,34 @@ class TestExtractEsfDiscMask:
         _, esf, _ = ea._extract_esf(roi, edge_info)
         assert esf.min() >= -1e-9
         assert esf.max() <= 1.0 + 1e-9
+
+
+class TestEdgeWidthAccuracy:
+    """Regression guard for the rotation_angle sign bug in _extract_esf: a
+    step edge blurred by a known Gaussian sigma has an analytically known
+    10-90% width (the edge spread function of a Gaussian-blurred step is an
+    erf profile), so the measured width can be checked against ground truth
+    instead of only the shape/monotonicity properties the rest of this file
+    tests. A prior formula (-(90.0 - angle_deg), which looked plausible but
+    aligned the edge horizontally instead of vertically) passed every
+    existing test in this file while over-measuring width by 7-14x, because
+    none of them compared against a known true width."""
+
+    @staticmethod
+    def _expected_width(sigma: float) -> float:
+        # ESF(x) = 0.5*(1+erf(x/(sigma*sqrt2))); solve for the 10%/90% crossings.
+        return 2.0 * sigma * np.sqrt(2.0) * erfinv(0.8)
+
+    @pytest.mark.parametrize("angle_deg", [15.0, 30.0, 60.0, 75.0])
+    @pytest.mark.parametrize("sigma", [1.5, 3.0])
+    def test_measured_width_matches_known_sigma(self, angle_deg, sigma):
+        ea = EdgeAnalyzer()
+        roi = _make_clean_edge_roi(angle_deg=angle_deg, sigma=sigma)
+        edge_info = ea._detect_strongest_edge(roi)
+        positions, esf, _ = ea._extract_esf(roi, edge_info)
+        width = ea._measure_edge_width(positions, esf)
+        expected = self._expected_width(sigma)
+        assert width == pytest.approx(expected, rel=0.3)
 
 
 class TestQualityGateAutoDetect:

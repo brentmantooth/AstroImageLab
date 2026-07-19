@@ -11,13 +11,13 @@ import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter, binary_dilation, binary_fill_holes, label
+from scipy.ndimage import generic_filter, uniform_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, binary_dilation, binary_fill_holes, label
 import pywt
 
 from core.astro_image import AstroImage
 from core.fig_utils import fig_to_b64, figs_to_b64
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
-                         WEBER_KERNEL_SIZES,
+                         ENTROPY_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
                          XS_SNR_REGION_WIDTH,
                          SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES,
@@ -25,7 +25,8 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          SECTION8_NEBULA_MASK_MAX_HOLE_PX,
                          SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                          SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
-                         SECTION8_LOCALMAX_DIST_MAX_SAMPLES, SECTION8_LOCALMAX_TOP_PERCENT)
+                         SECTION8_LOCALMAX_DIST_MAX_SAMPLES, SECTION8_LOCALMAX_TOP_PERCENT,
+                         SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -43,7 +44,7 @@ class SpatialDetailAnalyzer:
                 log_sigmas: tuple = LOG_SIGMAS,
                 wavelet: str = WAVELET_NAME,
                 levels: int = WAVELET_LEVELS,
-                weber_kernel_sizes: tuple = WEBER_KERNEL_SIZES,
+                entropy_kernel_sizes: tuple = ENTROPY_KERNEL_SIZES,
                 crosshair: dict | None = None,
                 roi: tuple | None = None,
                 xs_snr_width: int | None = None,
@@ -78,8 +79,8 @@ class SpatialDetailAnalyzer:
             "localmax_region_fraction": localmax_region_fraction,
             "localmax_presmooth_fraction": localmax_presmooth_fraction,
             "localmax_top_percent": localmax_top_percent,
-            "weber_contrast_a": {},
-            "weber_contrast_b": {},
+            "entropy_contrast_ratio_a": {},
+            "entropy_contrast_ratio_b": {},
             "panels": {},
             "localmax": {},
             "nc_shared_nebula_pixels": 0,
@@ -92,9 +93,9 @@ class SpatialDetailAnalyzer:
             "wavelet_nc_score_a": {}, "wavelet_nc_score_b": {},
             "wavelet_nc_noise_a": {}, "wavelet_nc_noise_b": {}, "wavelet_nc_ratio": {},
             "wavelet_nc_neb_std_a": {}, "wavelet_nc_neb_std_b": {}, "wavelet_nc_ratio_err": {},
-            "weber_nc_score_a": {}, "weber_nc_score_b": {},
-            "weber_nc_noise_a": {}, "weber_nc_noise_b": {}, "weber_nc_ratio": {},
-            "weber_nc_neb_std_a": {}, "weber_nc_neb_std_b": {}, "weber_nc_ratio_err": {},
+            "entropy_nc_score_a": {}, "entropy_nc_score_b": {},
+            "entropy_nc_noise_a": {}, "entropy_nc_noise_b": {}, "entropy_nc_ratio": {},
+            "entropy_nc_neb_std_a": {}, "entropy_nc_neb_std_b": {}, "entropy_nc_ratio_err": {},
             "gm_nc_score_a": {}, "gm_nc_score_b": {},
             "gm_nc_noise_a": {}, "gm_nc_noise_b": {}, "gm_nc_ratio": {},
             "gm_nc_neb_std_a": {}, "gm_nc_neb_std_b": {}, "gm_nc_ratio_err": {},
@@ -173,7 +174,7 @@ class SpatialDetailAnalyzer:
         # same input images.
         rng = np.random.default_rng(42)
 
-        # Export the exact preprocessed array every std/LoG/wavelet/Weber/gradient
+        # Export the exact preprocessed array every std/LoG/wavelet/entropy/gradient
         # map is computed from (mean-normalised, ROI-cropped if a ROI was given) as
         # its own panel, so the Report Inspector can show the source image content
         # for a map alongside the map itself, pixel-aligned to the same crop.
@@ -231,7 +232,7 @@ class SpatialDetailAnalyzer:
             if orig_corr_fig is not None:
                 figures["corr_original"] = fig_to_b64(orig_corr_fig, dpi=150)
 
-        # 1-5. Local std, LoG, wavelet, Weber, gradient — all read norm_a/norm_b with no
+        # 1-5. Local std, LoG, wavelet, entropy, gradient — all read norm_a/norm_b with no
         # shared mutable state, so they run concurrently. Each method returns
         # (b64_figs, partial_result).
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as _ex:
@@ -277,13 +278,15 @@ class SpatialDetailAnalyzer:
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
             )
-            _f_web = _ex.submit(self._weber_analysis,
+            _f_ent = _ex.submit(self._entropy_analysis,
                 analysis_a, analysis_b,
-                weber_kernel_sizes,
+                mask_neb_a, mask_bg_a,
+                mask_neb_b, mask_bg_b,
+                entropy_kernel_sizes,
                 image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
-                mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
+                mask_neb_shared=mask_neb_shared,
                 mask_bg_shared=mask_bg_shared, rng=rng,
                 localmax_footprint_mult=localmax_footprint_mult,
                 localmax_prominence_percentile=localmax_prominence_percentile,
@@ -307,13 +310,13 @@ class SpatialDetailAnalyzer:
             std_b64, std_partial = _f_std.result()
             log_b64, log_partial = _f_log.result()
             wav_b64, wav_partial = _f_wav.result()
-            web_b64, web_partial = _f_web.result()
+            ent_b64, ent_partial = _f_ent.result()
             grad_b64, grad_partial = _f_grad.result()
 
         figures.update(std_b64)
         figures.update(log_b64)
         figures.update(wav_b64)
-        figures.update(web_b64)
+        figures.update(ent_b64)
         figures.update(grad_b64)
         result["contrast_ratios_a"].update(std_partial["contrast_ratios_a"])
         result["contrast_ratios_b"].update(std_partial["contrast_ratios_b"])
@@ -321,22 +324,22 @@ class SpatialDetailAnalyzer:
         result["sigma_noise_b"] = wav_partial["sigma_noise_b"]
         result["wavelet_snr_a"].update(wav_partial["wavelet_snr_a"])
         result["wavelet_snr_b"].update(wav_partial["wavelet_snr_b"])
-        result["weber_contrast_a"].update(web_partial["weber_contrast_a"])
-        result["weber_contrast_b"].update(web_partial["weber_contrast_b"])
+        result["entropy_contrast_ratio_a"].update(ent_partial["entropy_contrast_ratio_a"])
+        result["entropy_contrast_ratio_b"].update(ent_partial["entropy_contrast_ratio_b"])
         result["panels"].update(std_partial["panels"])
         result["panels"].update(log_partial["panels"])
         result["panels"].update(wav_partial["panels"])
-        result["panels"].update(web_partial["panels"])
+        result["panels"].update(ent_partial["panels"])
         result["panels"].update(grad_partial["panels"])
         result["localmax"].update(std_partial["localmax"])
         result["localmax"].update(log_partial["localmax"])
         result["localmax"].update(wav_partial["localmax"])
-        result["localmax"].update(web_partial["localmax"])
+        result["localmax"].update(ent_partial["localmax"])
         result["localmax"].update(grad_partial["localmax"])
 
         # Merge noise-corrected scores/noise-floors and compute A/B ratios centrally.
         for prefix, partial in (("std", std_partial), ("log", log_partial),
-                                 ("wavelet", wav_partial), ("weber", web_partial),
+                                 ("wavelet", wav_partial), ("entropy", ent_partial),
                                  ("gm", grad_partial)):
             for suffix in ("nc_score_a", "nc_score_b", "nc_noise_a", "nc_noise_b",
                             "nc_neb_std_a", "nc_neb_std_b"):
@@ -351,14 +354,14 @@ class SpatialDetailAnalyzer:
         if image_b is not None:
             nc_errors_by_method = {
                 "std": result["std_nc_ratio_err"], "log": result["log_nc_ratio_err"],
-                "wavelet": result["wavelet_nc_ratio_err"], "weber": result["weber_nc_ratio_err"],
+                "wavelet": result["wavelet_nc_ratio_err"], "entropy": result["entropy_nc_ratio_err"],
                 "gradient": result["gm_nc_ratio_err"],
             }
             nc_fig = self._plot_nc_ratio_overview({
                 "std": result["std_nc_ratio"],
                 "log": result["log_nc_ratio"],
                 "wavelet": result["wavelet_nc_ratio"],
-                "weber": result["weber_nc_ratio"],
+                "entropy": result["entropy_nc_ratio"],
                 "gradient": result["gm_nc_ratio"],
             }, nc_errors_by_method)
             if nc_fig is not None:
@@ -368,14 +371,14 @@ class SpatialDetailAnalyzer:
                 "std": std_partial["localmax_log_ratio"],
                 "log": log_partial["localmax_log_ratio"],
                 "wavelet": wav_partial["localmax_log_ratio"],
-                "weber": web_partial["localmax_log_ratio"],
+                "entropy": ent_partial["localmax_log_ratio"],
                 "gradient": grad_partial["localmax_log_ratio"],
             }
             localmax_log_ratio_errors_by_method = {
                 "std": std_partial["localmax_log_ratio_err"],
                 "log": log_partial["localmax_log_ratio_err"],
                 "wavelet": wav_partial["localmax_log_ratio_err"],
-                "weber": web_partial["localmax_log_ratio_err"],
+                "entropy": ent_partial["localmax_log_ratio_err"],
                 "gradient": grad_partial["localmax_log_ratio_err"],
             }
             lm_ratio_fig = self._plot_localmax_ratio_overview(
@@ -394,7 +397,7 @@ class SpatialDetailAnalyzer:
                 ("|LoG|",          [(f"log_{s}",        float(s),       f"|LoG| — σ={s} px")        for s in log_sigmas]),
                 ("Gradient |G|",   [(f"gradient_{s}",   float(s),       f"Gradient |G| — σ={s} px") for s in log_sigmas]),
                 ("Wavelet",        [(f"wavelet_{lvl}",  float(2 ** lvl), f"Wavelet — level {lvl}")   for lvl in (2, 3)]),
-                ("Weber contrast", [(f"weber_{ks}px",   float(ks),      f"Weber — {ks} px")         for ks in weber_kernel_sizes]),
+                ("Local entropy",  [(f"entropy_{ks}px", float(ks),      f"Entropy — {ks} px")       for ks in entropy_kernel_sizes]),
             ]
             grid_rows = []
             for family_label, entries in _grid_families:
@@ -920,7 +923,7 @@ class SpatialDetailAnalyzer:
         background-subtracted flux, wavelet band-pass reconstructions) — this
         turns the comparison into "which image shows more structure/contrast at
         this scale", not "which image is signed-brighter". Non-negative families
-        (std, |LoG|, gradient magnitude, Weber contrast) are unaffected by the
+        (std, |LoG|, gradient magnitude, local entropy) are unaffected by the
         abs() since they're already >= 0.
 
         Epsilon-floors both operands using a low percentile (not a raw minimum —
@@ -1422,14 +1425,16 @@ class SpatialDetailAnalyzer:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Weber fraction contrast maps
+    # Local entropy maps
     # ------------------------------------------------------------------
 
-    def _weber_analysis(self, norm_a, norm_b, kernel_sizes,
-                        label_a, label_b,
+    def _entropy_analysis(self, norm_a, norm_b,
+                        mask_neb_a, mask_bg_a,
+                        mask_neb_b, mask_bg_b,
+                        kernel_sizes, label_a, label_b,
                         display_roi=None,
                         crosshair=None,
-                        mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
+                        mask_neb_shared=None,
                         mask_bg_shared=None, rng=None,
                         localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
                         localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
@@ -1438,11 +1443,10 @@ class SpatialDetailAnalyzer:
                         localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
-            "weber_contrast_a": {},
-            "weber_contrast_b": {},
-            "weber_nc_score_a": {}, "weber_nc_score_b": {},
-            "weber_nc_noise_a": {}, "weber_nc_noise_b": {},
-            "weber_nc_neb_std_a": {}, "weber_nc_neb_std_b": {},
+            "entropy_contrast_ratio_a": {}, "entropy_contrast_ratio_b": {},
+            "entropy_nc_score_a": {}, "entropy_nc_score_b": {},
+            "entropy_nc_noise_a": {}, "entropy_nc_noise_b": {},
+            "entropy_nc_neb_std_a": {}, "entropy_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
             "localmax_log_ratio": {},
@@ -1450,96 +1454,98 @@ class SpatialDetailAnalyzer:
         }
         single = norm_b is None
         for ks in kernel_sizes:
-            wc_a = self._compute_weber_map(norm_a, ks)
-            wc_b = self._compute_weber_map(norm_b, ks) if not single else None
+            ent_a = self._compute_entropy_map(norm_a, ks)
+            ent_b = self._compute_entropy_map(norm_b, ks) if not single else None
 
-            # 99th percentile avoids dark-sky floor driving the scalar metric to extremes
-            partial["weber_contrast_a"][ks] = float(np.percentile(wc_a, 99))
+            # Contrast ratios (computed on unsmoothed maps)
+            cr_a = self._contrast_ratio(ent_a, mask_neb_a, mask_bg_a)
+            partial["entropy_contrast_ratio_a"][ks] = cr_a
             if not single:
-                partial["weber_contrast_b"][ks] = float(np.percentile(wc_b, 99))
+                cr_b = self._contrast_ratio(ent_b, mask_neb_b, mask_bg_b)
+                partial["entropy_contrast_ratio_b"][ks] = cr_b
 
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a, neb_std_a = self._nc_score(wc_a, mask_neb_shared, mask_bg_a)
-                partial["weber_nc_score_a"][ks] = nc_a
-                partial["weber_nc_noise_a"][ks] = noise_a
-                partial["weber_nc_neb_std_a"][ks] = neb_std_a
-                nc_b, noise_b, neb_std_b = self._nc_score(wc_b, mask_neb_shared, mask_bg_b)
-                partial["weber_nc_score_b"][ks] = nc_b
-                partial["weber_nc_noise_b"][ks] = noise_b
-                partial["weber_nc_neb_std_b"][ks] = neb_std_b
+                nc_a, noise_a, neb_std_a = self._nc_score(ent_a, mask_neb_shared, mask_bg_a)
+                partial["entropy_nc_score_a"][ks] = nc_a
+                partial["entropy_nc_noise_a"][ks] = noise_a
+                partial["entropy_nc_neb_std_a"][ks] = neb_std_a
+                nc_b, noise_b, neb_std_b = self._nc_score(ent_b, mask_neb_shared, mask_bg_b)
+                partial["entropy_nc_score_b"][ks] = nc_b
+                partial["entropy_nc_noise_b"][ks] = noise_b
+                partial["entropy_nc_neb_std_b"][ks] = neb_std_b
 
-            diff = self._log_ratio_map(wc_a, wc_b) if wc_b is not None else None
-            partial["panels"][f"weber_{ks}px"] = {
-                "a":    wc_a.astype(np.float32),
-                "b":    wc_b.astype(np.float32) if wc_b is not None else None,
+            diff = self._log_ratio_map(ent_a, ent_b) if not single else None
+            partial["panels"][f"entropy_{ks}px"] = {
+                "a":    ent_a.astype(np.float32),
+                "b":    ent_b.astype(np.float32) if ent_b is not None else None,
                 "diff": diff,
             }
             if diff is not None:
                 lm_entry = self._localmax_entry(
-                    wc_a, wc_b, diff, ks,
+                    ent_a, ent_b, diff, ks,
                     localmax_footprint_mult, localmax_prominence_percentile,
                     localmax_region_fraction, localmax_presmooth_fraction,
                     localmax_top_percent, rng)
-                partial["localmax"][f"weber_{ks}px"] = lm_entry
+                partial["localmax"][f"entropy_{ks}px"] = lm_entry
                 partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
                 partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
-                    wc_a, wc_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Weber contrast (kernel {ks}px)", rng)
+                    ent_a, ent_b, diff, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Local entropy (kernel {ks}px)", rng)
                 if corr_fig is not None:
-                    figures[f"corr_weber_{ks}px"] = corr_fig
+                    figures[f"corr_entropy_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
-                partial["panels"][f"nrm_weber_{ks}px"] = {
-                    "a": (wc_a / noise_a).astype(np.float32),
-                    "b": (wc_b / noise_b).astype(np.float32),
+                partial["panels"][f"nrm_entropy_{ks}px"] = {
+                    "a": (ent_a / noise_a).astype(np.float32),
+                    "b": (ent_b / noise_b).astype(np.float32),
                     "diff": None,
                 }
 
             xs_raw = None
             xs_line = None
             if crosshair is not None and not single:
-                pos, pa = self._sample_line(wc_a, **crosshair)
-                _, pb = self._sample_line(wc_b, **crosshair)
+                pos, pa = self._sample_line(ent_a, **crosshair)
+                _, pb = self._sample_line(ent_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
-                          f"Cross-section — Weber contrast, kernel {ks}px")
-                xs_line = self._crosshair_to_cropped_px(crosshair, wc_a.shape, SECTION8_BORDER_CROP_FRACTION)
+                          f"Cross-section — Local entropy, kernel {ks}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, ent_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
-                    self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(wc_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Weber contrast — kernel {ks}px — {label_a}",
-                    f"Weber contrast — kernel {ks}px — {label_b}",
-                    diff_title=f"Weber log-ratio (A/B), kernel {ks}px",
+                    self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(ent_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local entropy — kernel {ks}px — {label_a}",
+                    f"Local entropy — kernel {ks}px — {label_b}",
+                    diff_title=f"Log ratio (A/B), kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,    # unbounded output; PowerNorm compresses dynamic range
+                    nonlinear_norm=True,
                     display_roi=None,       # _crop_border already applied
                     xs_data=xs_raw,
                     xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
-                    self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Weber contrast — kernel {ks}px — {label_a}",
+                    self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local entropy — kernel {ks}px — {label_a}",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                 )
-            figures[f"weber_{ks}px"] = fig
+            figures[f"entropy_{ks}px"] = fig
 
             if not single and noise_a and noise_b:
                 xs_nrm = None
                 if crosshair is not None:
-                    pos_n, pa_n = self._sample_line(wc_a / noise_a, **crosshair)
-                    _, pb_n = self._sample_line(wc_b / noise_b, **crosshair)
+                    pos_n, pa_n = self._sample_line(ent_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(ent_b / noise_b, **crosshair)
                     xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
-                              f"Cross-section — Weber contrast (× noise floor), kernel {ks}px")
-                figures[f"nrm_weber_{ks}px"] = self._plot_side_by_side(
-                    self._crop_border(wc_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(wc_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Weber (× noise floor) — kernel {ks}px — {label_a}",
-                    f"Weber (× noise floor) — kernel {ks}px — {label_b}",
+                              f"Cross-section — Local entropy (× noise floor), kernel {ks}px")
+                figures[f"nrm_entropy_{ks}px"] = self._plot_side_by_side(
+                    self._crop_border(ent_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(ent_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local entropy (× noise floor) — kernel {ks}px — {label_a}",
+                    f"Local entropy (× noise floor) — kernel {ks}px — {label_b}",
                     diff_title=f"Log ratio (A/B), noise-normalised, kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
@@ -1549,12 +1555,27 @@ class SpatialDetailAnalyzer:
 
         return figs_to_b64(figures, dpi=150), partial
 
-    def _compute_weber_map(self, norm: np.ndarray, kernel_size: int) -> np.ndarray:
-        """Weber fraction contrast c = ΔL / L where ΔL = max−min and L = median of kernel.
-        L uses median (not mean) — robust background luminance unaffected by bright filaments.
-        Output is unbounded >= 0; nonlinear_norm=True is used for display.
+    def _compute_entropy_map(self, norm: np.ndarray, kernel_size: int,
+                              n_bins: int = SECTION8_ENTROPY_N_BINS) -> np.ndarray:
+        """Local Shannon entropy (bits, log2) of the gray-level histogram within a
+        square window. norm is deliberately quantized into n_bins integer levels
+        from a percentile-clipped range *before* filtering -- computing entropy
+        directly on continuous float32 data returns ~log2(window_area) almost
+        everywhere (every pixel value in a window is unique), measuring float
+        precision rather than genuine tonal diversity. The clip/bin range is
+        computed independently per image (matches the existing per-image
+        convention used by every other Section 8 map).
+
+        Vectorized via n_bins uniform_filter passes (one per gray level) rather
+        than a per-pixel generic_filter callback: uniform_filter(mask_b) is a
+        box filter of a 0/1 mask, which *is* exactly the local proportion p_b
+        of bin b within each window -- summing -p_b*log2(p_b) across bins then
+        gives the entropy map with no per-pixel Python-level histogram ever
+        built. A per-pixel generic_filter callback (the initial approach here,
+        mirroring _compute_std_map) measured ~10-50x slower than Weber's fully
+        vectorized maximum/minimum/median_filter maps at the same array size;
+        this reuses that same vectorization principle for entropy.
         """
-        _EPS = 1e-6   # L (median) can be very small over dark sky; larger EPS prevents extremes
         factor = 1.0
         data = norm
         if max(norm.shape) > MAX_DIM_FOR_STD:
@@ -1564,20 +1585,24 @@ class SpatialDetailAnalyzer:
             data = zoom(norm, (new_h / norm.shape[0], new_w / norm.shape[1]), order=1)
             kernel_size = max(3, int(kernel_size * factor) | 1)
 
-        i_max = maximum_filter(data, size=kernel_size)
-        i_min = minimum_filter(data, size=kernel_size)
-        i_med = median_filter(data, size=kernel_size)
-
-        delta_L = i_max - i_min                  # always >= 0
-        L = np.maximum(i_med, 0.0)              # bg-subtracted images can have negative medians
-        weber = delta_L / (L + _EPS)
+        lo, hi = np.percentile(data, [SECTION8_ENTROPY_CLIP_PERCENTILE,
+                                       100 - SECTION8_ENTROPY_CLIP_PERCENTILE])
+        if hi <= lo:
+            entropy_map = np.zeros_like(data, dtype=np.float64)
+        else:
+            binned = np.clip(((data - lo) / (hi - lo) * n_bins), 0, n_bins - 1).astype(np.intp)
+            entropy_map = np.zeros(data.shape, dtype=np.float64)
+            for b in range(n_bins):
+                p_b = uniform_filter((binned == b).astype(np.float64), size=kernel_size, mode="reflect")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    entropy_map -= np.where(p_b > 0, p_b * np.log2(p_b), 0.0)
 
         if factor < 1.0:
-            weber = zoom(weber,
-                         (norm.shape[0] / weber.shape[0],
-                          norm.shape[1] / weber.shape[1]),
-                         order=1)
-        return np.maximum(weber, 0.0)
+            entropy_map = zoom(entropy_map,
+                                (norm.shape[0] / entropy_map.shape[0],
+                                 norm.shape[1] / entropy_map.shape[1]),
+                                order=1)
+        return entropy_map.astype(np.float32)
 
     def _plot_side_by_side(self, arr_a: np.ndarray, arr_b: np.ndarray,
                             title_a: str, title_b: str,
@@ -1865,12 +1890,12 @@ class SpatialDetailAnalyzer:
         approximate symmetric uncertainty (see _compute_nc_ratio_errors),
         rendered as error bars when present for a given point."""
         _SCALE_LABEL = {
-            "std": "px", "weber": "px", "log": "σ px",
+            "std": "px", "entropy": "px", "log": "σ px",
             "gradient": "σ px", "wavelet": "level (≈px)",
         }
         _COLORS = {
             "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
-            "weber": "seagreen", "gradient": "goldenrod",
+            "entropy": "seagreen", "gradient": "goldenrod",
         }
         series = self._ratio_series_with_errors(ratios_by_method, errors_by_method)
         if not series:
@@ -1913,12 +1938,12 @@ class SpatialDetailAnalyzer:
         measure, not an approximation), rendered as error bars when present for
         a given point."""
         _SCALE_LABEL = {
-            "std": "px", "weber": "px", "log": "σ px",
+            "std": "px", "entropy": "px", "log": "σ px",
             "gradient": "σ px", "wavelet": "level (≈px)",
         }
         _COLORS = {
             "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
-            "weber": "seagreen", "gradient": "goldenrod",
+            "entropy": "seagreen", "gradient": "goldenrod",
         }
         series = self._ratio_series_with_errors(log_ratios_by_method, errors_by_method)
         if not series:

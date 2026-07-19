@@ -1,9 +1,10 @@
 """Regression tests for the Report Inspector's .npz panel catalog.
 
 Covers the bug where _write_inspector_file used a hardcoded, stale panel-name
-map (std_15px/std_31px from an old STD_KERNEL_SIZES, no Weber entries at all)
-that silently omitted panels SpatialDetailAnalyzer actually computes. The fix
-derives the catalog dynamically from panels_a.keys() via _panel_display_name.
+map (std_15px/std_31px from an old STD_KERNEL_SIZES, no Weber/entropy entries
+at all) that silently omitted panels SpatialDetailAnalyzer actually computes.
+The fix derives the catalog dynamically from panels_a.keys() via
+_panel_display_name.
 """
 from __future__ import annotations
 
@@ -68,11 +69,13 @@ class TestInspectorCatalogDynamicPanels:
             from report.report_builder import _panel_display_name
             assert _panel_display_name(pkey) in cataloged_names
 
-    def test_weber_panels_present(self, inspector_npz_path):
-        # Regression: the old hardcoded _PANEL_IMAGE_SETS never included Weber at all.
+    def test_entropy_panels_present(self, inspector_npz_path):
+        # Regression: the old hardcoded _PANEL_IMAGE_SETS never included this
+        # family at all (Weber, entropy's predecessor family, was the original
+        # motivating example).
         _, spatial = inspector_npz_path
-        weber_keys = [k for k in spatial["panels"] if k.startswith("weber_")]
-        assert weber_keys, "fixture should have produced Weber panels"
+        entropy_keys = [k for k in spatial["panels"] if k.startswith("entropy_")]
+        assert entropy_keys, "fixture should have produced Local entropy panels"
 
     def test_all_std_kernel_sizes_present(self, inspector_npz_path):
         # Regression: the old map referenced std_15px/std_31px from a stale

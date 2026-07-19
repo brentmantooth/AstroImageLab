@@ -322,7 +322,7 @@ class TestPanelDisplayName:
     @pytest.mark.parametrize("pkey,expected", [
         ("std_3px", "Std Dev 3 px"),
         ("std_10px", "Std Dev 10 px"),
-        ("weber_9px", "Weber 9 px"),
+        ("entropy_9px", "Entropy 9 px"),
         ("log_1.5", "LoG σ 1.5 px"),
         ("wavelet_2", "Wavelet level 2"),
         ("gradient_3.0", "Gradient σ 3.0 px"),

@@ -2,6 +2,7 @@
 
 import base64
 import io
+import math
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
+from core.fig_utils import fig_to_b64 as _fig_to_b64
 from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX,
                           PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX,
                           EDGE_N_TOP_EDGES,
@@ -25,7 +27,8 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           SECTION8_NEBULA_MASK_MAX_HOLE_PX,
                           SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                           SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
-                          SECTION8_LOCALMAX_TOP_PERCENT)
+                          SECTION8_LOCALMAX_TOP_PERCENT,
+                          SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE)
 from core.astro_image import AstroImage
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -158,15 +161,6 @@ img { max-width: 100%; height: auto; border: 1px solid #ccc;
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-    buf.seek(0)
-    data = base64.b64encode(buf.read()).decode()
-    plt.close(fig)
-    return data
-
 
 def _img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     if fig is None:
@@ -463,9 +457,9 @@ _SPATIAL_DIFF_DIST_ROWS = [
     ("gradient_6.0", "Gradient |G| — σ=6 px"),
     ("wavelet_2",    "Wavelet — level 2"),
     ("wavelet_3",    "Wavelet — level 3"),
-    ("weber_3px",    "Weber contrast — 3 px"),
-    ("weber_5px",    "Weber contrast — 5 px"),
-    ("weber_9px",    "Weber contrast — 9 px"),
+    ("entropy_5px",  "Local entropy — 5 px"),
+    ("entropy_9px",  "Local entropy — 9 px"),
+    ("entropy_17px", "Local entropy — 17 px"),
 ]
 
 # Same order/labels as above minus "original" (no kernel scale) — used to order the
@@ -535,8 +529,7 @@ def _localmax_distributions_figure(localmax: dict) -> tuple[str, str]:
                        palette=palette, inner=None, linewidth=0.8, ax=ax)
         _draw_boxwhisker(ax, [va, vb])
 
-        # Some detail maps (e.g. Weber contrast, unbounded near dark-sky pixels —
-        # see 8h methodology) have rare extreme-outlier magnitudes that stretch the
+        # Some detail maps have rare extreme-outlier magnitudes that stretch the
         # axis so far the IQR box becomes an invisible sliver. Clip the *view* to the
         # 1st-99th percentile of this row's own pooled data; the boxplot/violin
         # values themselves are unaffected, only what's visible is cropped.
@@ -568,8 +561,8 @@ def _localmax_distributions_figure(localmax: dict) -> tuple[str, str]:
         "this figure's subsampled copy). "
         "Each row's x-axis is independently clipped to its own 1st&ndash;99th "
         "percentile range so the IQR box stays visible; rows with rare "
-        "extreme-outlier magnitudes (e.g. Weber contrast near dark-sky pixels) may "
-        "have a small fraction of the violin's tail extend beyond the visible axis."
+        "extreme-outlier magnitudes may have a small fraction of the violin's tail "
+        "extend beyond the visible axis."
         "</p>"
     )
     return img_html, caption_html
@@ -810,16 +803,43 @@ _SPATIAL_GLOSSARY_HTML = (
         '      <td>Detail by scale band, plus explicit SNR</td>'
         '      <td>Structure whose size matches this scale band; level 1 is noise-only, used to '
         '      calibrate the noise floor</td></tr>'
-        "  <tr><td>Weber fraction contrast (8h)</td><td>3, 5, 9 px window</td>"
-        "      <td>Contrast (Weber's law, ΔL/L)</td>"
-        '      <td>Local range vs. local median background — the most literal "Contrast" metric in '
-        '      this section</td></tr>'
+        "  <tr><td>Local entropy map (8h)</td><td>5, 9, 17 px window</td>"
+        "      <td>Detail (texture complexity, bits, log&#8322;)</td>"
+        '      <td>Rich/unpredictable local tonal structure — tangled nebulosity, mottled dust, '
+        '      unresolved star fields — but noise raises this too, even more readily than σ</td></tr>'
+        '  <tr><td>Entropy contrast ratio (8h)</td><td>same kernel sizes</td>'
+        '      <td>Contrast, built from the entropy map</td>'
+        '      <td>Whether the nebula has richer tonal/textural complexity than blank sky, at this '
+        '      scale</td></tr>'
         '  <tr><td>Noise-corrected (NC) score (8d–8h, 8i)</td><td>same scale as parent method</td>'
         '      <td>SNR of Detail</td>'
         "      <td>Whether a detail-map response in the nebula is real structure or just this image's "
         '      own noise floor at that scale</td></tr>'
         '</table>',
         title="Which concept each metric primarily measures")
+    + _info_box(
+        '<table>'
+        '  <tr><th>Metric</th><th>High when</th><th>Weakness</th></tr>'
+        '  <tr><td>Local σ (8g)</td><td>Pixels differ strongly from the local mean</td>'
+        '      <td>Responds strongly to noise, halos, gradients, bright stars</td></tr>'
+        '  <tr><td>|LoG| / Gradient (8d, 8f)</td><td>There are edges, curvature, transitions</td>'
+        '      <td>More shape/edge-biased than texture-complexity-biased</td></tr>'
+        '  <tr><td>Wavelets (8e)</td><td>Structure exists in a specific spatial-frequency band</td>'
+        '      <td>Needs noise calibration (provided here via the explicit per-level SNR)</td></tr>'
+        '  <tr><td>Local entropy (8h)</td><td>The local intensity distribution is rich / unpredictable</td>'
+        '      <td>Ignores spatial arrangement entirely, and responds to noise even more readily '
+        '      than σ</td></tr>'
+        '</table>'
+        '<p>Local entropy is best read as a <strong>secondary</strong> texture-complexity signal, '
+        'not a replacement for σ/LoG/gradient/wavelet — it answers a different question '
+        '("how unpredictable is the local tonal distribution?") rather than "how much does '
+        'brightness vary?" or "how sharp are the edges?". It is most informative when two images '
+        'score similarly on σ or wavelet power but still look visibly different in local texture '
+        '(fine nebulosity, dust lanes, mottled galaxy structure) — entropy can surface that '
+        'difference where amplitude- and edge-based metrics do not. Because entropy alone cannot '
+        'distinguish real tonal richness from shot noise, always read it alongside its '
+        'noise-corrected score (8h, 8i), not in isolation.</p>',
+        title="Comparing the detail / texture-complexity metrics")
 )
 
 
@@ -837,8 +857,8 @@ def _panel_display_name(pkey: str) -> str:
         name = f"LoG σ {base[4:]} px"
     elif base.startswith("wavelet_"):
         name = f"Wavelet level {base[8:]}"
-    elif base.startswith("weber_") and base.endswith("px"):
-        name = f"Weber {base[6:-2]} px"
+    elif base.startswith("entropy_") and base.endswith("px"):
+        name = f"Entropy {base[8:-2]} px"
     elif base.startswith("gradient_"):
         name = f"Gradient σ {base[9:]} px"
     else:
@@ -875,13 +895,15 @@ def _panel_concept(pkey: str) -> str:
                    "shell edges at higher levels. <b>Higher coefficient magnitude = more "
                    "structure at this scale</b>; see the wavelet SNR chart for whether it's "
                    "signal- or noise-dominated.")
-    elif base.startswith("weber_") and base.endswith("px"):
-        concept = ("Measures <b>Contrast</b> (Weber's law, c = ΔL/L) within a square window — "
-                   "local intensity range relative to local background luminance. Responds to "
-                   "how strongly a feature stands out against its immediate surround. "
-                   "<b>Higher = feature stands out more strongly</b> from its local background "
-                   "(very high values over near-black sky can be an artifact of a small "
-                   "denominator, not real contrast).")
+    elif base.startswith("entropy_") and base.endswith("px"):
+        concept = ("Measures <b>Detail</b> as texture complexity (Shannon entropy, bits, log&#8322;) "
+                   "of the local gray-level histogram within a square window, using data quantized "
+                   "into a fixed number of levels beforehand (see 8h methodology). Responds to how "
+                   "rich/unpredictable local tonal structure is — tangled nebulosity, mottled dust, "
+                   "unresolved star fields — but also to noise, even more readily than Local σ. "
+                   "<b>Higher = richer/more unpredictable local tonal distribution</b> (cannot "
+                   "distinguish real structure from noise on its own — see the noise-corrected "
+                   "score).")
     elif base.startswith("gradient_"):
         concept = ("Measures <b>Detail</b> as edge sharpness (1st derivative, slope magnitude) "
                    "at Gaussian scale σ. Responds to how abrupt an intensity transition is at "
@@ -4176,13 +4198,13 @@ curve is shown.</p>
             sm.get("wavelet_nc_score_a", {}), sm.get("wavelet_nc_score_b", {}),
             sm.get("wavelet_nc_ratio", {}), lambda lvl: f"Level {lvl} (~{2 ** lvl}px scale)",
             method_label="Wavelet")
-        weber_nc_rows = _nc_ratio_rows(
-            sm.get("weber_nc_score_a", {}), sm.get("weber_nc_score_b", {}),
-            sm.get("weber_nc_ratio", {}), lambda ks: f"{ks} px", method_label="Weber")
+        entropy_nc_rows = _nc_ratio_rows(
+            sm.get("entropy_nc_score_a", {}), sm.get("entropy_nc_score_b", {}),
+            sm.get("entropy_nc_ratio", {}), lambda ks: f"{ks} px", method_label="Local entropy")
         gm_nc_rows = _nc_ratio_rows(
             sm.get("gm_nc_score_a", {}), sm.get("gm_nc_score_b", {}),
             sm.get("gm_nc_ratio", {}), lambda s: f"σ = {s} px", method_label="Gradient")
-        combined_nc_rows = log_nc_rows + wavelet_nc_rows + gm_nc_rows + std_nc_rows + weber_nc_rows
+        combined_nc_rows = log_nc_rows + wavelet_nc_rows + gm_nc_rows + std_nc_rows + entropy_nc_rows
 
         nc_methodology_box = _info_box(
             'Each detail map above additionally yields a <strong>noise-corrected local '
@@ -4193,7 +4215,7 @@ curve is shown.</p>
             'divides Image A\'s score by Image B\'s score at each scale — greater than 1 '
             'means Image A shows relatively stronger detail than Image B at that scale, '
             'after accounting for each image\'s own noise level. Scale units differ by '
-            'method (kernel px for std/Weber, Gaussian σ px for LoG/gradient, ≈2<sup>level</sup> '
+            'method (kernel px for std/entropy, Gaussian σ px for LoG/gradient, ≈2<sup>level</sup> '
             'px for wavelet) and ratios should not be compared numerically across methods — '
             'see 8i for a cross-method overview. See also Section 7 for the frequency-domain '
             'view of this same question. Maps below are also shown in noise-normalised form '
@@ -4278,7 +4300,7 @@ curve is shown.</p>
         _log_rows      = [(k, l) for k, l in _SPATIAL_CORR_ROWS if k.startswith("log_")]
         _gradient_rows = [(k, l) for k, l in _SPATIAL_CORR_ROWS if k.startswith("gradient_")]
         _wavelet_rows  = [(k, l) for k, l in _SPATIAL_CORR_ROWS if k.startswith("wavelet_")]
-        _weber_rows    = [(k, l) for k, l in _SPATIAL_CORR_ROWS if k.startswith("weber_")]
+        _entropy_rows  = [(k, l) for k, l in _SPATIAL_CORR_ROWS if k.startswith("entropy_")]
 
         _has_any_corr = any(f"corr_{k}" in figs for k, _l in _SPATIAL_CORR_ROWS)
         corr_methodology_box = (
@@ -4456,22 +4478,22 @@ curve is shown.</p>
         )
         _std_images_box = _info_box(_std_images_html, title="Show Local σ maps & figures", open=False)
 
-        _weber_images_html = (
-            _family_figs_with_corr(_weber_rows, lambda k: k)
-            + '<p class="caption">Per-pixel Weber fraction contrast maps (c = ΔL / L, square-root '
-              'colour scale, viridis): Image A (top-left), Image B (top-right), log-ratio panel '
-              '(middle-left) showing where one image achieves greater relative contrast, and — when '
-              'a cross-section line is set — its profile (middle-right), plus a bottom-row histogram '
-              'of the log-ratio map\'s pixel values (same colour scale). Brighter regions have higher '
-              'Weber contrast — the local intensity range is large relative to the local median '
-              'luminance. High values over dark-sky regions are expected; use a nebula ROI for '
-              'meaningful filter comparison. Each map is immediately followed by its per-pixel '
-              'correlation scatter (see methodology above).</p>'
+        _entropy_images_html = (
+            _family_figs_with_corr(_entropy_rows, lambda k: k)
+            + '<p class="caption">Local Shannon entropy maps (bits, log&#8322;, viridis colour '
+              'scale): Image A (top-left), Image B (top-right), log-ratio panel (middle-left) '
+              'showing where one image has richer local tonal structure, and — when a '
+              'cross-section line is set — its profile (middle-right), plus a bottom-row '
+              'histogram of the log-ratio map\'s pixel values (same colour scale). Brighter '
+              'regions have higher local entropy — a richer, less predictable gray-level '
+              'distribution within the window (nebulosity, mottled dust, unresolved stars — or '
+              'noise). Each map is immediately followed by its per-pixel correlation scatter '
+              '(see methodology above).</p>'
               '<p class="caption">Noise-normalised (× noise floor) — shared colour scale is a fair '
               'A/B comparison.</p>'
-            + _family_nrm_figs(_weber_rows)
+            + _family_nrm_figs(_entropy_rows)
         )
-        _weber_images_box = _info_box(_weber_images_html, title="Show Weber contrast maps & figures", open=False)
+        _entropy_images_box = _info_box(_entropy_images_html, title="Show Local entropy maps & figures", open=False)
 
         return f"""
 <h2>8. Spatial Detail Comparison &nbsp;<span class="metric-label-ok">✓ bandwidth-normalised</span></h2>
@@ -4546,30 +4568,44 @@ curve is shown.</p>
            'each map figure below, showing how local detail amplitude varies along the selected line.',
            title="Local standard deviation")}
 {_std_images_box}
-<h3>8h. Weber Fraction Contrast Maps</h3>
+<h3>8h. Local Entropy Maps</h3>
 {_info_box(
-    '<p><strong>Formula:</strong> c = ΔL / L, '
-    'where ΔL = I<sub>max</sub> − I<sub>min</sub> (local range in the K × K kernel) '
-    'and L = median(kernel) (local background luminance). '
-    'Output is unbounded ≥ 0; a value of 1.0 means the local range equals the background '
-    'luminance, 2.0 means twice, and so on.</p>'
-    '<p><strong>Why median for L:</strong> The median represents the background luminance '
-    'the feature is seen against, matching Weber\'s Law. Using the mean would inflate L '
-    'toward bright filaments within the kernel, artificially suppressing contrast values. '
-    'Median is also robust to hot pixels and residual star halos in starless images.</p>'
-    '<p><strong>Scalar metric (table below):</strong> 99th percentile of the Weber map '
-    'within the analysis region. Near-zero median pixels over dark sky produce very large '
-    'Weber values; the 99th percentile captures peak structural contrast while ignoring '
-    'isolated dark-floor artefacts.</p>'
-    '<p><strong>Kernel sizes:</strong> Small kernels (3 px) respond to sub-pixel-scale '
-    'transitions. Medium kernels (5 px) capture fine filaments. '
-    'Large kernels (9 px) reflect coarser structural contrast such as knots and shell edges.</p>'
-    '<p><strong>Wide dynamic range:</strong> Weber contrast is intentionally unbounded. '
-    'Maps are displayed with a square-root colour scale (PowerNorm γ = 0.5) to compress '
-    'the bright end. Selecting a star-free nebula ROI avoids dark-sky pixels that drive '
-    'Weber values very high. Maps use a starless image when one is available.</p>',
-    title="Weber fraction contrast")}
-{_weber_images_box}
+    '<p><strong>Formula:</strong> H = &minus;&Sigma; p<sub>i</sub> log&#8322;(p<sub>i</sub>) '
+    '(Shannon entropy, in bits), computed from the local gray-level histogram over '
+    f'{SECTION8_ENTROPY_N_BINS} bins within the K &times; K kernel. Output is bounded '
+    f'0 &le; H &le; log&#8322;({SECTION8_ENTROPY_N_BINS}) &asymp; {math.log2(SECTION8_ENTROPY_N_BINS):.1f} '
+    'bits; 0 means every pixel in the window is identical, the maximum means every gray '
+    'level is equally represented.</p>'
+    '<p><strong>Why deliberate binning:</strong> computing entropy directly on continuous '
+    'float32 data would return a value close to the maximum almost everywhere, since every '
+    'pixel value in a small window is nearly unique &mdash; that measures floating-point '
+    'precision, not real tonal diversity. The map is instead computed on each image\'s own '
+    f'data, independently quantized into {SECTION8_ENTROPY_N_BINS} levels from its own '
+    f'{SECTION8_ENTROPY_CLIP_PERCENTILE:g}&ndash;{100 - SECTION8_ENTROPY_CLIP_PERCENTILE:g} '
+    'percentile range (not a joint A/B range, and not the display stretch &mdash; this is '
+    'done on linear, mean-signal-normalised data).</p>'
+    '<p><strong>Interpretation:</strong> high entropy means rich, unpredictable local tonal '
+    'structure &mdash; tangled nebulosity, mottled dust, unresolved star fields &mdash; '
+    '<strong>but also shot noise</strong>; low entropy means a smooth or flat local region '
+    '(uniform sky, a saturated core, a smooth gradient). Entropy alone cannot distinguish '
+    'real structure from noise &mdash; that is what the noise-corrected score (table below, '
+    'and 8i) is for.</p>'
+    '<p><strong>How this differs from &sigma; / LoG / gradient / wavelet:</strong> those '
+    'metrics respond to amplitude or edge sharpness; entropy responds to distributional '
+    '"unpredictability" instead, and ignores spatial arrangement entirely &mdash; a smooth '
+    'gradient, scattered noise, and a small filament network can all share a similar local '
+    'histogram, and therefore similar entropy, even though they look nothing alike. It is '
+    'most useful as a secondary signal when two images score similarly on &sigma; or wavelet '
+    'power but still show visibly different internal tonal texture (see the glossary '
+    'comparison table above).</p>'
+    '<p><strong>Kernel sizes:</strong> 5, 9, and 17 px &mdash; deliberately larger than Local '
+    '&sigma;\'s (8g), since a small window gives a statistically unstable histogram estimate '
+    '(a 3 &times; 3 window has only 9 samples to build a histogram from).</p>'
+    '<p><strong>Entropy contrast ratio (table below):</strong> median(nebula entropy) / '
+    'median(background entropy) &mdash; the same formula as Local &sigma;\'s contrast ratio '
+    '(8g), applied to the entropy map instead.</p>',
+    title="Local entropy")}
+{_entropy_images_box}
 
 <h3>8i. Noise-Corrected Contrast — Cross-Method Overview</h3>
 {_hires_img_tag(figs.get("nc_ratio_overview"), "NC ratio overview")}
@@ -5014,8 +5050,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         cr_b = sm_b.get("contrast_ratios_b", {}) if sm_b else {}
         snr_wav_a = sm_a.get("wavelet_snr_a", {})
         snr_wav_b = sm_b.get("wavelet_snr_b", {}) if sm_b else {}
-        wc_a_s = sm_a.get("weber_contrast_a", {})
-        wc_b_s = sm_b.get("weber_contrast_b", {}) if sm_b else {}
+        ecr_a_s = sm_a.get("entropy_contrast_ratio_a", {})
+        ecr_b_s = sm_b.get("entropy_contrast_ratio_b", {}) if sm_b else {}
         snr_ma = ra.snr_metrics or {}
         snr_mb = rb.snr_metrics or {}
 
@@ -5073,7 +5109,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
             row("Std contrast ratio (15px)", cr_a.get(15), cr_b.get(15)),
             row("Wavelet SNR level 2", snr_wav_a.get(2), snr_wav_b.get(2)),
             row("Wavelet SNR level 3", snr_wav_a.get(3), snr_wav_b.get(3)),
-            row("Weber contrast 99th pct (5px)", wc_a_s.get(5), wc_b_s.get(5), fmt=".4f"),
+            row("Entropy contrast ratio (9px)", ecr_a_s.get(9), ecr_b_s.get(9)),
             *([row(
                 "Global SNR — starless (σ) ★",
                 (snr_ma.get("starless") or {}).get("snr_global"),

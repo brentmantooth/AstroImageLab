@@ -194,9 +194,21 @@ class EdgeAnalyzer:
         dy1 = min(bgsub.shape[0], yc_full + dw)
         display_roi  = bgsub[dy0:dy1, dx0:dx1]
         analysis_rect = (x0 - dx0, y0 - dy0, x1 - dx0, y1 - dy0)
+
+        # The ESF scan/edge-orientation guide lines must pivot on the ROI's own
+        # geometric center, not the Sobel-detected gradient peak (edge_info's
+        # center_x/center_y) -- scipy.ndimage.rotate() in _extract_esf always
+        # rotates roi_data about its own array center ((h-1)/2, (w-1)/2), and
+        # start_xy (the "Scan start" marker) is derived by inverse-rotating a
+        # point on that same pivot. Drawing the guide lines through the
+        # gradient-peak point instead left the red marker floating off the
+        # cyan line whenever the peak wasn't exactly at the ROI's center.
+        h_roi, w_roi = roi_data.shape
+        roi_cx_full = x0 + (w_roi - 1) / 2.0
+        roi_cy_full = y0 + (h_roi - 1) / 2.0
         edge_info_display = dict(edge_info)
-        edge_info_display["center_x"] = xc_full - dx0
-        edge_info_display["center_y"] = yc_full - dy0
+        edge_info_display["center_x"] = roi_cx_full - dx0
+        edge_info_display["center_y"] = roi_cy_full - dy0
 
         # ESF start point (position index 0), in the same display-frame
         # coordinates as edge_info_display, for the directional marker.
@@ -298,7 +310,21 @@ class EdgeAnalyzer:
     def _extract_esf(self, roi_data: np.ndarray,
                       edge_info: dict) -> tuple[np.ndarray, np.ndarray | None, tuple | None]:
         angle_deg = np.degrees(edge_info["angle_rad"])
-        rotation_angle = -(90.0 - angle_deg)
+        # Empirically verified (not hand-derived -- see the impulse-trick
+        # comment below for why that matters with rotate()'s sign/handedness):
+        # rendering rotate(roi_data, angle, ...) for known synthetic edge
+        # angles and inspecting the result directly shows rotation_angle =
+        # angle_deg aligns the edge vertically, exactly as this function
+        # needs (esf_raw below averages DOWN COLUMNS, so the edge must run
+        # vertically for that average to stay on one side of the transition
+        # per column). A previous formula, -(90.0 - angle_deg), looked like
+        # a more "natural" complement but actually aligned the edge
+        # HORIZONTALLY instead -- averaging down columns then integrated
+        # straight across the transition, canceling out nearly all of the
+        # real signal and leaving only a disc-boundary/interpolation
+        # artifact (still smooth and monotonic, so _esf_quality's gate never
+        # caught it).
+        rotation_angle = angle_deg
         # cval=nan (not the default 0.0) marks pixels that rotate() had to
         # invent because the source square doesn't cover that output pixel at
         # this angle -- see the disc-mask comment below for why this matters.

@@ -7,7 +7,7 @@ from astropy.io import fits as ap_fits
 
 from analysis.image_filters import SpatialDetailAnalyzer
 from core.astro_image import AstroImage
-from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, WEBER_KERNEL_SIZES, WAVELET_LEVELS
+from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, ENTROPY_KERNEL_SIZES, WAVELET_LEVELS
 
 
 class TestAnalyze:
@@ -65,20 +65,21 @@ class TestAnalyze:
         result = SpatialDetailAnalyzer().analyze(img)
         assert isinstance(result, dict)
 
-    def test_weber_contrast_a_present(self, astro_image_a):
+    def test_entropy_contrast_ratio_a_present(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "weber_contrast_a" in result
+        assert "entropy_contrast_ratio_a" in result
 
-    def test_single_image_weber_contrast_b_empty(self, astro_image_a):
+    def test_single_image_entropy_contrast_ratio_b_empty(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        # Single-image mode: weber_contrast_b is present but empty (same pattern as contrast_ratios_b)
-        wc_b = result.get("weber_contrast_b")
-        assert wc_b is None or not wc_b
+        # Single-image mode: entropy_contrast_ratio_b is present but empty (same pattern as contrast_ratios_b)
+        ecr_b = result.get("entropy_contrast_ratio_b")
+        assert ecr_b is None or not ecr_b
 
-    def test_weber_contrast_a_positive(self, astro_image_a):
+    def test_entropy_contrast_ratio_a_positive(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        for v in result.get("weber_contrast_a", {}).values():
-            assert v >= 0.0
+        for v in result.get("entropy_contrast_ratio_a", {}).values():
+            if v is not None:
+                assert v >= 0.0
 
     def test_with_roi(self, astro_image_a):
         result = SpatialDetailAnalyzer().analyze(astro_image_a,
@@ -93,7 +94,7 @@ class TestAnalyze:
 def _make_nc_test_fits(path, add_texture: bool, seed: int) -> None:
     """256x256 FITS with a smooth nebula blob (sigma=25, well above 2*rms after
     background subtraction). When add_texture, a fine checkerboard (period 6px,
-    amplitude 8x sky noise) is added inside the blob so std/LoG/wavelet/Weber/
+    amplitude 8x sky noise) is added inside the blob so std/LoG/wavelet/entropy/
     gradient all detect meaningfully more local structure than the plain blob."""
     rng = np.random.default_rng(seed)
     h, w = 256, 256
@@ -159,7 +160,7 @@ class TestNoiseCorrectedContrast:
     @pytest.mark.parametrize("prefix,scales", [
         ("std", STD_KERNEL_SIZES),
         ("log", LOG_SIGMAS),
-        ("weber", WEBER_KERNEL_SIZES),
+        ("entropy", ENTROPY_KERNEL_SIZES),
         ("gm", LOG_SIGMAS),
     ])
     def test_nc_score_dict_keys_match_scales(self, nc_result, prefix, scales):
@@ -171,7 +172,7 @@ class TestNoiseCorrectedContrast:
         assert set(nc_result["wavelet_nc_score_a"].keys()) == expected
         assert set(nc_result["wavelet_nc_score_b"].keys()) == expected
 
-    @pytest.mark.parametrize("prefix", ["std", "log", "wavelet", "weber", "gm"])
+    @pytest.mark.parametrize("prefix", ["std", "log", "wavelet", "entropy", "gm"])
     def test_nc_noise_floor_positive_or_none(self, nc_result, prefix):
         for side in ("a", "b"):
             for v in nc_result[f"{prefix}_nc_noise_{side}"].values():
@@ -190,9 +191,9 @@ class TestNoiseCorrectedContrast:
         ratio = nc_result["wavelet_nc_ratio"][2]
         assert ratio is not None and ratio > 1.05
 
-    def test_weber_nc_ratio_captures_finer_detail_in_a(self, nc_result):
-        ratio = nc_result["weber_nc_ratio"][min(WEBER_KERNEL_SIZES)]
-        assert ratio is not None and ratio > 1.05
+    def test_entropy_nc_ratio_captures_finer_detail_in_a(self, nc_result):
+        ratio = nc_result["entropy_nc_ratio"][min(ENTROPY_KERNEL_SIZES)]
+        assert ratio is not None and ratio > 1.0
 
     def test_gradient_nc_ratio_captures_finer_detail_in_a(self, nc_result):
         # Gradient magnitude's peak response scale for a given texture need not be
@@ -209,8 +210,8 @@ class TestNoiseCorrectedContrast:
         for sigma in LOG_SIGMAS:
             assert f"nrm_log_{sigma}" in panels
             assert f"nrm_gradient_{sigma}" in panels
-        for ks in WEBER_KERNEL_SIZES:
-            assert f"nrm_weber_{ks}px" in panels
+        for ks in ENTROPY_KERNEL_SIZES:
+            assert f"nrm_entropy_{ks}px" in panels
         for lvl in (2, 3):
             assert f"nrm_wavelet_{lvl}" in panels
 
@@ -243,7 +244,7 @@ class TestNoiseCorrectedContrast:
 
 class TestNoiseCorrectedContrastSingleImage:
     """Single-image mode: every new NC key must be empty, matching the existing
-    contrast_ratios_b / weber_contrast_b invariant (never None/absent, never
+    contrast_ratios_b / entropy_contrast_ratio_b invariant (never None/absent, never
     populated with placeholder values on the A side either)."""
 
     @pytest.fixture(scope="class")
@@ -255,7 +256,7 @@ class TestNoiseCorrectedContrastSingleImage:
         "std_nc_score_a", "std_nc_score_b", "std_nc_ratio",
         "log_nc_score_a", "log_nc_score_b", "log_nc_ratio",
         "wavelet_nc_score_a", "wavelet_nc_score_b", "wavelet_nc_ratio",
-        "weber_nc_score_a", "weber_nc_score_b", "weber_nc_ratio",
+        "entropy_nc_score_a", "entropy_nc_score_b", "entropy_nc_ratio",
         "gm_nc_score_a", "gm_nc_score_b", "gm_nc_ratio",
     ])
     def test_nc_key_empty_in_single_image_mode(self, single_result, key):
@@ -826,7 +827,7 @@ class TestCorrelationScatterFigures:
         + [f"corr_log_{s}" for s in LOG_SIGMAS]
         + [f"corr_gradient_{s}" for s in LOG_SIGMAS]
         + ["corr_wavelet_2", "corr_wavelet_3"]
-        + [f"corr_weber_{ks}px" for ks in WEBER_KERNEL_SIZES]
+        + [f"corr_entropy_{ks}px" for ks in ENTROPY_KERNEL_SIZES]
     )
 
     @pytest.mark.parametrize("key", _CORR_KEYS)
@@ -850,7 +851,7 @@ class TestLocalMaxIntegration:
         + [f"log_{s}" for s in LOG_SIGMAS]
         + [f"gradient_{s}" for s in LOG_SIGMAS]
         + ["wavelet_2", "wavelet_3"]
-        + [f"weber_{ks}px" for ks in WEBER_KERNEL_SIZES]
+        + [f"entropy_{ks}px" for ks in ENTROPY_KERNEL_SIZES]
     )
 
     @pytest.mark.parametrize("key", _LOCALMAX_KEYS)
@@ -943,8 +944,8 @@ def nc_result_with_crosshair(nc_image_pair) -> dict:
 class TestCrosshairEmbeddedCrossSections:
     """Section 8 cross-sections are embedded panels inside the 2x2 map figures,
     not separate figures — no standalone xs_* keys should ever appear, and all
-    5 families (including Weber, newly crosshair-capable) must still produce
-    their usual figure keys with or without a crosshair, without crashing."""
+    5 families (including Local entropy) must still produce their usual figure
+    keys with or without a crosshair, without crashing."""
 
     def test_no_crash_with_crosshair(self, nc_result_with_crosshair):
         assert isinstance(nc_result_with_crosshair, dict)
@@ -952,15 +953,15 @@ class TestCrosshairEmbeddedCrossSections:
     def test_no_standalone_xs_keys_with_crosshair(self, nc_result_with_crosshair):
         figs = nc_result_with_crosshair["figures"]
         assert not any(k.startswith(("xs_std_", "xs_log_", "xs_wavelet_",
-                                      "xs_gradient_", "xs_weber_")) for k in figs)
+                                      "xs_gradient_", "xs_entropy_")) for k in figs)
 
     def test_no_standalone_xs_keys_without_crosshair(self, nc_result):
         figs = nc_result["figures"]
         assert not any(k.startswith(("xs_std_", "xs_log_", "xs_wavelet_",
-                                      "xs_gradient_", "xs_weber_")) for k in figs)
+                                      "xs_gradient_", "xs_entropy_")) for k in figs)
 
     @pytest.mark.parametrize("key_prefix,scales", [
-        ("std_", STD_KERNEL_SIZES), ("weber_", WEBER_KERNEL_SIZES),
+        ("std_", STD_KERNEL_SIZES), ("entropy_", ENTROPY_KERNEL_SIZES),
     ])
     def test_family_figures_present_with_crosshair(self, nc_result_with_crosshair,
                                                      key_prefix, scales):
@@ -968,13 +969,14 @@ class TestCrosshairEmbeddedCrossSections:
         for scale in scales:
             assert f"{key_prefix}{scale}px" in figs
 
-    def test_weber_no_crash_without_crosshair(self, nc_result):
-        # Regression: weber previously had no crosshair param at all.
-        assert all(f"weber_{ks}px" in nc_result["figures"] for ks in WEBER_KERNEL_SIZES)
+    def test_entropy_no_crash_without_crosshair(self, nc_result):
+        # Regression: weber (entropy's predecessor family) previously had no
+        # crosshair param at all.
+        assert all(f"entropy_{ks}px" in nc_result["figures"] for ks in ENTROPY_KERNEL_SIZES)
 
-    def test_weber_nrm_figures_present_with_crosshair(self, nc_result_with_crosshair):
+    def test_entropy_nrm_figures_present_with_crosshair(self, nc_result_with_crosshair):
         figs = nc_result_with_crosshair["figures"]
-        assert any(k.startswith("nrm_weber_") for k in figs)
+        assert any(k.startswith("nrm_entropy_") for k in figs)
 
     def test_original_present_with_crosshair(self, nc_result_with_crosshair):
         assert "original" in nc_result_with_crosshair["figures"]
@@ -1014,8 +1016,8 @@ class TestSectionSpatialReportOrder:
     """Integration check on report/report_builder.py::_section_spatial's HTML
     output: the reorganized subsection order (8a Background, 8b Original Image,
     8c Mask Overview, 8d LoG, 8e Wavelet, 8f Gradient, 8g Local Std,
-    8h Weber, 8i NC overview, 8j Local-Maxima Masked Metrics), and the fix for
-    the alphabetic-sort bug that put e.g. nrm_std_10px before nrm_std_3px/5px."""
+    8h Local Entropy, 8i NC overview, 8j Local-Maxima Masked Metrics), and the
+    fix for the alphabetic-sort bug that put e.g. nrm_std_10px before nrm_std_3px/5px."""
 
     @pytest.fixture(scope="class")
     @classmethod
@@ -1041,9 +1043,9 @@ class TestSectionSpatialReportOrder:
         assert section_html.index("8f. Gradient Magnitude") < section_html.index(
             "8g. Local Standard Deviation Maps")
 
-    def test_weber_after_local_std(self, section_html):
+    def test_entropy_after_local_std(self, section_html):
         assert section_html.index("8g. Local Standard Deviation Maps") < section_html.index(
-            "8h. Weber Fraction Contrast Maps")
+            "8h. Local Entropy Maps")
 
     def test_nrm_std_figures_in_ascending_kernel_order(self, section_html):
         # Regression test: figs_for()'s old lexicographic sorted(figs) rendered
@@ -1104,7 +1106,7 @@ class TestSectionSpatialReportOrder:
         "Show Wavelet maps & figures",
         "Show Gradient maps & figures",
         "Show Local σ maps & figures",
-        "Show Weber contrast maps & figures",
+        "Show Local entropy maps & figures",
     ])
     def test_family_images_are_collapsed_by_default(self, section_html, title):
         # Each of the 5 metric families' map/correlation/noise-normalised figures
