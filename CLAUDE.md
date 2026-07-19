@@ -42,6 +42,9 @@ report/
 synthetic/
   cameras.py           Camera database — 24 models (ZWO, QHY, Player One)
   generator.py         Image generation engine: Moffat PSF, aberrations, nebula, starless export
+tools/
+  generate_icon.py         One-off dev script: regenerates resources/icon.ico
+  generate_screenshots.py  One-off dev script: regenerates resources/*.png screenshots used by README.md/QuickStart.md
 ```
 
 ---
@@ -537,6 +540,48 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | A "plausible-looking" derived metric can still be measuring the wrong thing entirely | `EdgeAnalyzer._extract_esf`'s `rotation_angle = -(90.0 - angle_deg)` (present since the file's first commit) looked like a reasonable 90°-complement but actually rotated the edge **horizontally**, not vertically as its own design requires (`esf_raw = nanmean(rotated, axis=0)` averages *down columns*, so the edge must run vertically for that average to stay on one side of the transition). The bug was invisible to `tests/test_analysis/test_edge_analyzer.py` because every test there checked `_esf_quality` (a monotonicity ratio) or structural shape (no NaN, normalized range) — never the actual measured width against a *known* ground truth — and the wrong-orientation artifact (a disc-boundary/interpolation trend) happened to also be smooth and monotonic, so it passed every existing gate while over-measuring width by 7–14x on a synthetic edge with a known Gaussian blur sigma. Diagnosed by rendering `rotate()`'s output for several known angles and inspecting it directly (ASCII-art / value dump, not just numbers) — the same "don't hand-derive `rotate()`'s convention" principle documented above ("Locating a point across `scipy.ndimage.rotate()`..."), applied to the rotation *angle formula* itself rather than just a post-hoc point lookup. When a metric's test suite only checks shape/monotonicity/range properties, add at least one test with an analytically-known true value (`tests/test_analysis/test_edge_analyzer.py::TestEdgeWidthAccuracy`, using the erf-profile width of a Gaussian-blurred step edge) — shape-only checks can pass on a metric that's confidently, monotonically, consistently wrong. |
 | Locking `savefig()` alone doesn't fix the mathtext `ParseException` race | `core/fig_utils.py`'s `_MPL_DRAW_LOCK` (formerly `_SAVEFIG_LOCK`) was originally applied only inside `fig_to_b64()`'s `savefig()` call, on the theory that `savefig()` was the only draw-triggering call site. It wasn't: `fig.tight_layout()` also runs a full draw pass to measure text extents (titles, tick labels, legends), which hits the same non-thread-safe pyparsing packrat cache mathtext uses. `PowerSpectrumAnalyzer.analyze()` calls `fig.tight_layout()` unprotected inside its `_plot_results()`, and `gui/analysis_thread.py` runs image A/B's `PowerSpectrumAnalyzer().analyze()` concurrently in a 2-worker `ThreadPoolExecutor` (and, in parallel mode, alongside every other analyzer's figure building too) — so an unlocked `tight_layout()` in one thread reliably corrupted the cache mid-parse in another, surfacing as `⚠ Analysis failed: ... ParseException: exception raised in parse action (at char 0), (line:1, col:1)` on Section 7. Reproduced directly: 60 concurrent `tight_layout()` + locked-`savefig()` calls threw the exact same `ParseException` in a stress test; wrapping `tight_layout()` in the same lock (`core/fig_utils.py::finalize_layout()`) brought the error count to zero over the same stress test. Fixed at every call site that can run concurrently with other figure-building code: `power_spectrum.py`, `snr_analyzer.py`, `psf_analyzer.py`, `image_filters.py`, `halo_analyzer.py`, `edge_analyzer.py`, and `gui/halo_dialog.py` (its `_AnalyzeThread` isn't gated against a concurrent `Run Analysis` pass, so it's a real concurrent path too). `report/report_builder.py`'s `tight_layout()` calls were deliberately left as plain `fig.tight_layout()` — report generation runs strictly serially after every analyzer thread has already joined (`gui/analysis_thread.py`'s comment: "Report generation (always serial — needs all results)"), so there's nothing for those calls to race against; wrapping them would be lock overhead with no behavioral benefit. When adding a new figure-building method anywhere that *can* run inside a `ThreadPoolExecutor` alongside other figure code, call `finalize_layout(fig, **kwargs)` instead of `fig.tight_layout(**kwargs)` — never assume only `savefig()` needs the lock. |
 | Dropping a new file into `resources/` is enough — no `.spec` edit needed | `AstroImageLab.spec` bundles the entire directory in one line (`datas += [("resources", "resources")]`), not a per-file list. Any new asset placed in `resources/` (e.g. `AstroImageLabSplash.png`) is automatically included in the Windows/macOS/Linux PyInstaller builds without touching the spec file — confirmed when the splash screen was switched from a procedurally-painted `QPixmap` to loading `resources/AstroImageLabSplash.png` directly via `QPixmap(path).scaledToWidth(...)`. |
+| A headless script can't regain control while a `QMessageBox` is up — only a pre-armed `QTimer` can | `QMessageBox.information()`/`.question()` block the caller via a *nested* Qt event loop. A plain Python `while` loop calling `app.processEvents()` cannot run any of its own code again until the dialog closes, so it can neither detect nor dismiss the dialog itself. A `QTimer` already running *before* the blocking call is made keeps firing inside that nested loop (the same mechanism that keeps the rest of the UI responsive during any modal dialog) — so `tools/generate_screenshots.py`'s `arm_modal_capture()` arms a repeating 100 ms `QTimer` that polls `QApplication.activeModalWidget()`, grabs+saves it, and clicks its button to unblock the caller. It must be armed *before* triggering the action that raises the dialog, never after. For a mid-analysis-run screenshot, gate the capture on the real `metric_started` signal count (not a wall-clock `QTimer.singleShot` guess) so timing stays correct regardless of machine speed. |
+| `MainWindow._on_roi_selected` only stores ROI state — it never draws the overlay | Unlike the line overlay (`ZoomableImageLabel.set_line_normalised()`, a public method `_on_line_selected` calls directly), there is no equivalent public setter for the ROI box. The mouse-driven `mouseReleaseEvent` writes straight to `ZoomableImageLabel`'s private `_roi_norm` attribute and calls `.update()`. Any code that needs to draw an ROI programmatically (e.g. `tools/generate_screenshots.py`) must poke `panel._img_label._roi_norm = (x0n, y0n, x1n, y1n)` + `.update()` itself, in addition to calling `_on_roi_selected(x0, y0, x1, y1)` (pixel coords, not normalised) to keep `MainWindow`/`AnalysisControlPanel` state consistent. |
+| Removing a feature doesn't auto-sync README.md/QuickStart.md | Ghost detection (removed 2026-05-22) and PDF export (removed 2026-06-01) both stayed documented as live, working features in README.md and QuickStart.md for nearly two months after removal — QuickStart's own Troubleshooting section told users to `pip install weasyprint` to fix a feature that no longer existed anywhere in the codebase. Root cause: the removal commits didn't touch either doc, and nothing else prompts a check. QuickStart.md is opened directly by the app's own **Help → Quick Start Guide** menu item, so this isn't just GitHub-browsing staleness — it's live in-app UX. When removing or fundamentally changing a user-facing feature, grep README.md and QuickStart.md for it as part of the same change, not as a separate later cleanup pass. |
+
+---
+
+## Documentation Screenshots — Key Patterns
+
+`tools/generate_screenshots.py` regenerates every screenshot embedded in README.md and
+QuickStart.md (`resources/*.png`) from synthetic data — no real FITS files or manual
+GUI interaction required. Run it (`python tools/generate_screenshots.py`, needs a real
+interactive desktop session so dark-mode chrome matches the OS theme) whenever a GUI
+change makes existing screenshots stale, rather than leaving them to drift the way the
+pre-toolbar screenshots did.
+
+### Sample data
+
+Two full-resolution (1920×1080) images from `SyntheticGenerator`, camera `"Player One —
+Mercury-M"` (the smallest full camera — see the Testing section below), sharing the same
+`n_stars` so the two-RNG convention gives matching star positions while differing
+`fwhm_arcsec`/`halo`/`moffat_beta` make Image A vs B visibly distinguishable. Reusing the
+generator (rather than real data) keeps the script fully reproducible with zero external
+dependencies.
+
+### Capture technique
+
+`QWidget.grab()` from a normal (non-`offscreen`) `QApplication` — construct each
+widget/dialog directly, no user interaction, no visible window required (see the
+"OS-level screenshots... unreliable" pitfall above for why this is the right primitive).
+Modal dialogs and mid-run states need the two techniques captured as their own pitfall
+rows above (`arm_modal_capture()`'s pre-armed `QTimer`; `metric_started`-signal-gated
+mid-run capture) — both live in the script as reusable helpers, not one-off hacks.
+
+### Manifest
+
+15 files total: 8 full/panel/group-box states of the main window (empty, both images
+loaded, line drawn, ROI drawn, Parameters group, Metrics+Region&Run composite via
+`grab_side_by_side()`), the manual starless prompt, a mid-run and a completion-dialog
+capture from one real six-metric analysis run, the Report Inspector that run produces,
+and the three Tools-menu dialogs (Synthetic Data Generator, Spatial Target Generator,
+Halo Analyzer — the latter with a star pre-clicked via `dlg._on_star_clicked(x, y)` so
+the results table and PSF/RDF charts are populated rather than blank).
 
 ---
 
