@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 
 from analysis.moffat_fit import fit_moffat2d_core
 from core.astro_image import AstroImage
+from core.fig_utils import finalize_layout
 from core.stretch import normalize_for_display
 from gui.image_panel import ZoomableImageLabel
 
@@ -1023,7 +1024,7 @@ class HaloAnalyzerDialog(QDialog):
                     ax3_top.set_xlabel("Radius (arcsec)", fontsize=7, color=orig_color)
                     ax3_top.tick_params(labelsize=6, colors=orig_color)
 
-            self._fig.tight_layout(pad=1.0)
+            finalize_layout(self._fig, pad=1.0)
             self._canvas.draw_idle()
         finally:
             matplotlib.rcParams.update(_saved_params)

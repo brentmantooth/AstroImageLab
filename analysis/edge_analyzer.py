@@ -10,7 +10,7 @@ from scipy.ndimage import sobel, rotate, gaussian_gradient_magnitude, median_fil
 from scipy.interpolate import interp1d
 
 from core.astro_image import AstroImage
-from core.fig_utils import figs_to_b64
+from core.fig_utils import figs_to_b64, finalize_layout
 from core.models import (EDGE_ROI_HALF_WIDTH, EDGE_ROI_MAP_INDICATOR_PX,
                           SECTION8_BORDER_CROP_FRACTION, EDGE_ESF_MIN_MONOTONICITY,
                           EDGE_N_TOP_EDGES)
@@ -494,7 +494,7 @@ class EdgeAnalyzer:
         ax.set_title(f"Gradient magnitude — {label}")
         ax.set_xlabel("X (px)")
         ax.set_ylabel("Y (px)")
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     # ------------------------------------------------------------------
@@ -569,7 +569,7 @@ class EdgeAnalyzer:
         ax.set_xlim(0, w_disp)
         ax.set_ylim(0, h_disp)
 
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     # ------------------------------------------------------------------

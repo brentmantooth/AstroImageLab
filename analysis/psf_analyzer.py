@@ -11,7 +11,7 @@ from astropy.table import Table
 from photutils.psf import EPSFBuilder, extract_stars
 
 from core.astro_image import AstroImage
-from core.fig_utils import figs_to_b64
+from core.fig_utils import figs_to_b64, finalize_layout
 from core.models import (SEEING_WARN_FWHM_ARCS, PSF_BETA_MIN, PSF_BETA_MAX, PSF_FWHM_CLIP_NSIGMA,
                           ABERRATION_MIN_STARS, ABERRATION_OUTER_RADIUS_FRAC, EPSF_MAX_STARS)
 from analysis.moffat_fit import fit_moffat2d_core
@@ -453,7 +453,7 @@ class PSFAnalyzer:
         ax.set_ylim(0, 1.05)
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     def _plot_epsf(self, epsf: np.ndarray, label: str) -> plt.Figure:
@@ -462,5 +462,5 @@ class PSFAnalyzer:
                        origin="upper", cmap="viridis", interpolation="nearest")
         ax.set_title(f"ePSF — {label}")
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig

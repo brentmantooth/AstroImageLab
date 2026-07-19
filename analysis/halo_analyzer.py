@@ -14,7 +14,7 @@ import matplotlib.ticker as mticker
 from scipy.optimize import curve_fit
 
 from core.astro_image import AstroImage
-from core.fig_utils import figs_to_b64
+from core.fig_utils import figs_to_b64, finalize_layout
 from core.models import HALO_FIT_RADIUS_PX, HALO_MIN_STAR_SNR, RDF_BIN_WIDTH
 from analysis.star_catalog import StarCatalogBuilder
 
@@ -423,5 +423,5 @@ class HaloAnalyzer:
                      f"R_halo = {halo_r_str}")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig

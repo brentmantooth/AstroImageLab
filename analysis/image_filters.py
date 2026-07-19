@@ -15,7 +15,7 @@ from scipy.ndimage import generic_filter, uniform_filter, gaussian_filter, gauss
 import pywt
 
 from core.astro_image import AstroImage
-from core.fig_utils import fig_to_b64, figs_to_b64
+from core.fig_utils import fig_to_b64, figs_to_b64, finalize_layout
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
                          ENTROPY_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
@@ -1791,7 +1791,7 @@ class SpatialDetailAnalyzer:
             Patch(facecolor="0.5", edgecolor="none", label="Unclassified"),
         ]
         ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.8)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     def _plot_localmax_mask_grid(self, grid_rows: list,
@@ -1832,7 +1832,7 @@ class SpatialDetailAnalyzer:
         legend_handle = Patch(facecolor=color, edgecolor="none", alpha=0.8, label="Local maxima (dilated) ∪ top-N% bright")
         fig.legend(handles=[legend_handle], loc="lower center", fontsize=9, bbox_to_anchor=(0.5, -0.01))
         fig.suptitle("Local-maxima masks by metric (rows) and scale, smallest → largest (columns)", fontsize=11)
-        fig.tight_layout(rect=[0.03, 0.02, 1, 0.96])
+        finalize_layout(fig, rect=[0.03, 0.02, 1, 0.96])
         return fig
 
     def _plot_snr_bars(self, snr_a: dict, snr_b: dict,
@@ -1857,7 +1857,7 @@ class SpatialDetailAnalyzer:
         ax.set_xticklabels([f"Level {i}" for i in x])
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     @staticmethod
@@ -1921,7 +1921,7 @@ class SpatialDetailAnalyzer:
         ax.set_title("Noise-corrected local contrast — cross-method overview")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     def _plot_localmax_ratio_overview(self, log_ratios_by_method: dict,
@@ -1969,7 +1969,7 @@ class SpatialDetailAnalyzer:
         ax.set_title("Local-maxima masked contrast — cross-method overview (log ratio)")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     @staticmethod
@@ -2088,7 +2088,7 @@ class SpatialDetailAnalyzer:
         if not any_data:
             plt.close(fig)
             return None
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     @staticmethod

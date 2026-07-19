@@ -11,7 +11,7 @@ except ImportError:
     bn = np
 
 from core.astro_image import AstroImage, _resolve_gain
-from core.fig_utils import fig_to_b64
+from core.fig_utils import fig_to_b64, finalize_layout
 
 
 class SNRAnalyzer:
@@ -147,5 +147,5 @@ class SNRAnalyzer:
         ax.set_title(f"SNR map — {label}", fontsize=10)
         ax.set_xlabel("x (px)")
         ax.set_ylabel("y (px)")
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig_to_b64(fig, dpi=120)
