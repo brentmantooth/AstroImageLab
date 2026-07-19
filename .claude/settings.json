@@ -19,7 +19,8 @@
       "Bash(\"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/test_roi_reset.py\")",
       "Bash(PYTHONIOENCODING=utf-8 \"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/test_roi_reset.py\")",
       "Bash(PYTHONIOENCODING=utf-8 \"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/test_toolbar_sync.py\")",
-      "Bash(python -m py_compile gui/control_panel.py gui/main_window.py gui/image_panel.py)"
+      "Bash(python -m py_compile gui/control_panel.py gui/main_window.py gui/image_panel.py)",
+      "Bash(/c/Users/bmant/anaconda3/envs/astrolab/python.exe -c ' *)"
     ]
   }
 }
