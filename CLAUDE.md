@@ -463,8 +463,8 @@ sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 
 ```bash
 conda activate astrolab
-pip install pytest pytest-cov pytest-timeout   # one-time setup; not in environment.yml
-pytest tests/ -m "not slow"                   # fast suite (~11 min, 430 tests)
+pip install -r requirements-test.txt          # one-time setup; not in environment.yml
+pytest tests/ -m "not slow" -n auto           # fast suite (438 tests; parallel via pytest-xdist)
 pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
 pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 ```
@@ -475,12 +475,13 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 - **Generated fixtures** — `tests/conftest.py` writes a 512×512 hand-crafted FITS (30 Gaussian stars, ~1 s) as the session fixture for all analysis tests. No binary fixtures committed to git.
 - **Slow marker** — `@pytest.mark.slow` gates tests that call `SyntheticGenerator.generate(preview=False)` (full 1920×1080 FITS, ~30 s). CI runs with `-m "not slow"`.
 - **Smallest camera for generator tests** — `"Player One — Mercury-M"` (1920×1080 full-res; 480×270 in preview mode) is the lightest camera in `synthetic/cameras.py`.
+- **Share identical-input analyzer/generator calls via a fixture** — if two or more tests in a file call `SomeAnalyzer().analyze(astro_image_a)` (or `StarCatalogBuilder().build(...)`, `SyntheticGenerator().generate(...)`) with the exact same arguments, that result must come from a class- or module-scoped fixture, not a fresh call in each test body. `SpatialDetailAnalyzer.analyze()` in particular runs LoG/wavelet/local-sigma/entropy/local-maxima detection across every configured scale — cheap to assert against, expensive to recompute. Only call it fresh when the test genuinely needs different arguments (a different ROI, crosshair, monkeypatch, or a second call specifically to test determinism/parameter-wiring, e.g. `test_second_run_consistent` / `test_higher_top_percent_does_not_shrink_masked_pixel_count`). A class-scoped fixture that wraps a value (not just computes one) still needs the `@pytest.fixture(scope="class") @classmethod def name(cls, ...):` form — a plain `def name(self, ...):` class-scoped fixture is deprecated in pytest 9 and breaks in pytest 10.
 
 ### CI
 
 `.github/workflows/ci.yml` — triggers on push/PR to `main`. Two jobs:
 
-- **test** — matrix across `windows-latest`, `ubuntu-latest`, `macos-latest`; uses `requirements-test.txt` (no PyQt6). Add `CODECOV_TOKEN` to repo secrets to enable Codecov upload; coverage is flagged per OS.
+- **test** — matrix across `windows-latest`, `ubuntu-latest`, `macos-latest`; uses `requirements-test.txt` (no PyQt6); runs `pytest -n auto` (pytest-xdist) under a 20-minute job timeout. Add `CODECOV_TOKEN` to repo secrets to enable Codecov upload; coverage is flagged per OS.
 - **build** — runs after all test jobs pass (`needs: test`); same OS matrix; uses `requirements-build.txt`; uploads `AstroImageLab-{win64,macos,linux}.zip` as workflow artifacts downloadable from the Actions tab.
 
 ### Test fixture pitfalls
@@ -492,6 +493,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | `PSFAnalyzer.analyze()["figures"]` KeyError | `figures` is only added when `n_stars_used > 0`. Guard with `if result["n_stars_used"] > 0`. |
 | `contrast_ratios_b` / `entropy_contrast_ratio_b` always present | `SpatialDetailAnalyzer.analyze()` always includes `contrast_ratios_b: {}` and `entropy_contrast_ratio_b: {}` even in single-image mode. Neither is ever `None` or absent — check `not b_ratios` / `not ecr_b` instead. |
 | Background2D fails on tiny images | `estimate_background()` with default `box_size=64` needs the image to be larger than the box. Any image used in analysis tests should be at least 128×128. |
+| CI fast suite crossed the 20-min job timeout | Root cause was not one slow test — it was ~80 near-identical `AnalyzerX().analyze(astro_image_a)` / `.build(astro_image_a)` calls scattered across `test_psf_analyzer.py`, `test_edge_analyzer.py`, `test_snr_analyzer.py`, `test_halo_analyzer.py`, `test_power_spectrum.py`, `test_star_catalog.py`, and `test_spatial_detail.py` (one parametrized case there alone re-ran a full two-image `SpatialDetailAnalyzer.analyze()` 15× just to check one absent dict key). Fixed by collapsing same-input calls into shared fixtures (see the "Share identical-input analyzer/generator calls" design principle above) plus adding `pytest-xdist`/`-n auto`. Before assuming a CI timeout needs a longer `timeout-minutes`, run `pytest --durations=25` locally — a large `setup` duration shared by many tests is fine (paid once), but many `call` entries at the same duration for the same analyzer is a missing-fixture symptom, not a slow-runner problem. |
 
 ---
 

@@ -36,24 +36,24 @@ def _make_double_edge_roi(size: int = 60) -> np.ndarray:
 
 
 class TestAnalyze:
-    def test_returns_dict(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    @pytest.fixture(scope="class")
+    @classmethod
+    def result(cls, astro_image_a):
+        return EdgeAnalyzer().analyze(astro_image_a)
+
+    def test_returns_dict(self, result):
         assert isinstance(result, dict)
 
-    def test_required_keys_present(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_required_keys_present(self, result):
         assert _RESULT_KEYS.issubset(result.keys())
 
-    def test_n_edges_nonnegative(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_n_edges_nonnegative(self, result):
         assert result["n_edges"] >= 0
 
-    def test_edges_is_list(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_edges_is_list(self, result):
         assert isinstance(result["edges"], list)
 
-    def test_n_edges_matches_list_length(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_n_edges_matches_list_length(self, result):
         assert result["n_edges"] == len(result["edges"])
 
     def test_with_roi(self, astro_image_a):

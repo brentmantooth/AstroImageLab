@@ -10,50 +10,52 @@ from core.astro_image import AstroImage
 from core.models import STD_KERNEL_SIZES, LOG_SIGMAS, ENTROPY_KERNEL_SIZES, WAVELET_LEVELS
 
 
+@pytest.fixture(scope="module")
+def single_image_result(astro_image_a) -> dict:
+    """Cached default-params single-image SpatialDetailAnalyzer result. Shared by
+    every test in this file that only inspects an already-computed single-image
+    result rather than exercising analyze() with unique parameters (roi, crosshair,
+    monkeypatches) -- analyze() runs LoG/wavelet/local-sigma/entropy/local-maxima
+    across multiple scales and is too expensive to re-run per assertion."""
+    return SpatialDetailAnalyzer().analyze(astro_image_a)
+
+
 class TestAnalyze:
-    def test_returns_dict(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert isinstance(result, dict)
+    def test_returns_dict(self, single_image_result):
+        assert isinstance(single_image_result, dict)
 
-    def test_contrast_ratios_a_present(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "contrast_ratios_a" in result
+    def test_contrast_ratios_a_present(self, single_image_result):
+        assert "contrast_ratios_a" in single_image_result
 
-    def test_wavelet_snr_a_present(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "wavelet_snr_a" in result
+    def test_wavelet_snr_a_present(self, single_image_result):
+        assert "wavelet_snr_a" in single_image_result
 
-    def test_panels_present(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "panels" in result
+    def test_panels_present(self, single_image_result):
+        assert "panels" in single_image_result
 
-    def test_original_panel_present_single_image(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        original = result["panels"]["original"]
+    def test_original_panel_present_single_image(self, single_image_result):
+        original = single_image_result["panels"]["original"]
         assert original["a"] is not None
         assert original["b"] is None
         assert original["diff"] is None
-        assert "original" in result["figures"]
-        assert "corr_original" not in result["figures"]
+        assert "original" in single_image_result["figures"]
+        assert "corr_original" not in single_image_result["figures"]
 
-    def test_contrast_ratios_are_positive(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        ratios = result.get("contrast_ratios_a") or []
+    def test_contrast_ratios_are_positive(self, single_image_result):
+        ratios = single_image_result.get("contrast_ratios_a") or []
         for r in ratios:
             if r is not None:
                 assert r >= 0.0
 
-    def test_wavelet_snr_finite(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        snrs = result.get("wavelet_snr_a") or []
+    def test_wavelet_snr_finite(self, single_image_result):
+        snrs = single_image_result.get("wavelet_snr_a") or []
         for s in snrs:
             if s is not None:
                 assert np.isfinite(s)
 
-    def test_single_image_b_ratios_empty(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+    def test_single_image_b_ratios_empty(self, single_image_result):
         # Single-image mode: contrast_ratios_b is present but contains no values
-        b_ratios = result.get("contrast_ratios_b")
+        b_ratios = single_image_result.get("contrast_ratios_b")
         assert b_ratios is None or not b_ratios   # None or empty dict/list
 
     def test_minimal_image_no_crash(self, tmp_path):
@@ -65,19 +67,16 @@ class TestAnalyze:
         result = SpatialDetailAnalyzer().analyze(img)
         assert isinstance(result, dict)
 
-    def test_entropy_contrast_ratio_a_present(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "entropy_contrast_ratio_a" in result
+    def test_entropy_contrast_ratio_a_present(self, single_image_result):
+        assert "entropy_contrast_ratio_a" in single_image_result
 
-    def test_single_image_entropy_contrast_ratio_b_empty(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
+    def test_single_image_entropy_contrast_ratio_b_empty(self, single_image_result):
         # Single-image mode: entropy_contrast_ratio_b is present but empty (same pattern as contrast_ratios_b)
-        ecr_b = result.get("entropy_contrast_ratio_b")
+        ecr_b = single_image_result.get("entropy_contrast_ratio_b")
         assert ecr_b is None or not ecr_b
 
-    def test_entropy_contrast_ratio_a_positive(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        for v in result.get("entropy_contrast_ratio_a", {}).values():
+    def test_entropy_contrast_ratio_a_positive(self, single_image_result):
+        for v in single_image_result.get("entropy_contrast_ratio_a", {}).values():
             if v is not None:
                 assert v >= 0.0
 
@@ -249,8 +248,8 @@ class TestNoiseCorrectedContrastSingleImage:
 
     @pytest.fixture(scope="class")
     @classmethod
-    def single_result(cls, astro_image_a):
-        return SpatialDetailAnalyzer().analyze(astro_image_a)
+    def single_result(cls, single_image_result):
+        return single_image_result
 
     @pytest.mark.parametrize("key", [
         "std_nc_score_a", "std_nc_score_b", "std_nc_ratio",
@@ -810,9 +809,8 @@ class TestSharedMaskCombination:
 
 
 class TestMaskIllustrationFigure:
-    def test_absent_in_single_image_mode(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "mask_illustration" not in result["figures"]
+    def test_absent_in_single_image_mode(self, single_image_result):
+        assert "mask_illustration" not in single_image_result["figures"]
 
     def test_present_in_two_image_mode(self, nc_result):
         assert "mask_illustration" in nc_result["figures"]
@@ -837,9 +835,8 @@ class TestCorrelationScatterFigures:
         assert len(nc_result["figures"][key]) > 0
 
     @pytest.mark.parametrize("key", _CORR_KEYS)
-    def test_absent_in_single_image_mode(self, astro_image_a, key):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert key not in result["figures"]
+    def test_absent_in_single_image_mode(self, single_image_result, key):
+        assert key not in single_image_result["figures"]
 
 
 class TestLocalMaxIntegration:
@@ -871,27 +868,24 @@ class TestLocalMaxIntegration:
             assert entry["log_ratio_mean"] is not None
             assert np.isclose(10.0 ** entry["log_ratio_mean"], entry["ratio"])
 
-    def test_empty_in_single_image_mode(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert result["localmax"] == {}
+    def test_empty_in_single_image_mode(self, single_image_result):
+        assert single_image_result["localmax"] == {}
 
 
 class TestLocalMaxFigures:
     def test_ratio_overview_present_in_two_image_mode(self, nc_result):
         assert "localmax_ratio_overview" in nc_result["figures"]
 
-    def test_ratio_overview_absent_in_single_image_mode(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "localmax_ratio_overview" not in result["figures"]
+    def test_ratio_overview_absent_in_single_image_mode(self, single_image_result):
+        assert "localmax_ratio_overview" not in single_image_result["figures"]
 
     def test_mask_illustration_present_in_two_image_mode(self, nc_result):
         assert "localmax_mask_illustration" in nc_result["figures"]
         assert isinstance(nc_result["figures"]["localmax_mask_illustration"], str)
         assert len(nc_result["figures"]["localmax_mask_illustration"]) > 0
 
-    def test_mask_illustration_absent_in_single_image_mode(self, astro_image_a):
-        result = SpatialDetailAnalyzer().analyze(astro_image_a)
-        assert "localmax_mask_illustration" not in result["figures"]
+    def test_mask_illustration_absent_in_single_image_mode(self, single_image_result):
+        assert "localmax_mask_illustration" not in single_image_result["figures"]
 
     def test_mask_illustration_is_a_multi_row_grid(self, nc_result):
         # Regression guard: the old single-scale illustration was one ~9-inch-tall

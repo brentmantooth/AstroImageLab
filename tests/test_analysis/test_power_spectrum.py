@@ -11,34 +11,33 @@ _RESULT_KEYS = {"mid_high_ratio", "power_spectrum_2d", "radial_power", "freq_axi
 
 
 class TestAnalyze:
-    def test_returns_dict(self, astro_image_a):
-        result = PowerSpectrumAnalyzer().analyze(astro_image_a)
+    @pytest.fixture(scope="class")
+    @classmethod
+    def result(cls, astro_image_a):
+        return PowerSpectrumAnalyzer().analyze(astro_image_a)
+
+    def test_returns_dict(self, result):
         assert isinstance(result, dict)
 
-    def test_result_has_required_keys(self, astro_image_a):
-        result = PowerSpectrumAnalyzer().analyze(astro_image_a)
+    def test_result_has_required_keys(self, result):
         assert _RESULT_KEYS.issubset(result.keys())
 
-    def test_mid_high_ratio_positive(self, astro_image_a):
-        result = PowerSpectrumAnalyzer().analyze(astro_image_a)
+    def test_mid_high_ratio_positive(self, result):
         ratio = result["mid_high_ratio"]
         if ratio is not None:
             assert ratio > 0.0
 
-    def test_radial_power_nonnegative(self, astro_image_a):
-        result = PowerSpectrumAnalyzer().analyze(astro_image_a)
+    def test_radial_power_nonnegative(self, result):
         rp = result["radial_power"]
         if rp is not None:
             assert np.all(np.asarray(rp) >= 0.0)
 
-    def test_freq_axis_increasing(self, astro_image_a):
-        result = PowerSpectrumAnalyzer().analyze(astro_image_a)
+    def test_freq_axis_increasing(self, result):
         freq = result["freq_axis"]
         if freq is not None and len(freq) > 1:
             assert np.all(np.diff(freq) > 0)
 
-    def test_freq_axis_in_nyquist_range(self, astro_image_a):
-        result = PowerSpectrumAnalyzer().analyze(astro_image_a)
+    def test_freq_axis_in_nyquist_range(self, result):
         freq = result["freq_axis"]
         if freq is not None:
             assert float(freq[0]) >= 0.0
