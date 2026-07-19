@@ -212,7 +212,7 @@ class SpatialDetailAnalyzer:
                 f"Original (normalised) — {image_a.label}",
                 f"Original (normalised) — {_label_b}",
                 diff_title="Log ratio (A/B), original image",
-                cmap=SECTION8_ANALYSIS_CMAP,
+                cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
                 display_roi=None,
                 xs_data=xs_raw_orig,
                 xs_line=xs_line_orig,
@@ -221,7 +221,7 @@ class SpatialDetailAnalyzer:
             orig_fig = self._plot_single(
                 self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
                 f"Original (normalised) — {image_a.label}",
-                cmap=SECTION8_ANALYSIS_CMAP,
+                cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
             )
         figures["original"] = fig_to_b64(orig_fig, dpi=150)
 

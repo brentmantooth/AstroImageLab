@@ -550,19 +550,14 @@ def _localmax_distributions_figure(localmax: dict) -> tuple[str, str]:
     caption_html = (
         '<p class="caption">'
         "<b>Masked-region pixel value distributions (Image A vs Image B).</b> "
+        "Magnitudes are the absolute values of the masked pixels within each row's local-maxima mask. "
+        "In most cases, larger magnitudes indicate sharper local detail. "
         "Each row is one Section 8j metric/scale, shown as a "
         "<b>violin plot</b> (kernel density estimate, randomly subsampled for "
         "display) with an IQR box-plot overlay: "
         "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, "
         "a <span style='color:magenta'><b>magenta centre line</b></span> at the "
-        "median. These are the raw masked-pixel magnitude populations the "
-        "Mean/Std/Ratio/Significance columns above are computed from — see the "
-        "table for exact values (computed from the full, unsampled population, not "
-        "this figure's subsampled copy). "
-        "Each row's x-axis is independently clipped to its own 1st&ndash;99th "
-        "percentile range so the IQR box stays visible; rows with rare "
-        "extreme-outlier magnitudes may have a small fraction of the violin's tail "
-        "extend beyond the visible axis."
+        "median. "
         "</p>"
     )
     return img_html, caption_html
@@ -592,6 +587,9 @@ def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
     if not rows or not has_data:
         return "", ""
 
+    _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+    orig_color = "white" if _is_dark else "black"
+
     fig, axes = plt.subplots(len(rows), 1, figsize=(7, 1.1 * len(rows) + 1))
     fig.subplots_adjust(hspace=0.65, left=0.22, right=0.97, top=0.97, bottom=0.04)
 
@@ -617,7 +615,7 @@ def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
 
         sns.violinplot(x=vlr, orient="h", color="steelblue", inner=None, linewidth=0.8, ax=ax)
         _draw_boxwhisker(ax, [vlr])
-        ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, zorder=4)
+        ax.axvline(0.0, color=orig_color, linestyle="--", linewidth=0.8, zorder=4)
 
         lo, hi = np.percentile(vlr, [1.0, 99.0])
         if hi > lo:
@@ -636,6 +634,8 @@ def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
     caption_html = (
         '<p class="caption">'
         "<b>Masked-region log ratio distributions (log&#8321;&#8320;(A / B)).</b> "
+        "Values greater than 0 indicate that Image A's pixel magnitudes are larger than Image B's, "
+        "and values less than 0 indicate the opposite. "
         "Each row is one Section 8j metric/scale, shown as a "
         "<b>violin plot</b> (kernel density estimate, randomly subsampled for "
         "display) of the per-pixel log10(|A|/|B|) population within that row's "
@@ -4128,7 +4128,9 @@ high frequencies indicate one filter preserves more fine-scale spatial detail. T
 dashed vertical line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
 
 {img_ratio}
-<p class="caption">Ratio of radial power spectra in decibels. Solid = starless-pair
+<p class="caption">Ratio of radial power spectra in decibels. Values greater than 0 indicate 
+that Image A has more power (finer detail) at that frequency, negative values mean Image B does.
+Solid = starless-pair
 ratio; dashed = with-stars-pair ratio (only when both images used a starless primary
 input). Shown only where both images' frequency bins are exactly aligned bin-for-bin —
 always true when an analysis ROI is set, true in auto-ROI mode only when both images'
@@ -4635,7 +4637,9 @@ background populations behind each score are not pixel-paired between A and B.</
 {_hires_img_tag(figs.get("localmax_ratio_overview"), "Local-maxima ratio overview")}
 <p class="caption">Local-maxima masked log&#8321;&#8320;(A/B) for every metric plotted
 against its approximate spatial scale (same scale convention as 8i). Compare within a
-method's own line, not numerically across methods. Error bars show &plusmn;1 standard
+method's own line, not numerically across methods. Values greater than 0 indicate that 
+Image A's pixel magnitudes are larger than Image B's, and values less than 0 indicate the opposite. 
+Error bars show &plusmn;1 standard
 deviation of the per-pixel log10(A/B) population within each scale's own mask, plotted
 directly with no unit conversion — an exact spread measure, since the masked pixels are
 genuinely paired between Image A and Image B at each scale.</p>
