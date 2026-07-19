@@ -14,7 +14,10 @@ from PyQt6.QtWidgets import (
 from core.models import (
     STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_LEVELS, DEFAULT_PIXEL_SCALE,
     MIN_STAR_SNR, SEEING_WARN_FWHM_ARCS, REF_SEEING_ARCSEC, XS_SNR_REGION_WIDTH,
-    EPSF_MAX_STARS,
+    EPSF_MAX_STARS, SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
+    SECTION8_NEBULA_MASK_MAX_HOLE_PX,
+    SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+    SECTION8_LOCALMAX_TOP_PERCENT,
 )
 
 
@@ -49,7 +52,7 @@ class AnalysisControlPanel(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
 
         # ── Metrics group ──────────────────────────────────────────────
-        metrics_box = QGroupBox("Metrics")
+        metrics_box = QGroupBox("1. Metrics")
         metrics_layout = QGridLayout(metrics_box)
         metrics_layout.setColumnStretch(0, 1)
         metrics_layout.setColumnMinimumWidth(1, 46)   # Export column
@@ -126,21 +129,40 @@ class AnalysisControlPanel(QWidget):
         root.addWidget(metrics_box)
 
         # ── Parameters group ───────────────────────────────────────────
-        params_box = QGroupBox("Parameters")
-        params_layout = QFormLayout(params_box)
+        params_box = QGroupBox("2. Parameters")
+        params_outer = QVBoxLayout(params_box)
+        columns_row = QHBoxLayout()
+
+        col1_box = QVBoxLayout()
+        col1_hdr = QLabel("General / PSF")
+        col1_hdr.setStyleSheet("font-weight: bold;")
+        col1_box.addWidget(col1_hdr)
+        form1 = QFormLayout()
+        col1_box.addLayout(form1)
+
+        col2_box = QVBoxLayout()
+        col2_hdr = QLabel("Nebula & Local-Maxima")
+        col2_hdr.setStyleSheet("font-weight: bold;")
+        col2_box.addWidget(col2_hdr)
+        form2 = QFormLayout()
+        col2_box.addLayout(form2)
+
+        columns_row.addLayout(col1_box, stretch=1)
+        columns_row.addLayout(col2_box, stretch=1)
+        params_outer.addLayout(columns_row)
 
         self._min_snr = QDoubleSpinBox()
         self._min_snr.setRange(5.0, 500.0)
         self._min_snr.setValue(MIN_STAR_SNR)
         self._min_snr.setToolTip("Threshold signal-to-noise ratio for star inclusion in ePSF calculations.")
-        params_layout.addRow("Min star S/N:", self._min_snr)
+        form1.addRow("Min star S/N:", self._min_snr)
 
         self._epsf_max_stars = QSpinBox()
         self._epsf_max_stars.setRange(10, 2000)
         self._epsf_max_stars.setValue(EPSF_MAX_STARS)
         self._epsf_max_stars.setToolTip("Maximum number of stars used for ePSF estimation.\n"
                                         "Stars are ranked by peak flux; brightest N are used.")
-        params_layout.addRow("ePSF max stars:", self._epsf_max_stars)
+        form1.addRow("ePSF max stars:", self._epsf_max_stars)
 
         self._ref_seeing_arcsec = QDoubleSpinBox()
         self._ref_seeing_arcsec.setRange(0.5, 10.0)
@@ -150,7 +172,7 @@ class AnalysisControlPanel(QWidget):
         self._ref_seeing_arcsec.setSuffix(" \"")
         self._ref_seeing_arcsec.setToolTip("Seeing distortion reference FWHM for ePSF analysis.\n"
                                            "Sets the benchmark Moffat PSF shown in PSF/MTF reports.")
-        params_layout.addRow("PSF reference seeing (arcsec):", self._ref_seeing_arcsec)
+        form1.addRow("PSF reference seeing (arcsec):", self._ref_seeing_arcsec)
 
         self._seeing_thresh = QDoubleSpinBox()
         self._seeing_thresh.setRange(0.5, 10.0)
@@ -159,20 +181,75 @@ class AnalysisControlPanel(QWidget):
         self._seeing_thresh.setSuffix(" \"")
         self._seeing_thresh.setToolTip("Warning indicator threshold based on measured FWHM of stars.\n"
                                        "Analysis flags sessions exceeding this seeing limit.")
-        params_layout.addRow("Seeing warn threshold:", self._seeing_thresh)
+        form1.addRow("Seeing warn threshold:", self._seeing_thresh)
 
         self._xs_snr_width = QSpinBox()
         self._xs_snr_width.setRange(3, 100)
         self._xs_snr_width.setValue(XS_SNR_REGION_WIDTH)
         self._xs_snr_width.setToolTip("Number of pixels to sample for cross-section SNR calculation.\n"
                                       "Defines the bright and dark region window widths along the profile.")
-        params_layout.addRow("XS SNR region width (px):", self._xs_snr_width)
+        form1.addRow("XS SNR region width (px):", self._xs_snr_width)
 
         self._wavelet_levels = QSpinBox()
         self._wavelet_levels.setRange(2, 6)
         self._wavelet_levels.setValue(WAVELET_LEVELS)
         self._wavelet_levels.setToolTip("Number of wavelet layers used in spatial detail analysis.")
-        params_layout.addRow("Wavelet levels:", self._wavelet_levels)
+        form1.addRow("Wavelet levels:", self._wavelet_levels)
+
+        self._nebula_sigma = QDoubleSpinBox()
+        self._nebula_sigma.setRange(0.5, 5.0)
+        self._nebula_sigma.setSingleStep(0.1)
+        self._nebula_sigma.setDecimals(2)
+        self._nebula_sigma.setValue(SECTION8_NEBULA_MASK_SIGMA)
+        self._nebula_sigma.setToolTip("Nebula mask threshold for Section 8 spatial detail analysis.\n"
+                                       "Pixels above this many RMS units over background are classified as Nebula.")
+        form2.addRow("Nebula mask threshold (× RMS):", self._nebula_sigma)
+
+        self._nebula_dilation_px = QSpinBox()
+        self._nebula_dilation_px.setRange(0, 20)
+        self._nebula_dilation_px.setValue(SECTION8_NEBULA_MASK_DILATION_PX)
+        self._nebula_dilation_px.setToolTip("Grows the Section 8 nebula mask outward by this many pixels\n"
+                                             "to capture dim/dark transition regions at nebula edges.")
+        form2.addRow("Nebula mask dilation (px):", self._nebula_dilation_px)
+
+        self._nebula_max_hole_px = QSpinBox()
+        self._nebula_max_hole_px.setRange(0, 20)
+        self._nebula_max_hole_px.setValue(SECTION8_NEBULA_MASK_MAX_HOLE_PX)
+        self._nebula_max_hole_px.setToolTip("Fills enclosed background gaps up to this size (px per side)\n"
+                                             "inside the Section 8 nebula mask, before dilation.")
+        form2.addRow("Nebula mask hole-fill (px):", self._nebula_max_hole_px)
+
+        self._localmax_footprint_mult = QDoubleSpinBox()
+        self._localmax_footprint_mult.setRange(1.0, 6.0)
+        self._localmax_footprint_mult.setSingleStep(0.5)
+        self._localmax_footprint_mult.setDecimals(2)
+        self._localmax_footprint_mult.setValue(SECTION8_LOCALMAX_FOOTPRINT_MULT)
+        self._localmax_footprint_mult.setToolTip(
+            "Section 8j local-maxima mask: neighbourhood size, as a multiple of\n"
+            "each metric's own spatial scale, used to test whether a pixel is a local maximum.")
+        form2.addRow("Local-maxima footprint (× scale):", self._localmax_footprint_mult)
+
+        self._localmax_prominence_pctl = QDoubleSpinBox()
+        self._localmax_prominence_pctl.setRange(50.0, 99.9)
+        self._localmax_prominence_pctl.setSingleStep(1.0)
+        self._localmax_prominence_pctl.setDecimals(1)
+        self._localmax_prominence_pctl.setValue(SECTION8_LOCALMAX_PROMINENCE_PERCENTILE)
+        self._localmax_prominence_pctl.setToolTip(
+            "Section 8j local-maxima mask: minimum peak height, as a percentile of\n"
+            "each scale's own combined |A|,|B| peak-source values.")
+        form2.addRow("Local-maxima prominence (pctl):", self._localmax_prominence_pctl)
+
+        self._localmax_top_percent = QDoubleSpinBox()
+        self._localmax_top_percent.setRange(0.5, 25.0)
+        self._localmax_top_percent.setSingleStep(0.5)
+        self._localmax_top_percent.setDecimals(1)
+        self._localmax_top_percent.setSuffix(" %")
+        self._localmax_top_percent.setValue(SECTION8_LOCALMAX_TOP_PERCENT)
+        self._localmax_top_percent.setToolTip(
+            "Section 8j local-maxima mask: pixels in the top N% of Image A's or Image B's\n"
+            "own value distribution are unioned (OR) into the mask, so broad bright plateaus\n"
+            "are captured even when they never register as an isolated local-maximum peak.")
+        form2.addRow("Local-maxima top-bright (%):", self._localmax_top_percent)
 
         self._pixel_scale_override = QDoubleSpinBox()
         self._pixel_scale_override.setRange(0.0, 20.0)
@@ -180,12 +257,12 @@ class AnalysisControlPanel(QWidget):
         self._pixel_scale_override.setValue(0.0)
         self._pixel_scale_override.setSuffix(" \"/px")
         self._pixel_scale_override.setSpecialValueText("(from header)")
-        params_layout.addRow("Pixel scale override:", self._pixel_scale_override)
+        form1.addRow("Pixel scale override:", self._pixel_scale_override)
 
         root.addWidget(params_box)
 
         # ── Output + ROI + Run ─────────────────────────────────────────
-        run_box = QGroupBox("Output & Run")
+        run_box = QGroupBox("3. Region && Run")
         run_layout = QHBoxLayout(run_box)
 
         # ── Left column: all selection / status controls ────────────────
@@ -373,6 +450,12 @@ class AnalysisControlPanel(QWidget):
             "pixel_scale_override": pso if pso > 0 else None,
             "wavelet_levels": self._wavelet_levels.value(),
             "xs_snr_width": self._xs_snr_width.value(),
+            "nebula_sigma": self._nebula_sigma.value(),
+            "nebula_dilation_px": self._nebula_dilation_px.value(),
+            "nebula_max_hole_px": self._nebula_max_hole_px.value(),
+            "localmax_footprint_mult": self._localmax_footprint_mult.value(),
+            "localmax_prominence_percentile": self._localmax_prominence_pctl.value(),
+            "localmax_top_percent": self._localmax_top_percent.value(),
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "epsf_max_stars": self._epsf_max_stars.value(),
             "roi": self._roi,

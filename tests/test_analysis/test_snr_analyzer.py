@@ -15,59 +15,55 @@ _REQUIRED_KEYS = {
 }
 
 
+@pytest.fixture(scope="module")
+def snr_result(astro_image_a) -> dict:
+    """Cached default-params SNRAnalyzer result, shared by TestAnalyze and
+    TestGainGuard -- both exercise the same astro_image_a input."""
+    return SNRAnalyzer().analyze(astro_image_a)
+
+
 class TestAnalyze:
-    def test_returns_dict(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert isinstance(result, dict)
+    def test_returns_dict(self, snr_result):
+        assert isinstance(snr_result, dict)
 
-    def test_required_keys_present(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert _REQUIRED_KEYS.issubset(result.keys())
+    def test_required_keys_present(self, snr_result):
+        assert _REQUIRED_KEYS.issubset(snr_result.keys())
 
-    def test_snr_global_nonnegative(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert result["snr_global"] >= 0.0
+    def test_snr_global_nonnegative(self, snr_result):
+        assert snr_result["snr_global"] >= 0.0
 
-    def test_noise_median_positive(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert result["noise_median"] > 0.0
+    def test_noise_median_positive(self, snr_result):
+        assert snr_result["noise_median"] > 0.0
 
-    def test_background_median_positive(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        bg = result["background_median"]
+    def test_background_median_positive(self, snr_result):
+        bg = snr_result["background_median"]
         assert bg is None or bg > 0.0
 
-    def test_percentages_in_valid_range(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
+    def test_percentages_in_valid_range(self, snr_result):
         for key in ("pct_above_3", "pct_above_5", "pct_above_10", "pct_above_20"):
-            assert 0.0 <= result[key] <= 100.0
+            assert 0.0 <= snr_result[key] <= 100.0
 
-    def test_percentages_monotone_decreasing(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert result["pct_above_3"] >= result["pct_above_5"]
-        assert result["pct_above_5"] >= result["pct_above_10"]
-        assert result["pct_above_10"] >= result["pct_above_20"]
+    def test_percentages_monotone_decreasing(self, snr_result):
+        assert snr_result["pct_above_3"] >= snr_result["pct_above_5"]
+        assert snr_result["pct_above_5"] >= snr_result["pct_above_10"]
+        assert snr_result["pct_above_10"] >= snr_result["pct_above_20"]
 
-    def test_figures_key_present(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert "figures" in result
+    def test_figures_key_present(self, snr_result):
+        assert "figures" in snr_result
 
 
 class TestGainGuard:
     """FITS GAIN=0 must be rejected; EGAIN=1.0 takes priority."""
 
-    def test_egain_accepted_over_zero_gain(self, astro_image_a):
+    def test_egain_accepted_over_zero_gain(self, snr_result):
         # Test FITS has GAIN=0 and EGAIN=1.0; EGAIN wins
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert result["gain_e_per_adu"] == pytest.approx(1.0)
+        assert snr_result["gain_e_per_adu"] == pytest.approx(1.0)
 
-    def test_gain_zero_not_accepted(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert result["gain_e_per_adu"] != 0.0
+    def test_gain_zero_not_accepted(self, snr_result):
+        assert snr_result["gain_e_per_adu"] != 0.0
 
-    def test_sky_electrons_present_when_gain_known(self, astro_image_a):
-        result = SNRAnalyzer().analyze(astro_image_a)
-        assert result["sky_bg_electrons"] is not None
+    def test_sky_electrons_present_when_gain_known(self, snr_result):
+        assert snr_result["sky_bg_electrons"] is not None
 
     def test_sky_electrons_none_without_any_gain_keyword(self, tmp_path):
         data = np.ones((128, 128), dtype=np.float32) * 500

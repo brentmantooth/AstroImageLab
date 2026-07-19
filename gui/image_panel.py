@@ -116,6 +116,12 @@ class ZoomableImageLabel(QLabel):
         self._roi_norm = None
         self.update()
 
+    def clear_line_overlay(self) -> None:
+        self._line_n0 = None
+        self._line_n1 = None
+        self._line_state = "idle"
+        self.update()
+
     def set_roi_mode(self, enabled: bool) -> None:
         self._roi_mode = enabled
         self.setCursor(Qt.CursorShape.CrossCursor if (enabled or self._line_mode)
@@ -465,6 +471,9 @@ class ImagePanel(QWidget):
 
     def clear_roi_overlay(self) -> None:
         self._img_label.clear_roi_overlay()
+
+    def clear_line_overlay(self) -> None:
+        self._img_label.clear_line_overlay()
 
     def set_line_mode(self, enabled: bool) -> None:
         self._img_label.set_line_mode(enabled)

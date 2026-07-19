@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import math
 import warnings
 from pathlib import Path
 
 import numpy as np
-from astropy.modeling import fitting
-from astropy.modeling.models import Moffat2D
 import matplotlib
 import matplotlib.patches
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -19,7 +16,9 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QTextEdit, QWidget,
 )
 
+from analysis.moffat_fit import fit_moffat2d_core
 from core.astro_image import AstroImage
+from core.fig_utils import finalize_layout
 from core.stretch import normalize_for_display
 from gui.image_panel import ZoomableImageLabel
 
@@ -37,10 +36,6 @@ annulus (r ≥ 70% of sample radius) on the <i>background-subtracted</i> image �
 a residual, not the raw sky level. It will differ from sky values in the main report.
 SNR = peak (r &lt; 30%) ÷ σ(outer annulus).</p>
 """
-
-
-def _moffat_fwhm(gamma: float, alpha: float) -> float:
-    return 2.0 * gamma * math.sqrt(2.0 ** (1.0 / alpha) - 1.0)
 
 
 # Metrics table rows: (display label, result key A, result key B, number format)
@@ -526,25 +521,12 @@ class _AnalyzeThread(QThread):
                     max(0, cx_c - r_i):cx_c + r_i + 1]
         if inner.size > 0 and float(np.sum(inner >= 0.98 * amp)) / inner.size > 0.25:
             return {"saturated": True}
-        cy, cx = np.mgrid[0:cut.shape[0], 0:cut.shape[1]]
-        model  = Moffat2D(amplitude=amp,
-                          x_0=cut.shape[1] / 2.0, y_0=cut.shape[0] / 2.0,
-                          gamma=2.0, alpha=2.5)
-        fitter = fitting.LevMarLSQFitter()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            try:
-                fitted = fitter(model, cx, cy, cut)
-            except Exception:
-                return None
-        gamma = abs(fitted.gamma.value)
-        alpha = abs(fitted.alpha.value)
-        if not (0.1 <= alpha <= 50.0) or gamma < 0.05:
-            return None
-        fwhm = _moffat_fwhm(gamma, alpha)
-        if not (0.2 <= fwhm <= 100.0):
-            return None
-        return {"fwhm": fwhm, "alpha": alpha, "gamma": gamma}
+        return fit_moffat2d_core(
+            cut,
+            alpha_bounds=(0.1, 50.0),
+            gamma_min=0.05,
+            fwhm_bounds=(0.2, 100.0),
+        )
 
     def _shape_metrics(self, bgsub: np.ndarray, xc: float, yc: float) -> dict | None:
         """Eccentricity, ellipticity, orientation via photutils data_properties.
@@ -1042,7 +1024,7 @@ class HaloAnalyzerDialog(QDialog):
                     ax3_top.set_xlabel("Radius (arcsec)", fontsize=7, color=orig_color)
                     ax3_top.tick_params(labelsize=6, colors=orig_color)
 
-            self._fig.tight_layout(pad=1.0)
+            finalize_layout(self._fig, pad=1.0)
             self._canvas.draw_idle()
         finally:
             matplotlib.rcParams.update(_saved_params)

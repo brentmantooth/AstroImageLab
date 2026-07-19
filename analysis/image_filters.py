@@ -11,16 +11,22 @@ import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from scipy.ndimage import generic_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, minimum_filter, median_filter
+from scipy.ndimage import generic_filter, uniform_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, binary_dilation, binary_fill_holes, label
 import pywt
 
 from core.astro_image import AstroImage
-from core.fig_utils import fig_to_b64, figs_to_b64
+from core.fig_utils import fig_to_b64, figs_to_b64, finalize_layout
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
-                         WEBER_KERNEL_SIZES,
+                         ENTROPY_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
-                         XS_SNR_REGION_WIDTH, SECTION8_DIFF_DIST_MAX_SAMPLES,
-                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES)
+                         XS_SNR_REGION_WIDTH,
+                         SECTION8_LOGRATIO_EPS_PERCENTILE, SECTION8_SCATTER_MAX_SAMPLES,
+                         SECTION8_NEBULA_MASK_SIGMA, SECTION8_NEBULA_MASK_DILATION_PX,
+                         SECTION8_NEBULA_MASK_MAX_HOLE_PX,
+                         SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                         SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
+                         SECTION8_LOCALMAX_DIST_MAX_SAMPLES, SECTION8_LOCALMAX_TOP_PERCENT,
+                         SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -38,10 +44,18 @@ class SpatialDetailAnalyzer:
                 log_sigmas: tuple = LOG_SIGMAS,
                 wavelet: str = WAVELET_NAME,
                 levels: int = WAVELET_LEVELS,
-                weber_kernel_sizes: tuple = WEBER_KERNEL_SIZES,
+                entropy_kernel_sizes: tuple = ENTROPY_KERNEL_SIZES,
                 crosshair: dict | None = None,
                 roi: tuple | None = None,
-                xs_snr_width: int | None = None) -> dict:
+                xs_snr_width: int | None = None,
+                nebula_sigma: float = SECTION8_NEBULA_MASK_SIGMA,
+                nebula_dilation_px: int = SECTION8_NEBULA_MASK_DILATION_PX,
+                nebula_max_hole_px: int = SECTION8_NEBULA_MASK_MAX_HOLE_PX,
+                localmax_footprint_mult: float = SECTION8_LOCALMAX_FOOTPRINT_MULT,
+                localmax_prominence_percentile: float = SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                localmax_region_fraction: float = SECTION8_LOCALMAX_REGION_FRACTION,
+                localmax_presmooth_fraction: float = SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                localmax_top_percent: float = SECTION8_LOCALMAX_TOP_PERCENT) -> dict:
 
         image_a.estimate_background()
         if image_b is not None:
@@ -57,21 +71,34 @@ class SpatialDetailAnalyzer:
             "wavelet_snr_b": {},
             "sigma_noise_a": None,
             "sigma_noise_b": None,
-            "weber_contrast_a": {},
-            "weber_contrast_b": {},
+            "nebula_sigma": nebula_sigma,
+            "nebula_dilation_px": nebula_dilation_px,
+            "nebula_max_hole_px": nebula_max_hole_px,
+            "localmax_footprint_mult": localmax_footprint_mult,
+            "localmax_prominence_percentile": localmax_prominence_percentile,
+            "localmax_region_fraction": localmax_region_fraction,
+            "localmax_presmooth_fraction": localmax_presmooth_fraction,
+            "localmax_top_percent": localmax_top_percent,
+            "entropy_contrast_ratio_a": {},
+            "entropy_contrast_ratio_b": {},
             "panels": {},
-            "diff_dist": {},
+            "localmax": {},
             "nc_shared_nebula_pixels": 0,
             "std_nc_score_a": {}, "std_nc_score_b": {},
             "std_nc_noise_a": {}, "std_nc_noise_b": {}, "std_nc_ratio": {},
+            "std_nc_neb_std_a": {}, "std_nc_neb_std_b": {}, "std_nc_ratio_err": {},
             "log_nc_score_a": {}, "log_nc_score_b": {},
             "log_nc_noise_a": {}, "log_nc_noise_b": {}, "log_nc_ratio": {},
+            "log_nc_neb_std_a": {}, "log_nc_neb_std_b": {}, "log_nc_ratio_err": {},
             "wavelet_nc_score_a": {}, "wavelet_nc_score_b": {},
             "wavelet_nc_noise_a": {}, "wavelet_nc_noise_b": {}, "wavelet_nc_ratio": {},
-            "weber_nc_score_a": {}, "weber_nc_score_b": {},
-            "weber_nc_noise_a": {}, "weber_nc_noise_b": {}, "weber_nc_ratio": {},
+            "wavelet_nc_neb_std_a": {}, "wavelet_nc_neb_std_b": {}, "wavelet_nc_ratio_err": {},
+            "entropy_nc_score_a": {}, "entropy_nc_score_b": {},
+            "entropy_nc_noise_a": {}, "entropy_nc_noise_b": {}, "entropy_nc_ratio": {},
+            "entropy_nc_neb_std_a": {}, "entropy_nc_neb_std_b": {}, "entropy_nc_ratio_err": {},
             "gm_nc_score_a": {}, "gm_nc_score_b": {},
             "gm_nc_noise_a": {}, "gm_nc_noise_b": {}, "gm_nc_ratio": {},
+            "gm_nc_neb_std_a": {}, "gm_nc_neb_std_b": {}, "gm_nc_ratio_err": {},
         }
         figures: dict = {}
 
@@ -80,10 +107,10 @@ class SpatialDetailAnalyzer:
             return result
 
         # Nebula / background masks (used for contrast ratio)
-        mask_neb_a, mask_bg_a = self._make_masks(image_a)
+        mask_neb_a, mask_bg_a = self._make_masks(image_a, nebula_sigma, nebula_dilation_px, nebula_max_hole_px)
         mask_neb_b = mask_bg_b = None
         if image_b is not None:
-            mask_neb_b, mask_bg_b = self._make_masks(image_b)
+            mask_neb_b, mask_bg_b = self._make_masks(image_b, nebula_sigma, nebula_dilation_px, nebula_max_hole_px)
 
         # When a user ROI is provided, crop the analysis arrays to that region after
         # normalisation so the global signal mean is used, not the ROI's local mean.
@@ -124,23 +151,30 @@ class SpatialDetailAnalyzer:
         result["display_roi"] = display_roi
 
         # Shared nebula/background regions for noise-corrected A/B scoring and diff
-        # distributions: pixels BOTH images independently classify the same way.
+        # distributions. Nebula is the two-image UNION: a pixel counts as Nebula if
+        # either image independently classifies it that way, so nebula signal that's
+        # marginal in one image (registration offset, PSF, local noise) still counts.
+        # Background stays the two-image INTERSECTION: a pixel counts as Background
+        # only if both images agree, keeping the noise-floor reference population
+        # clean. Per-image nebula-dominance in _make_masks (bg_mask excludes
+        # nebula_mask) guarantees these two combinations never overlap.
         # None in single-image mode.
         mask_neb_shared = mask_bg_shared = None
         if mask_neb_b is not None:
             h_s = min(mask_neb_a.shape[0], mask_neb_b.shape[0])
             w_s = min(mask_neb_a.shape[1], mask_neb_b.shape[1])
-            mask_neb_shared = mask_neb_a[:h_s, :w_s] & mask_neb_b[:h_s, :w_s]
+            mask_neb_shared = mask_neb_a[:h_s, :w_s] | mask_neb_b[:h_s, :w_s]
             mask_bg_shared = mask_bg_a[:h_s, :w_s] & mask_bg_b[:h_s, :w_s]
         result["nc_shared_nebula_pixels"] = (
             int(np.count_nonzero(mask_neb_shared)) if mask_neb_shared is not None else 0
         )
 
-        # Fixed seed so the diff-distribution subsampling below is reproducible
-        # across report generations for the same input images.
-        diff_dist_rng = np.random.default_rng(42)
+        # Fixed seed so the correlation-scatter and local-maxima-distribution
+        # subsampling below is reproducible across report generations for the
+        # same input images.
+        rng = np.random.default_rng(42)
 
-        # Export the exact preprocessed array every std/LoG/wavelet/Weber/gradient
+        # Export the exact preprocessed array every std/LoG/wavelet/entropy/gradient
         # map is computed from (mean-normalised, ROI-cropped if a ROI was given) as
         # its own panel, so the Report Inspector can show the source image content
         # for a map alongside the map itself, pixel-aligned to the same crop.
@@ -150,12 +184,7 @@ class SpatialDetailAnalyzer:
             "b":    analysis_b.astype(np.float32) if analysis_b is not None else None,
             "diff": original_diff,
         }
-        if original_diff is not None:
-            result["diff_dist"]["original"] = self._diff_distribution(
-                original_diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
-
-        # Mask illustration: only meaningful in two-image mode, mirroring the
-        # violin plots' own empty-in-single-image-mode behaviour.
+        # Mask illustration: only meaningful in two-image mode.
         if mask_neb_shared is not None:
             mask_fig = self._plot_mask_illustration(
                 result["panels"]["original"]["a"], mask_neb_shared, mask_bg_shared)
@@ -163,7 +192,47 @@ class SpatialDetailAnalyzer:
 
         _label_b = image_b.label if image_b is not None else None
 
-        # 1-5. Local std, LoG, wavelet, Weber, gradient — all read norm_a/norm_b with no
+        # Original image family: the raw source data itself, analysed with the same
+        # map-pair layout (A|B, log-ratio, cross-section, histogram, correlation) as
+        # every derived metric below — not a filter, just the input they all share.
+        xs_raw_orig = None
+        xs_line_orig = None
+        if crosshair_roi is not None and analysis_b is not None:
+            pos, pa = self._sample_line(analysis_a, **crosshair_roi)
+            _, pb = self._sample_line(analysis_b, **crosshair_roi)
+            xs_raw_orig = (pos, pa, pb, image_a.label, _label_b,
+                           "Cross-section — Original (normalised image)")
+            xs_line_orig = self._crosshair_to_cropped_px(
+                crosshair_roi, analysis_a.shape, SECTION8_BORDER_CROP_FRACTION)
+
+        if analysis_b is not None:
+            orig_fig = self._plot_side_by_side(
+                self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
+                self._crop_border(analysis_b, SECTION8_BORDER_CROP_FRACTION),
+                f"Original (normalised) — {image_a.label}",
+                f"Original (normalised) — {_label_b}",
+                diff_title="Log ratio (A/B), original image",
+                cmap=SECTION8_ANALYSIS_CMAP,
+                display_roi=None,
+                xs_data=xs_raw_orig,
+                xs_line=xs_line_orig,
+            )
+        else:
+            orig_fig = self._plot_single(
+                self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
+                f"Original (normalised) — {image_a.label}",
+                cmap=SECTION8_ANALYSIS_CMAP,
+            )
+        figures["original"] = fig_to_b64(orig_fig, dpi=150)
+
+        if mask_neb_shared is not None:
+            orig_corr_fig = self._plot_metric_correlation(
+                analysis_a, analysis_b, original_diff, mask_neb_shared, mask_bg_shared,
+                image_a.label, _label_b, "Original (normalised image)", rng)
+            if orig_corr_fig is not None:
+                figures["corr_original"] = fig_to_b64(orig_corr_fig, dpi=150)
+
+        # 1-5. Local std, LoG, wavelet, entropy, gradient — all read norm_a/norm_b with no
         # shared mutable state, so they run concurrently. Each method returns
         # (b64_figs, partial_result).
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as _ex:
@@ -176,7 +245,12 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared,
-                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
+                mask_bg_shared=mask_bg_shared, rng=rng,
+                localmax_footprint_mult=localmax_footprint_mult,
+                localmax_prominence_percentile=localmax_prominence_percentile,
+                localmax_region_fraction=localmax_region_fraction,
+                localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_log = _ex.submit(self._log_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -184,7 +258,12 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
-                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
+                mask_bg_shared=mask_bg_shared, rng=rng,
+                localmax_footprint_mult=localmax_footprint_mult,
+                localmax_prominence_percentile=localmax_prominence_percentile,
+                localmax_region_fraction=localmax_region_fraction,
+                localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_wav = _ex.submit(self._wavelet_analysis,
                 analysis_a, analysis_b, wavelet, levels,
@@ -192,16 +271,28 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
-                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
+                mask_bg_shared=mask_bg_shared, rng=rng,
+                localmax_footprint_mult=localmax_footprint_mult,
+                localmax_prominence_percentile=localmax_prominence_percentile,
+                localmax_region_fraction=localmax_region_fraction,
+                localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
-            _f_web = _ex.submit(self._weber_analysis,
+            _f_ent = _ex.submit(self._entropy_analysis,
                 analysis_a, analysis_b,
-                weber_kernel_sizes,
+                mask_neb_a, mask_bg_a,
+                mask_neb_b, mask_bg_b,
+                entropy_kernel_sizes,
                 image_a.label, _label_b,
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
-                mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
-                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
+                mask_neb_shared=mask_neb_shared,
+                mask_bg_shared=mask_bg_shared, rng=rng,
+                localmax_footprint_mult=localmax_footprint_mult,
+                localmax_prominence_percentile=localmax_prominence_percentile,
+                localmax_region_fraction=localmax_region_fraction,
+                localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             _f_grad = _ex.submit(self._gradient_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -209,18 +300,23 @@ class SpatialDetailAnalyzer:
                 display_roi=display_roi,
                 crosshair=crosshair_roi,
                 mask_neb_shared=mask_neb_shared, mask_bg_a=mask_bg_a, mask_bg_b=mask_bg_b,
-                mask_bg_shared=mask_bg_shared, diff_dist_rng=diff_dist_rng,
+                mask_bg_shared=mask_bg_shared, rng=rng,
+                localmax_footprint_mult=localmax_footprint_mult,
+                localmax_prominence_percentile=localmax_prominence_percentile,
+                localmax_region_fraction=localmax_region_fraction,
+                localmax_presmooth_fraction=localmax_presmooth_fraction,
+                localmax_top_percent=localmax_top_percent,
             )
             std_b64, std_partial = _f_std.result()
             log_b64, log_partial = _f_log.result()
             wav_b64, wav_partial = _f_wav.result()
-            web_b64, web_partial = _f_web.result()
+            ent_b64, ent_partial = _f_ent.result()
             grad_b64, grad_partial = _f_grad.result()
 
         figures.update(std_b64)
         figures.update(log_b64)
         figures.update(wav_b64)
-        figures.update(web_b64)
+        figures.update(ent_b64)
         figures.update(grad_b64)
         result["contrast_ratios_a"].update(std_partial["contrast_ratios_a"])
         result["contrast_ratios_b"].update(std_partial["contrast_ratios_b"])
@@ -228,38 +324,104 @@ class SpatialDetailAnalyzer:
         result["sigma_noise_b"] = wav_partial["sigma_noise_b"]
         result["wavelet_snr_a"].update(wav_partial["wavelet_snr_a"])
         result["wavelet_snr_b"].update(wav_partial["wavelet_snr_b"])
-        result["weber_contrast_a"].update(web_partial["weber_contrast_a"])
-        result["weber_contrast_b"].update(web_partial["weber_contrast_b"])
+        result["entropy_contrast_ratio_a"].update(ent_partial["entropy_contrast_ratio_a"])
+        result["entropy_contrast_ratio_b"].update(ent_partial["entropy_contrast_ratio_b"])
         result["panels"].update(std_partial["panels"])
         result["panels"].update(log_partial["panels"])
         result["panels"].update(wav_partial["panels"])
-        result["panels"].update(web_partial["panels"])
+        result["panels"].update(ent_partial["panels"])
         result["panels"].update(grad_partial["panels"])
-        result["diff_dist"].update(std_partial["diff_dist"])
-        result["diff_dist"].update(log_partial["diff_dist"])
-        result["diff_dist"].update(wav_partial["diff_dist"])
-        result["diff_dist"].update(web_partial["diff_dist"])
-        result["diff_dist"].update(grad_partial["diff_dist"])
+        result["localmax"].update(std_partial["localmax"])
+        result["localmax"].update(log_partial["localmax"])
+        result["localmax"].update(wav_partial["localmax"])
+        result["localmax"].update(ent_partial["localmax"])
+        result["localmax"].update(grad_partial["localmax"])
 
         # Merge noise-corrected scores/noise-floors and compute A/B ratios centrally.
         for prefix, partial in (("std", std_partial), ("log", log_partial),
-                                 ("wavelet", wav_partial), ("weber", web_partial),
+                                 ("wavelet", wav_partial), ("entropy", ent_partial),
                                  ("gm", grad_partial)):
-            for suffix in ("nc_score_a", "nc_score_b", "nc_noise_a", "nc_noise_b"):
+            for suffix in ("nc_score_a", "nc_score_b", "nc_noise_a", "nc_noise_b",
+                            "nc_neb_std_a", "nc_neb_std_b"):
                 result[f"{prefix}_{suffix}"].update(partial[f"{prefix}_{suffix}"])
             result[f"{prefix}_nc_ratio"] = self._compute_nc_ratios(
                 result[f"{prefix}_nc_score_a"], result[f"{prefix}_nc_score_b"])
+            result[f"{prefix}_nc_ratio_err"] = self._compute_nc_ratio_errors(
+                result[f"{prefix}_nc_ratio"], result[f"{prefix}_nc_score_a"], result[f"{prefix}_nc_score_b"],
+                result[f"{prefix}_nc_noise_a"], result[f"{prefix}_nc_noise_b"],
+                result[f"{prefix}_nc_neb_std_a"], result[f"{prefix}_nc_neb_std_b"])
 
         if image_b is not None:
+            nc_errors_by_method = {
+                "std": result["std_nc_ratio_err"], "log": result["log_nc_ratio_err"],
+                "wavelet": result["wavelet_nc_ratio_err"], "entropy": result["entropy_nc_ratio_err"],
+                "gradient": result["gm_nc_ratio_err"],
+            }
             nc_fig = self._plot_nc_ratio_overview({
                 "std": result["std_nc_ratio"],
                 "log": result["log_nc_ratio"],
                 "wavelet": result["wavelet_nc_ratio"],
-                "weber": result["weber_nc_ratio"],
+                "entropy": result["entropy_nc_ratio"],
                 "gradient": result["gm_nc_ratio"],
-            })
+            }, nc_errors_by_method)
             if nc_fig is not None:
                 figures["nc_ratio_overview"] = fig_to_b64(nc_fig, dpi=150)
+
+            localmax_log_ratios_by_method = {
+                "std": std_partial["localmax_log_ratio"],
+                "log": log_partial["localmax_log_ratio"],
+                "wavelet": wav_partial["localmax_log_ratio"],
+                "entropy": ent_partial["localmax_log_ratio"],
+                "gradient": grad_partial["localmax_log_ratio"],
+            }
+            localmax_log_ratio_errors_by_method = {
+                "std": std_partial["localmax_log_ratio_err"],
+                "log": log_partial["localmax_log_ratio_err"],
+                "wavelet": wav_partial["localmax_log_ratio_err"],
+                "entropy": ent_partial["localmax_log_ratio_err"],
+                "gradient": grad_partial["localmax_log_ratio_err"],
+            }
+            lm_ratio_fig = self._plot_localmax_ratio_overview(
+                localmax_log_ratios_by_method, localmax_log_ratio_errors_by_method)
+            if lm_ratio_fig is not None:
+                figures["localmax_ratio_overview"] = fig_to_b64(lm_ratio_fig, dpi=150)
+
+            # Local-maxima mask grid: one row per metric family, columns = kernel/scale
+            # sizes smallest -> largest. Every panel's mask is computed with the same
+            # _combined_localmax_mask formula _localmax_entry uses for that row's own
+            # table statistics -- this reuses panels already cached in
+            # result["panels"], no new map computation. Wavelet has only 2 display
+            # scales, so its 3rd column is left blank.
+            _grid_families = [
+                ("Local σ",        [(f"std_{ks}px",    float(ks),      f"Local σ — {ks} px")       for ks in kernel_sizes]),
+                ("|LoG|",          [(f"log_{s}",        float(s),       f"|LoG| — σ={s} px")        for s in log_sigmas]),
+                ("Gradient |G|",   [(f"gradient_{s}",   float(s),       f"Gradient |G| — σ={s} px") for s in log_sigmas]),
+                ("Wavelet",        [(f"wavelet_{lvl}",  float(2 ** lvl), f"Wavelet — level {lvl}")   for lvl in (2, 3)]),
+                ("Local entropy",  [(f"entropy_{ks}px", float(ks),      f"Entropy — {ks} px")       for ks in entropy_kernel_sizes]),
+            ]
+            grid_rows = []
+            for family_label, entries in _grid_families:
+                cells = []
+                for key, scale_px, panel_title in entries:
+                    panel = result["panels"].get(key)
+                    if panel is None or panel["a"] is None or panel["b"] is None:
+                        continue
+                    h_g = min(panel["a"].shape[0], panel["b"].shape[0])
+                    w_g = min(panel["a"].shape[1], panel["b"].shape[1])
+                    abs_a = np.abs(panel["a"][:h_g, :w_g])
+                    abs_b = np.abs(panel["b"][:h_g, :w_g])
+                    footprint_px = max(3, int(round(localmax_footprint_mult * scale_px)) | 1)
+                    region_px = max(1, int(round(localmax_region_fraction * footprint_px)))
+                    presmooth_sigma = max(0.5, localmax_presmooth_fraction * scale_px)
+                    mask = self._combined_localmax_mask(abs_a, abs_b, footprint_px,
+                                                          localmax_prominence_percentile,
+                                                          region_px, presmooth_sigma,
+                                                          localmax_top_percent)
+                    cells.append((abs_a, mask, panel_title))
+                grid_rows.append((family_label, cells))
+            grid_fig = self._plot_localmax_mask_grid(grid_rows)
+            if grid_fig is not None:
+                figures["localmax_mask_illustration"] = fig_to_b64(grid_fig, dpi=150)
 
         if crosshair is not None:
             pos_a, prof_a = self._sample_line(norm_a, **crosshair)
@@ -313,7 +475,10 @@ class SpatialDetailAnalyzer:
             return None
         return bgsub / mean_signal
 
-    def _make_masks(self, image: AstroImage) -> tuple[np.ndarray, np.ndarray]:
+    def _make_masks(self, image: AstroImage,
+                     nebula_sigma: float = SECTION8_NEBULA_MASK_SIGMA,
+                     dilation_px: int = SECTION8_NEBULA_MASK_DILATION_PX,
+                     max_hole_px: int = SECTION8_NEBULA_MASK_MAX_HOLE_PX) -> tuple[np.ndarray, np.ndarray]:
         rms = image.background_rms
         if rms is None:
             rms_val = float(np.std(image.background_subtracted()))
@@ -321,7 +486,7 @@ class SpatialDetailAnalyzer:
             rms_val = float(np.median(rms))
 
         bgsub = image.background_subtracted()
-        nebula_mask = bgsub > 2.0 * rms_val
+        nebula_mask = bgsub > nebula_sigma * rms_val
         bg_mask = bgsub < 0.5 * rms_val
 
         # Fallback: use top-5% as nebula if no pixels pass threshold
@@ -329,7 +494,205 @@ class SpatialDetailAnalyzer:
             threshold = np.percentile(bgsub, 95)
             nebula_mask = bgsub >= threshold
 
+        # Fill small enclosed background gaps, strip small isolated noise-driven
+        # specks (same size threshold — a scattered 1-2px false positive at this
+        # sigma level would otherwise balloon into a ~(2*dilation_px+1)^2 blob per
+        # speck once dilated, polluting blank-sky area far from any real nebula),
+        # then grow into adjacent dim/dark transition regions at nebula edges.
+        # All three are applied before the bg_mask exclusion below, since any of
+        # them can pull previously bg-classified pixels into the nebula mask.
+        nebula_mask = self._fill_small_holes(nebula_mask, max_hole_px)
+        nebula_mask = self._remove_small_objects(nebula_mask, max_hole_px)
+        if dilation_px > 0:
+            nebula_mask = binary_dilation(nebula_mask, iterations=dilation_px)
+
+        # Nebula dominates: keep the two masks mutually exclusive after growth.
+        bg_mask = bg_mask & ~nebula_mask
+
         return nebula_mask, bg_mask
+
+    def _fill_small_holes(self, mask: np.ndarray, max_hole_px: int) -> np.ndarray:
+        """Fill enclosed background gaps inside mask up to (max_hole_px)**2 area."""
+        if max_hole_px <= 0:
+            return mask
+        filled = binary_fill_holes(mask)
+        holes = filled & ~mask
+        labeled, n_holes = label(holes)
+        if n_holes == 0:
+            return mask
+        sizes = np.bincount(labeled.ravel())
+        max_area = max_hole_px * max_hole_px
+        keep = np.zeros(sizes.size, dtype=bool)
+        keep[1:] = sizes[1:] <= max_area   # label 0 is background, not a hole
+        return mask | keep[labeled]
+
+    def _remove_small_objects(self, mask: np.ndarray, max_size_px: int) -> np.ndarray:
+        """Strip isolated foreground specks up to (max_size_px)**2 area.
+
+        Scattered single/few-pixel noise excursions above the nebula sigma
+        threshold are common at a loose (~1.7 sigma) cut. Left in place, dilation
+        would inflate each one into a much larger blob far from any real nebula
+        structure, so small islands are dropped before growth is applied.
+        """
+        if max_size_px <= 0:
+            return mask
+        labeled, n_objects = label(mask)
+        if n_objects == 0:
+            return mask
+        sizes = np.bincount(labeled.ravel())
+        max_area = max_size_px * max_size_px
+        keep = np.zeros(sizes.size, dtype=bool)
+        keep[1:] = sizes[1:] > max_area   # label 0 is background; drop small islands
+        return keep[labeled]
+
+    @staticmethod
+    def _local_maxima_mask(data: np.ndarray, footprint_px: int,
+                            prominence_percentile: float,
+                            region_px: int,
+                            presmooth_sigma: float = 0.0) -> np.ndarray:
+        """Binary mask marking the local region of pixels around each detected
+        peak in `data` — not just the single maximal pixel.
+
+        Detection runs on a lightly Gaussian-smoothed copy of `data`
+        (presmooth_sigma) to suppress single-pixel noise-driven false maxima;
+        the mask itself is built from that smoothed detection pass, but
+        callers should measure statistics from the raw (unsmoothed) data
+        within the returned mask, not from the smoothed copy. A pixel is a
+        peak if it equals the max of its own footprint_px neighbourhood
+        (scipy.ndimage.maximum_filter) AND exceeds the
+        prominence_percentile-th percentile of the smoothed data — the
+        percentile floor is relative to the data's own distribution (mirrors
+        the SECTION8_LOGRATIO_EPS_PERCENTILE precedent in _log_ratio_map), so
+        peak "height" auto-scales per metric instead of needing an absolute
+        cutoff. Each surviving peak pixel is then grown by region_px
+        (binary_dilation) to cover the local neighbourhood around it — sized
+        proportionally to footprint_px by the caller — rather than a single
+        pixel.
+        """
+        if data.size == 0:
+            return np.zeros_like(data, dtype=bool)
+        smoothed = gaussian_filter(data, sigma=presmooth_sigma) if presmooth_sigma > 0 else data
+        footprint = max(3, int(footprint_px) | 1)
+        local_max = smoothed == maximum_filter(smoothed, size=footprint)
+        threshold = np.percentile(smoothed, prominence_percentile)
+        mask = local_max & (smoothed > threshold)
+        if region_px > 0 and np.any(mask):
+            mask = binary_dilation(mask, iterations=region_px)
+        return mask
+
+    @staticmethod
+    def _top_percent_mask(abs_a: np.ndarray, abs_b: np.ndarray, top_percent: float) -> np.ndarray:
+        """Boolean mask of pixels in the top `top_percent`% of Image A's OR Image B's
+        own value distribution -- catches broad bright regions that local-maxima peak
+        detection alone would miss (e.g. an extended plateau, not a sharp point peak)."""
+        thresh_a = np.percentile(abs_a, 100.0 - top_percent)
+        thresh_b = np.percentile(abs_b, 100.0 - top_percent)
+        return (abs_a >= thresh_a) | (abs_b >= thresh_b)
+
+    def _combined_localmax_mask(self, abs_a: np.ndarray, abs_b: np.ndarray,
+                                 footprint_px: int, prominence_percentile: float,
+                                 region_px: int, presmooth_sigma: float,
+                                 top_percent: float) -> np.ndarray:
+        """Local-maxima peak mask (_local_maxima_mask) unioned with a top-percent
+        brightness mask (_top_percent_mask). Used identically by _localmax_entry
+        (Section 8j table/figure stats) and the mask-grid figure builder in analyze(),
+        so every displayed panel matches the mask actually backing that row's numbers."""
+        peak_source = np.maximum(abs_a, abs_b)
+        mask = self._local_maxima_mask(peak_source, footprint_px, prominence_percentile,
+                                        region_px, presmooth_sigma)
+        mask |= self._top_percent_mask(abs_a, abs_b, top_percent)
+        return mask
+
+    @staticmethod
+    def _localmax_stats(abs_a: np.ndarray, abs_b: np.ndarray,
+                         diff: np.ndarray, mask: np.ndarray,
+                         rng: np.random.Generator) -> dict:
+        """Masked summary stats for one metric/scale's local-maxima mask.
+
+        abs_a/abs_b must already be magnitude (|.|) arrays so wavelet's signed
+        reconstructions don't cancel when averaged (a no-op for the other four
+        families, which are already >= 0). ratio = 10**mean(diff[mask]) — the
+        geometric mean of the per-pixel A/B ratio at the masked pixels,
+        expressed as a plain ×-factor; diff is the already-computed
+        log10(|A|/|B|) map every family builds via _log_ratio_map, not
+        recomputed here. std_a/std_b are the sample standard deviation of the
+        masked magnitudes. p_value/cliffs_delta are a Mann-Whitney U test
+        (two-sided) + Cliff's delta comparing the full masked-pixel
+        populations of A vs B (core.stats_utils.mannwhitney_effect) — delta
+        > 0 means A tends higher. log_ratio_mean/log_ratio_std are the mean/standard
+        deviation of the per-pixel log10(|A|/|B|) population at the masked pixels
+        (masked_diff itself, a genuinely pixel-paired quantity) — log_ratio_mean is
+        the same quantity `ratio` is exponentiated from (ratio = 10**log_ratio_mean),
+        kept unexponentiated for the Section 8j table/overview plot, which present
+        this column directly in log10 space rather than converting back to a linear
+        ×-factor. vals_a/vals_b/vals_log_ratio are each a
+        SECTION8_LOCALMAX_DIST_MAX_SAMPLES-capped random subsample of the
+        corresponding masked population, retained only for the Section 8j
+        distribution figures; every other returned value is computed from the
+        FULL population. Returns None values / n_px=0 when the mask selects
+        no pixels.
+        """
+        from core.stats_utils import mannwhitney_effect
+        h = min(abs_a.shape[0], abs_b.shape[0], diff.shape[0], mask.shape[0])
+        w = min(abs_a.shape[1], abs_b.shape[1], diff.shape[1], mask.shape[1])
+        m = mask[:h, :w]
+        n_px = int(np.count_nonzero(m))
+        if n_px == 0:
+            return {"mean_a": None, "mean_b": None, "std_a": None, "std_b": None,
+                    "ratio": None, "log_ratio_mean": None, "log_ratio_std": None,
+                    "p_value": None, "cliffs_delta": None,
+                    "n_px": 0, "pct_area": 0.0,
+                    "vals_a": np.empty(0, dtype=np.float32), "vals_b": np.empty(0, dtype=np.float32),
+                    "vals_log_ratio": np.empty(0, dtype=np.float32)}
+        vals_a = abs_a[:h, :w][m]
+        vals_b = abs_b[:h, :w][m]
+        mean_a, std_a = float(np.mean(vals_a)), float(np.std(vals_a))
+        mean_b, std_b = float(np.mean(vals_b)), float(np.std(vals_b))
+        masked_diff = diff[:h, :w][m]
+        log_ratio_mean = float(np.mean(masked_diff))
+        log_ratio_std = float(np.std(masked_diff))
+        ratio = float(10.0 ** log_ratio_mean)
+        p_value, delta = mannwhitney_effect(vals_a, vals_b)
+        sub_a, sub_b, sub_log_ratio = vals_a, vals_b, masked_diff
+        if vals_a.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
+            sub_a = vals_a[rng.choice(vals_a.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
+        if vals_b.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
+            sub_b = vals_b[rng.choice(vals_b.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
+        if masked_diff.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
+            sub_log_ratio = masked_diff[rng.choice(masked_diff.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
+        return {"mean_a": mean_a, "mean_b": mean_b, "std_a": std_a, "std_b": std_b,
+                "ratio": ratio, "log_ratio_mean": log_ratio_mean, "log_ratio_std": log_ratio_std,
+                "p_value": p_value, "cliffs_delta": delta,
+                "n_px": n_px, "pct_area": 100.0 * n_px / m.size,
+                "vals_a": sub_a.astype(np.float32), "vals_b": sub_b.astype(np.float32),
+                "vals_log_ratio": sub_log_ratio.astype(np.float32)}
+
+    def _localmax_entry(self, map_a: np.ndarray, map_b: np.ndarray,
+                         diff: np.ndarray, scale_px: float,
+                         footprint_mult: float, prominence_percentile: float,
+                         region_fraction: float, presmooth_fraction: float,
+                         top_percent: float,
+                         rng: np.random.Generator) -> dict:
+        """One partial['localmax'][key] entry. Builds the local-maxima mask via
+        _combined_localmax_mask (peaks over np.maximum(|A|, |B|) — a peak strong in
+        either image counts, mirroring the existing Nebula-mask union rationale —
+        unioned with the top-percent brightness mask) then returns its masked stats
+        measured from the raw (unsmoothed) magnitude maps. footprint_px, region_px
+        (the neighbourhood grown around each peak), and presmooth_sigma
+        (detection-only smoothing) all scale with this call's own scale_px, so both
+        "how local" and "how tall" a peak must be, plus how much denoising happens
+        before detection, auto-adapt per metric/scale instead of using one fixed
+        setting everywhere.
+        """
+        h = min(map_a.shape[0], map_b.shape[0])
+        w = min(map_a.shape[1], map_b.shape[1])
+        abs_a, abs_b = np.abs(map_a[:h, :w]), np.abs(map_b[:h, :w])
+        footprint_px = max(3, int(round(footprint_mult * scale_px)) | 1)
+        region_px = max(1, int(round(region_fraction * footprint_px)))
+        presmooth_sigma = max(0.5, presmooth_fraction * scale_px)
+        mask = self._combined_localmax_mask(abs_a, abs_b, footprint_px, prominence_percentile,
+                                             region_px, presmooth_sigma, top_percent)
+        return self._localmax_stats(abs_a, abs_b, diff, mask, rng)
 
     def _nebula_bounding_box(self, mask: np.ndarray,
                               shape: tuple) -> tuple[int, int, int, int] | None:
@@ -369,14 +732,22 @@ class SpatialDetailAnalyzer:
                        display_roi=None,
                        crosshair=None,
                        mask_neb_shared=None,
-                       mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
+                       mask_bg_shared=None, rng=None,
+                       localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
+                       localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                       localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
+                       localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "contrast_ratios_a": {}, "contrast_ratios_b": {},
             "std_nc_score_a": {}, "std_nc_score_b": {},
             "std_nc_noise_a": {}, "std_nc_noise_b": {},
+            "std_nc_neb_std_a": {}, "std_nc_neb_std_b": {},
             "panels": {},
-            "diff_dist": {},
+            "localmax": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
@@ -392,12 +763,14 @@ class SpatialDetailAnalyzer:
 
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a = self._nc_score(std_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(std_a, mask_neb_shared, mask_bg_a)
                 partial["std_nc_score_a"][ks] = nc_a
                 partial["std_nc_noise_a"][ks] = noise_a
-                nc_b, noise_b = self._nc_score(std_b, mask_neb_shared, mask_bg_b)
+                partial["std_nc_neb_std_a"][ks] = neb_std_a
+                nc_b, noise_b, neb_std_b = self._nc_score(std_b, mask_neb_shared, mask_bg_b)
                 partial["std_nc_score_b"][ks] = nc_b
                 partial["std_nc_noise_b"][ks] = noise_b
+                partial["std_nc_neb_std_b"][ks] = neb_std_b
 
             diff = self._log_ratio_map(std_a, std_b) if not single else None
             partial["panels"][f"std_{ks}px"] = {
@@ -406,12 +779,18 @@ class SpatialDetailAnalyzer:
                 "diff": diff,
             }
             if diff is not None:
-                partial["diff_dist"][f"std_{ks}px"] = self._diff_distribution(
-                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+                lm_entry = self._localmax_entry(
+                    std_a, std_b, diff, ks,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"std_{ks}px"] = lm_entry
+                partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     std_a, std_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Local σ (kernel {ks}px)", diff_dist_rng)
+                    label_a, label_b, f"Local σ (kernel {ks}px)", rng)
                 if corr_fig is not None:
                     figures[f"corr_std_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
@@ -422,11 +801,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(std_a, **crosshair)
                 _, pb = self._sample_line(std_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Local σ, kernel {ks}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, std_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -439,6 +820,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -465,6 +847,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
@@ -503,28 +886,33 @@ class SpatialDetailAnalyzer:
 
     def _nc_score(self, detail_map: np.ndarray,
                   mask_neb_shared: np.ndarray | None,
-                  mask_bg: np.ndarray) -> tuple[float | None, float | None]:
+                  mask_bg: np.ndarray) -> tuple[float | None, float | None, float | None]:
         """Noise-corrected local-contrast score for one detail map at one scale.
 
-        score = median(|detail|) over the pixels BOTH images classify as nebula
+        score = median(|detail|) over the pixels either image classifies as nebula
         (mask_neb_shared), divided by median(|detail|) over THIS image's own
         background mask — its empirical per-scale noise floor for this operator.
-        Returns (score, noise_floor); either is None if a mask selects zero pixels,
-        mask_neb_shared is unavailable (single-image mode), or noise_floor <= 0.
+        Returns (score, noise_floor, neb_std); all None if a mask selects zero
+        pixels, mask_neb_shared is unavailable (single-image mode), or
+        noise_floor <= 0. neb_std is the sample standard deviation of the same
+        nebula-region |detail| population the median score is computed from —
+        used to propagate an approximate uncertainty onto the 8i cross-method
+        overview's ratio-of-scores error bars (see _compute_nc_ratio_errors).
         """
         if mask_neb_shared is None:
-            return None, None
+            return None, None, None
         h = min(detail_map.shape[0], mask_neb_shared.shape[0], mask_bg.shape[0])
         w = min(detail_map.shape[1], mask_neb_shared.shape[1], mask_bg.shape[1])
         absmap = np.abs(detail_map[:h, :w])
         neb_vals = absmap[mask_neb_shared[:h, :w]]
         bg_vals = absmap[mask_bg[:h, :w]]
         if neb_vals.size == 0 or bg_vals.size == 0:
-            return None, None
+            return None, None, None
         noise_floor = float(bn.median(bg_vals))
         if noise_floor <= 0:
-            return None, None
-        return float(bn.median(neb_vals)) / noise_floor, noise_floor
+            return None, None, None
+        neb_std = float(np.std(neb_vals))
+        return float(bn.median(neb_vals)) / noise_floor, noise_floor, neb_std
 
     @staticmethod
     def _log_ratio_map(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -535,7 +923,7 @@ class SpatialDetailAnalyzer:
         background-subtracted flux, wavelet band-pass reconstructions) — this
         turns the comparison into "which image shows more structure/contrast at
         this scale", not "which image is signed-brighter". Non-negative families
-        (std, |LoG|, gradient magnitude, Weber contrast) are unaffected by the
+        (std, |LoG|, gradient magnitude, local entropy) are unaffected by the
         abs() since they're already >= 0.
 
         Epsilon-floors both operands using a low percentile (not a raw minimum —
@@ -568,34 +956,6 @@ class SpatialDetailAnalyzer:
         return -d_max, d_max
 
     @staticmethod
-    def _diff_distribution(diff_map: np.ndarray,
-                            mask_neb_shared: np.ndarray | None,
-                            mask_bg_shared: np.ndarray | None,
-                            rng: np.random.Generator) -> dict:
-        """Random-subsampled log10(|A|/|B|) ratio pixel populations for nebula vs
-        background.
-
-        Returns {"nebula": ndarray, "background": ndarray} (float32, signed
-        log-ratio values — 0 means A=B — up to SECTION8_DIFF_DIST_MAX_SAMPLES
-        each). Either array is empty if the corresponding mask is unavailable
-        (single-image mode) or selects zero pixels.
-        """
-        out = {"nebula": np.empty(0, dtype=np.float32),
-               "background": np.empty(0, dtype=np.float32)}
-        if mask_neb_shared is None or mask_bg_shared is None:
-            return out
-        h = min(diff_map.shape[0], mask_neb_shared.shape[0], mask_bg_shared.shape[0])
-        w = min(diff_map.shape[1], mask_neb_shared.shape[1], mask_bg_shared.shape[1])
-        cropped = diff_map[:h, :w]
-        for key, mask in (("nebula", mask_neb_shared), ("background", mask_bg_shared)):
-            vals = cropped[mask[:h, :w]]
-            if vals.size > SECTION8_DIFF_DIST_MAX_SAMPLES:
-                idx = rng.choice(vals.size, SECTION8_DIFF_DIST_MAX_SAMPLES, replace=False)
-                vals = vals[idx]
-            out[key] = vals.astype(np.float32)
-        return out
-
-    @staticmethod
     def _compute_nc_ratios(score_a: dict, score_b: dict) -> dict:
         """Per-scale A/B ratio of noise-corrected scores; {} if either side is empty
         (single-image mode)."""
@@ -607,6 +967,35 @@ class SpatialDetailAnalyzer:
             out[scale] = None if (va is None or vb is None or vb == 0) else va / vb
         return out
 
+    @staticmethod
+    def _compute_nc_ratio_errors(ratio: dict, score_a: dict, score_b: dict,
+                                  noise_a: dict, noise_b: dict,
+                                  neb_std_a: dict, neb_std_b: dict) -> dict:
+        """Approximate symmetric uncertainty on each scale's nc_ratio, propagated
+        from the coefficient of variation (std/median) of each image's own
+        nebula-region pixel population -- a standard relative-uncertainty
+        propagation for a ratio of two independent quantities. This is NOT a
+        formal confidence interval on the median; it is an approximate indicator
+        of spread, captioned as such in the report (see 8i methodology).
+        median_neb is recovered as score * noise_floor (score = median_neb /
+        noise_floor by construction in _nc_score) rather than recomputed.
+        """
+        out = {}
+        for scale, r in ratio.items():
+            sa, sb = score_a.get(scale), score_b.get(scale)
+            na, nb = noise_a.get(scale), noise_b.get(scale)
+            sda, sdb = neb_std_a.get(scale), neb_std_b.get(scale)
+            if None in (r, sa, sb, na, nb, sda, sdb):
+                out[scale] = None
+                continue
+            median_neb_a, median_neb_b = sa * na, sb * nb
+            if median_neb_a == 0 or median_neb_b == 0:
+                out[scale] = None
+                continue
+            cv_a, cv_b = sda / median_neb_a, sdb / median_neb_b
+            out[scale] = abs(r) * (cv_a ** 2 + cv_b ** 2) ** 0.5
+        return out
+
     # ------------------------------------------------------------------
     # Laplacian of Gaussian maps
     # ------------------------------------------------------------------
@@ -616,13 +1005,21 @@ class SpatialDetailAnalyzer:
                        display_roi=None,
                        crosshair=None,
                        mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
-                       mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
+                       mask_bg_shared=None, rng=None,
+                       localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
+                       localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                       localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
+                       localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "log_nc_score_a": {}, "log_nc_score_b": {},
             "log_nc_noise_a": {}, "log_nc_noise_b": {},
+            "log_nc_neb_std_a": {}, "log_nc_neb_std_b": {},
             "panels": {},
-            "diff_dist": {},
+            "localmax": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for sigma in sigmas:
@@ -631,12 +1028,14 @@ class SpatialDetailAnalyzer:
 
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a = self._nc_score(log_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(log_a, mask_neb_shared, mask_bg_a)
                 partial["log_nc_score_a"][sigma] = nc_a
                 partial["log_nc_noise_a"][sigma] = noise_a
-                nc_b, noise_b = self._nc_score(log_b, mask_neb_shared, mask_bg_b)
+                partial["log_nc_neb_std_a"][sigma] = neb_std_a
+                nc_b, noise_b, neb_std_b = self._nc_score(log_b, mask_neb_shared, mask_bg_b)
                 partial["log_nc_score_b"][sigma] = nc_b
                 partial["log_nc_noise_b"][sigma] = noise_b
+                partial["log_nc_neb_std_b"][sigma] = neb_std_b
 
             diff = self._log_ratio_map(log_a, log_b) if log_b is not None else None
             partial["panels"][f"log_{sigma}"] = {
@@ -645,12 +1044,18 @@ class SpatialDetailAnalyzer:
                 "diff": diff,
             }
             if diff is not None:
-                partial["diff_dist"][f"log_{sigma}"] = self._diff_distribution(
-                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+                lm_entry = self._localmax_entry(
+                    log_a, log_b, diff, sigma,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"log_{sigma}"] = lm_entry
+                partial["localmax_log_ratio"][sigma] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     log_a, log_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"|LoG| (σ={sigma}px)", diff_dist_rng)
+                    label_a, label_b, f"|LoG| (σ={sigma}px)", rng)
                 if corr_fig is not None:
                     figures[f"corr_log_{sigma}"] = corr_fig
             if not single and noise_a and noise_b:
@@ -661,11 +1066,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(log_a, **crosshair)
                 _, pb = self._sample_line(log_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — |LoG|, σ={sigma}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, log_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -678,6 +1085,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -704,6 +1112,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
         return figs_to_b64(figures, dpi=150), partial
 
@@ -716,7 +1125,12 @@ class SpatialDetailAnalyzer:
                             display_roi=None,
                             crosshair=None,
                             mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
-                            mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
+                            mask_bg_shared=None, rng=None,
+                            localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
+                            localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                            localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
+                            localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                            localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         """G = |gradient| at Gaussian scale sigma (first spatial derivative magnitude).
         Reuses the LOG_SIGMAS scale set so gradient and |LoG| are directly comparable
         at identical spatial scales. Structured identically to _log_analysis."""
@@ -724,8 +1138,11 @@ class SpatialDetailAnalyzer:
         partial: dict = {
             "gm_nc_score_a": {}, "gm_nc_score_b": {},
             "gm_nc_noise_a": {}, "gm_nc_noise_b": {},
+            "gm_nc_neb_std_a": {}, "gm_nc_neb_std_b": {},
             "panels": {},
-            "diff_dist": {},
+            "localmax": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for sigma in sigmas:
@@ -734,12 +1151,14 @@ class SpatialDetailAnalyzer:
 
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a = self._nc_score(gm_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(gm_a, mask_neb_shared, mask_bg_a)
                 partial["gm_nc_score_a"][sigma] = nc_a
                 partial["gm_nc_noise_a"][sigma] = noise_a
-                nc_b, noise_b = self._nc_score(gm_b, mask_neb_shared, mask_bg_b)
+                partial["gm_nc_neb_std_a"][sigma] = neb_std_a
+                nc_b, noise_b, neb_std_b = self._nc_score(gm_b, mask_neb_shared, mask_bg_b)
                 partial["gm_nc_score_b"][sigma] = nc_b
                 partial["gm_nc_noise_b"][sigma] = noise_b
+                partial["gm_nc_neb_std_b"][sigma] = neb_std_b
 
             diff = self._log_ratio_map(gm_a, gm_b) if gm_b is not None else None
             partial["panels"][f"gradient_{sigma}"] = {
@@ -748,12 +1167,18 @@ class SpatialDetailAnalyzer:
                 "diff": diff,
             }
             if diff is not None:
-                partial["diff_dist"][f"gradient_{sigma}"] = self._diff_distribution(
-                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+                lm_entry = self._localmax_entry(
+                    gm_a, gm_b, diff, sigma,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"gradient_{sigma}"] = lm_entry
+                partial["localmax_log_ratio"][sigma] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
                     gm_a, gm_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Gradient |G| (σ={sigma}px)", diff_dist_rng)
+                    label_a, label_b, f"Gradient |G| (σ={sigma}px)", rng)
                 if corr_fig is not None:
                     figures[f"corr_gradient_{sigma}"] = corr_fig
             if not single and noise_a and noise_b:
@@ -764,11 +1189,13 @@ class SpatialDetailAnalyzer:
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(gm_a, **crosshair)
                 _, pb = self._sample_line(gm_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Gradient, σ={sigma}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, gm_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -781,6 +1208,7 @@ class SpatialDetailAnalyzer:
                     nonlinear_norm=True,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -807,6 +1235,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
         return figs_to_b64(figures, dpi=150), partial
 
@@ -819,15 +1248,23 @@ class SpatialDetailAnalyzer:
                            display_roi=None,
                            crosshair=None,
                            mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
-                           mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
+                           mask_bg_shared=None, rng=None,
+                           localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
+                           localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                           localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
+                           localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                           localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "sigma_noise_a": None, "sigma_noise_b": None,
             "wavelet_snr_a": {}, "wavelet_snr_b": {},
             "wavelet_nc_score_a": {}, "wavelet_nc_score_b": {},
             "wavelet_nc_noise_a": {}, "wavelet_nc_noise_b": {},
+            "wavelet_nc_neb_std_a": {}, "wavelet_nc_neb_std_b": {},
             "panels": {},
-            "diff_dist": {},
+            "localmax": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
 
@@ -862,12 +1299,14 @@ class SpatialDetailAnalyzer:
 
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a = self._nc_score(rec_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(rec_a, mask_neb_shared, mask_bg_a)
                 partial["wavelet_nc_score_a"][human_level] = nc_a
                 partial["wavelet_nc_noise_a"][human_level] = noise_a
-                nc_b, noise_b = self._nc_score(rec_b, mask_neb_shared, mask_bg_b)
+                partial["wavelet_nc_neb_std_a"][human_level] = neb_std_a
+                nc_b, noise_b, neb_std_b = self._nc_score(rec_b, mask_neb_shared, mask_bg_b)
                 partial["wavelet_nc_score_b"][human_level] = nc_b
                 partial["wavelet_nc_noise_b"][human_level] = noise_b
+                partial["wavelet_nc_neb_std_b"][human_level] = neb_std_b
 
             if human_level not in (2, 3):
                 continue   # display/panels only for levels 2-3, unchanged from prior behaviour
@@ -880,15 +1319,21 @@ class SpatialDetailAnalyzer:
                 "diff": diff,
             }
             if diff is not None:
-                partial["diff_dist"][f"wavelet_{display_level}"] = self._diff_distribution(
-                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+                lm_entry = self._localmax_entry(
+                    rec_a, rec_b, diff, 2 ** display_level,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"wavelet_{display_level}"] = lm_entry
+                partial["localmax_log_ratio"][display_level] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][display_level] = lm_entry["log_ratio_std"]
             if not single:
                 # Raw signed reconstructions (not abs()) — complementary to the
                 # sign-discarding log-ratio map, shows whether band-pass detail
                 # flips sign between the two filters at a given pixel.
                 corr_fig = self._plot_metric_correlation(
                     rec_a, rec_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Wavelet level {display_level}", diff_dist_rng)
+                    label_a, label_b, f"Wavelet level {display_level}", rng)
                 if corr_fig is not None:
                     figures[f"corr_wavelet_{display_level}"] = corr_fig
             if not single and noise_a and noise_b:
@@ -898,11 +1343,13 @@ class SpatialDetailAnalyzer:
                     "diff": None,
                 }
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
                 pos, pa = self._sample_line(rec_a, **crosshair)
                 _, pb = self._sample_line(rec_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Wavelet level {display_level}")
+                xs_line = self._crosshair_to_cropped_px(crosshair, rec_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
@@ -914,6 +1361,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
@@ -939,6 +1387,7 @@ class SpatialDetailAnalyzer:
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
@@ -976,119 +1425,157 @@ class SpatialDetailAnalyzer:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Weber fraction contrast maps
+    # Local entropy maps
     # ------------------------------------------------------------------
 
-    def _weber_analysis(self, norm_a, norm_b, kernel_sizes,
-                        label_a, label_b,
+    def _entropy_analysis(self, norm_a, norm_b,
+                        mask_neb_a, mask_bg_a,
+                        mask_neb_b, mask_bg_b,
+                        kernel_sizes, label_a, label_b,
                         display_roi=None,
                         crosshair=None,
-                        mask_neb_shared=None, mask_bg_a=None, mask_bg_b=None,
-                        mask_bg_shared=None, diff_dist_rng=None) -> tuple[dict, dict]:
+                        mask_neb_shared=None,
+                        mask_bg_shared=None, rng=None,
+                        localmax_footprint_mult=SECTION8_LOCALMAX_FOOTPRINT_MULT,
+                        localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
+                        localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
+                        localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
+                        localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
-            "weber_contrast_a": {},
-            "weber_contrast_b": {},
-            "weber_nc_score_a": {}, "weber_nc_score_b": {},
-            "weber_nc_noise_a": {}, "weber_nc_noise_b": {},
+            "entropy_contrast_ratio_a": {}, "entropy_contrast_ratio_b": {},
+            "entropy_nc_score_a": {}, "entropy_nc_score_b": {},
+            "entropy_nc_noise_a": {}, "entropy_nc_noise_b": {},
+            "entropy_nc_neb_std_a": {}, "entropy_nc_neb_std_b": {},
             "panels": {},
-            "diff_dist": {},
+            "localmax": {},
+            "localmax_log_ratio": {},
+            "localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for ks in kernel_sizes:
-            wc_a = self._compute_weber_map(norm_a, ks)
-            wc_b = self._compute_weber_map(norm_b, ks) if not single else None
+            ent_a = self._compute_entropy_map(norm_a, ks)
+            ent_b = self._compute_entropy_map(norm_b, ks) if not single else None
 
-            # 99th percentile avoids dark-sky floor driving the scalar metric to extremes
-            partial["weber_contrast_a"][ks] = float(np.percentile(wc_a, 99))
+            # Contrast ratios (computed on unsmoothed maps)
+            cr_a = self._contrast_ratio(ent_a, mask_neb_a, mask_bg_a)
+            partial["entropy_contrast_ratio_a"][ks] = cr_a
             if not single:
-                partial["weber_contrast_b"][ks] = float(np.percentile(wc_b, 99))
+                cr_b = self._contrast_ratio(ent_b, mask_neb_b, mask_bg_b)
+                partial["entropy_contrast_ratio_b"][ks] = cr_b
 
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a = self._nc_score(wc_a, mask_neb_shared, mask_bg_a)
-                partial["weber_nc_score_a"][ks] = nc_a
-                partial["weber_nc_noise_a"][ks] = noise_a
-                nc_b, noise_b = self._nc_score(wc_b, mask_neb_shared, mask_bg_b)
-                partial["weber_nc_score_b"][ks] = nc_b
-                partial["weber_nc_noise_b"][ks] = noise_b
+                nc_a, noise_a, neb_std_a = self._nc_score(ent_a, mask_neb_shared, mask_bg_a)
+                partial["entropy_nc_score_a"][ks] = nc_a
+                partial["entropy_nc_noise_a"][ks] = noise_a
+                partial["entropy_nc_neb_std_a"][ks] = neb_std_a
+                nc_b, noise_b, neb_std_b = self._nc_score(ent_b, mask_neb_shared, mask_bg_b)
+                partial["entropy_nc_score_b"][ks] = nc_b
+                partial["entropy_nc_noise_b"][ks] = noise_b
+                partial["entropy_nc_neb_std_b"][ks] = neb_std_b
 
-            diff = self._log_ratio_map(wc_a, wc_b) if wc_b is not None else None
-            partial["panels"][f"weber_{ks}px"] = {
-                "a":    wc_a.astype(np.float32),
-                "b":    wc_b.astype(np.float32) if wc_b is not None else None,
+            diff = self._log_ratio_map(ent_a, ent_b) if not single else None
+            partial["panels"][f"entropy_{ks}px"] = {
+                "a":    ent_a.astype(np.float32),
+                "b":    ent_b.astype(np.float32) if ent_b is not None else None,
                 "diff": diff,
             }
             if diff is not None:
-                partial["diff_dist"][f"weber_{ks}px"] = self._diff_distribution(
-                    diff, mask_neb_shared, mask_bg_shared, diff_dist_rng)
+                lm_entry = self._localmax_entry(
+                    ent_a, ent_b, diff, ks,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"entropy_{ks}px"] = lm_entry
+                partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
+                partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single:
                 corr_fig = self._plot_metric_correlation(
-                    wc_a, wc_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Weber contrast (kernel {ks}px)", diff_dist_rng)
+                    ent_a, ent_b, diff, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Local entropy (kernel {ks}px)", rng)
                 if corr_fig is not None:
-                    figures[f"corr_weber_{ks}px"] = corr_fig
+                    figures[f"corr_entropy_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
-                partial["panels"][f"nrm_weber_{ks}px"] = {
-                    "a": (wc_a / noise_a).astype(np.float32),
-                    "b": (wc_b / noise_b).astype(np.float32),
+                partial["panels"][f"nrm_entropy_{ks}px"] = {
+                    "a": (ent_a / noise_a).astype(np.float32),
+                    "b": (ent_b / noise_b).astype(np.float32),
                     "diff": None,
                 }
 
             xs_raw = None
+            xs_line = None
             if crosshair is not None and not single:
-                pos, pa = self._sample_line(wc_a, **crosshair)
-                _, pb = self._sample_line(wc_b, **crosshair)
+                pos, pa = self._sample_line(ent_a, **crosshair)
+                _, pb = self._sample_line(ent_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
-                          f"Cross-section — Weber contrast, kernel {ks}px")
+                          f"Cross-section — Local entropy, kernel {ks}px")
+                xs_line = self._crosshair_to_cropped_px(crosshair, ent_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
             if not single:
                 fig = self._plot_side_by_side(
-                    self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(wc_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Weber contrast — kernel {ks}px — {label_a}",
-                    f"Weber contrast — kernel {ks}px — {label_b}",
-                    diff_title=f"Weber log-ratio (A/B), kernel {ks}px",
+                    self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(ent_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local entropy — kernel {ks}px — {label_a}",
+                    f"Local entropy — kernel {ks}px — {label_b}",
+                    diff_title=f"Log ratio (A/B), kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,    # unbounded output; PowerNorm compresses dynamic range
+                    nonlinear_norm=True,
                     display_roi=None,       # _crop_border already applied
                     xs_data=xs_raw,
+                    xs_line=xs_line,
                 )
             else:
                 fig = self._plot_single(
-                    self._crop_border(wc_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Weber contrast — kernel {ks}px — {label_a}",
+                    self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local entropy — kernel {ks}px — {label_a}",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     nonlinear_norm=True,
                 )
-            figures[f"weber_{ks}px"] = fig
+            figures[f"entropy_{ks}px"] = fig
 
             if not single and noise_a and noise_b:
                 xs_nrm = None
                 if crosshair is not None:
-                    pos_n, pa_n = self._sample_line(wc_a / noise_a, **crosshair)
-                    _, pb_n = self._sample_line(wc_b / noise_b, **crosshair)
+                    pos_n, pa_n = self._sample_line(ent_a / noise_a, **crosshair)
+                    _, pb_n = self._sample_line(ent_b / noise_b, **crosshair)
                     xs_nrm = (pos_n, pa_n, pb_n, label_a, label_b,
-                              f"Cross-section — Weber contrast (× noise floor), kernel {ks}px")
-                figures[f"nrm_weber_{ks}px"] = self._plot_side_by_side(
-                    self._crop_border(wc_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(wc_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Weber (× noise floor) — kernel {ks}px — {label_a}",
-                    f"Weber (× noise floor) — kernel {ks}px — {label_b}",
+                              f"Cross-section — Local entropy (× noise floor), kernel {ks}px")
+                figures[f"nrm_entropy_{ks}px"] = self._plot_side_by_side(
+                    self._crop_border(ent_a / noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(ent_b / noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local entropy (× noise floor) — kernel {ks}px — {label_a}",
+                    f"Local entropy (× noise floor) — kernel {ks}px — {label_b}",
                     diff_title=f"Log ratio (A/B), noise-normalised, kernel {ks}px",
                     cmap=SECTION8_ANALYSIS_CMAP,
                     display_roi=None,
                     xs_data=xs_nrm,
+                    xs_line=xs_line,
                 )
 
         return figs_to_b64(figures, dpi=150), partial
 
-    def _compute_weber_map(self, norm: np.ndarray, kernel_size: int) -> np.ndarray:
-        """Weber fraction contrast c = ΔL / L where ΔL = max−min and L = median of kernel.
-        L uses median (not mean) — robust background luminance unaffected by bright filaments.
-        Output is unbounded >= 0; nonlinear_norm=True is used for display.
+    def _compute_entropy_map(self, norm: np.ndarray, kernel_size: int,
+                              n_bins: int = SECTION8_ENTROPY_N_BINS) -> np.ndarray:
+        """Local Shannon entropy (bits, log2) of the gray-level histogram within a
+        square window. norm is deliberately quantized into n_bins integer levels
+        from a percentile-clipped range *before* filtering -- computing entropy
+        directly on continuous float32 data returns ~log2(window_area) almost
+        everywhere (every pixel value in a window is unique), measuring float
+        precision rather than genuine tonal diversity. The clip/bin range is
+        computed independently per image (matches the existing per-image
+        convention used by every other Section 8 map).
+
+        Vectorized via n_bins uniform_filter passes (one per gray level) rather
+        than a per-pixel generic_filter callback: uniform_filter(mask_b) is a
+        box filter of a 0/1 mask, which *is* exactly the local proportion p_b
+        of bin b within each window -- summing -p_b*log2(p_b) across bins then
+        gives the entropy map with no per-pixel Python-level histogram ever
+        built. A per-pixel generic_filter callback (the initial approach here,
+        mirroring _compute_std_map) measured ~10-50x slower than Weber's fully
+        vectorized maximum/minimum/median_filter maps at the same array size;
+        this reuses that same vectorization principle for entropy.
         """
-        _EPS = 1e-6   # L (median) can be very small over dark sky; larger EPS prevents extremes
         factor = 1.0
         data = norm
         if max(norm.shape) > MAX_DIM_FOR_STD:
@@ -1098,20 +1585,24 @@ class SpatialDetailAnalyzer:
             data = zoom(norm, (new_h / norm.shape[0], new_w / norm.shape[1]), order=1)
             kernel_size = max(3, int(kernel_size * factor) | 1)
 
-        i_max = maximum_filter(data, size=kernel_size)
-        i_min = minimum_filter(data, size=kernel_size)
-        i_med = median_filter(data, size=kernel_size)
-
-        delta_L = i_max - i_min                  # always >= 0
-        L = np.maximum(i_med, 0.0)              # bg-subtracted images can have negative medians
-        weber = delta_L / (L + _EPS)
+        lo, hi = np.percentile(data, [SECTION8_ENTROPY_CLIP_PERCENTILE,
+                                       100 - SECTION8_ENTROPY_CLIP_PERCENTILE])
+        if hi <= lo:
+            entropy_map = np.zeros_like(data, dtype=np.float64)
+        else:
+            binned = np.clip(((data - lo) / (hi - lo) * n_bins), 0, n_bins - 1).astype(np.intp)
+            entropy_map = np.zeros(data.shape, dtype=np.float64)
+            for b in range(n_bins):
+                p_b = uniform_filter((binned == b).astype(np.float64), size=kernel_size, mode="reflect")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    entropy_map -= np.where(p_b > 0, p_b * np.log2(p_b), 0.0)
 
         if factor < 1.0:
-            weber = zoom(weber,
-                         (norm.shape[0] / weber.shape[0],
-                          norm.shape[1] / weber.shape[1]),
-                         order=1)
-        return np.maximum(weber, 0.0)
+            entropy_map = zoom(entropy_map,
+                                (norm.shape[0] / entropy_map.shape[0],
+                                 norm.shape[1] / entropy_map.shape[1]),
+                                order=1)
+        return entropy_map.astype(np.float32)
 
     def _plot_side_by_side(self, arr_a: np.ndarray, arr_b: np.ndarray,
                             title_a: str, title_b: str,
@@ -1120,9 +1611,13 @@ class SpatialDetailAnalyzer:
                             nonlinear_norm: bool = False,
                             display_roi=None,
                             smooth_display: bool = True,
-                            xs_data: tuple | None = None) -> plt.Figure:
+                            xs_data: tuple | None = None,
+                            xs_line: tuple | None = None) -> plt.Figure:
         """xs_data, if given, is (pos, prof_a, prof_b, label_a, label_b, xs_title)
-        for the embedded cross-section panel; None leaves that panel blank."""
+        for the embedded cross-section panel; None leaves that panel blank.
+        xs_line, if given, is (x0, y0, x1, y1) pixel coords (in arr_a/arr_b's own
+        frame, post any cropping already applied by the caller) of the user's
+        cross-section line, overlaid directly on the Image A/B panels above."""
         # Crop to bright-feature ROI if available
         if display_roi is not None:
             r0, r1, c0, c1 = display_roi
@@ -1181,6 +1676,15 @@ class SpatialDetailAnalyzer:
                            vmin=None if norm is not None else vmin,
                            vmax=None if norm is not None else vmax,
                            interpolation="nearest", aspect="equal")
+            if xs_line is not None:
+                # Lock the view before plotting — otherwise matplotlib autoscales to
+                # include line endpoints outside the (already-cropped) array, adding
+                # unwanted blank padding around the image.
+                ax.set_xlim(-0.5, arr.shape[1] - 0.5)
+                ax.set_ylim(arr.shape[0] - 0.5, -0.5)   # origin="upper"
+                lx0, ly0, lx1, ly1 = xs_line
+                ax.plot([lx0, lx1], [ly0, ly1], color="#ff7f0e",
+                        linewidth=1.5, alpha=XS_LINE_ALPHA, zorder=5)
             ax.set_title(title, fontsize=10)
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -1256,7 +1760,8 @@ class SpatialDetailAnalyzer:
         "Background": "tomato"}) so the two figures read as one visual language.
         Unclassified pixels (neither mask) are left plain grayscale. mask_neb/
         mask_bg are expected to already be the two-image shared classification
-        (mask_neb_a & mask_neb_b) — the exact masks that feed the violin plots
+        (mask_neb_a | mask_neb_b for Nebula, mask_bg_a & mask_bg_b for Background)
+        — the exact masks that feed the violin plots
         and correlation scatter plots — so this figure depicts what those plots
         are actually gated on.
         """
@@ -1286,7 +1791,48 @@ class SpatialDetailAnalyzer:
             Patch(facecolor="0.5", edgecolor="none", label="Unclassified"),
         ]
         ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.8)
-        fig.tight_layout()
+        finalize_layout(fig)
+        return fig
+
+    def _plot_localmax_mask_grid(self, grid_rows: list,
+                                  color: str = "magenta", alpha: float = 0.55) -> plt.Figure | None:
+        """Grid figure: one row per metric family, columns = kernel/scale sizes
+        smallest to largest. Each panel shows that exact scale's local-maxima
+        mask (same computation _localmax_entry uses for the Section 8j table)
+        overlaid on that metric's own |A| magnitude map. Families with fewer
+        scales than the widest row (Wavelet: 2 vs. 3) leave trailing panels
+        blank. grid_rows: list of (family_label, [(base_img, mask, panel_title), ...]).
+        Returns None if no row has any panel (e.g. single-image mode never calls this).
+        """
+        n_rows = len(grid_rows)
+        n_cols = max((len(cells) for _, cells in grid_rows), default=0)
+        if n_cols == 0 or not any(cells for _, cells in grid_rows):
+            return None
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.6 * n_cols, 3.6 * n_rows))
+        axes = np.atleast_2d(axes)
+        col_rgb = np.array(mcolors.to_rgb(color))
+        for r, (family_label, cells) in enumerate(grid_rows):
+            for c in range(n_cols):
+                ax = axes[r, c]
+                if c >= len(cells):
+                    ax.axis("off")
+                    continue
+                base, mask, panel_title = cells[c]
+                gray = self._stretch_for_display(base)
+                h = min(gray.shape[0], mask.shape[0])
+                w = min(gray.shape[1], mask.shape[1])
+                gray, m = gray[:h, :w], mask[:h, :w]
+                rgb = np.stack([gray, gray, gray], axis=-1)
+                rgb[m] = (1 - alpha) * rgb[m] + alpha * col_rgb
+                ax.imshow(rgb, origin="upper", interpolation="nearest", aspect="equal")
+                ax.axis("off")
+                ax.set_title(panel_title, fontsize=8)
+            axes[r, 0].text(-0.08, 0.5, family_label, transform=axes[r, 0].transAxes,
+                             fontsize=9, fontweight="bold", ha="right", va="center", rotation=90)
+        legend_handle = Patch(facecolor=color, edgecolor="none", alpha=0.8, label="Local maxima (dilated) ∪ top-N% bright")
+        fig.legend(handles=[legend_handle], loc="lower center", fontsize=9, bbox_to_anchor=(0.5, -0.01))
+        fig.suptitle("Local-maxima masks by metric (rows) and scale, smallest → largest (columns)", fontsize=11)
+        finalize_layout(fig, rect=[0.03, 0.02, 1, 0.96])
         return fig
 
     def _plot_snr_bars(self, snr_a: dict, snr_b: dict,
@@ -1311,32 +1857,47 @@ class SpatialDetailAnalyzer:
         ax.set_xticklabels([f"Level {i}" for i in x])
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
-    def _plot_nc_ratio_overview(self, ratios_by_method: dict) -> plt.Figure | None:
-        """One line per method: noise-corrected A/B ratio vs. approximate spatial
-        scale (px, log-x). None if no method has any usable (non-None) value."""
-        _SCALE_LABEL = {
-            "std": "px", "weber": "px", "log": "σ px",
-            "gradient": "σ px", "wavelet": "level (≈px)",
-        }
-        _COLORS = {
-            "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
-            "weber": "seagreen", "gradient": "goldenrod",
-        }
+    @staticmethod
+    def _ratio_series_with_errors(ratios_by_method: dict, errors_by_method: dict | None = None) -> dict:
+        """{method: {scale: value}} (+ optional matching {method: {scale: error}}) ->
+        {method: [(x_px, value, error_or_None), ...]} sorted by x. Wavelet scale
+        keys are human levels, converted to approximate px via 2**level. Shared
+        by _plot_nc_ratio_overview (8i) and _plot_localmax_ratio_overview (8j)."""
         series = {}
         for method, ratios in ratios_by_method.items():
             if not ratios:
                 continue
-            if method == "wavelet":
-                pts = [(2 ** scale, v) for scale, v in ratios.items() if v is not None]
-            else:
-                pts = [(float(scale), v) for scale, v in ratios.items() if v is not None]
+            errs = (errors_by_method or {}).get(method, {})
+            pts = []
+            for scale, v in ratios.items():
+                if v is None:
+                    continue
+                x = 2 ** scale if method == "wavelet" else float(scale)
+                pts.append((x, v, errs.get(scale)))
             if pts:
                 pts.sort(key=lambda p: p[0])
                 series[method] = pts
+        return series
 
+    def _plot_nc_ratio_overview(self, ratios_by_method: dict,
+                                 errors_by_method: dict | None = None) -> plt.Figure | None:
+        """One line per method: noise-corrected A/B ratio vs. approximate spatial
+        scale (px, log-x). None if no method has any usable (non-None) value.
+        errors_by_method (optional): matching {method: {scale: error}} — an
+        approximate symmetric uncertainty (see _compute_nc_ratio_errors),
+        rendered as error bars when present for a given point."""
+        _SCALE_LABEL = {
+            "std": "px", "entropy": "px", "log": "σ px",
+            "gradient": "σ px", "wavelet": "level (≈px)",
+        }
+        _COLORS = {
+            "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
+            "entropy": "seagreen", "gradient": "goldenrod",
+        }
+        series = self._ratio_series_with_errors(ratios_by_method, errors_by_method)
         if not series:
             return None
 
@@ -1344,8 +1905,14 @@ class SpatialDetailAnalyzer:
         for method, pts in series.items():
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
-            ax.plot(xs, ys, marker="o", label=f"{method} ({_SCALE_LABEL.get(method, 'px')})",
-                    color=_COLORS.get(method))
+            es = [p[2] for p in pts]
+            label = f"{method} ({_SCALE_LABEL.get(method, 'px')})"
+            if any(e is not None for e in es):
+                yerr = [e if e is not None else 0.0 for e in es]
+                ax.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, linestyle="-",
+                            label=label, color=_COLORS.get(method))
+            else:
+                ax.plot(xs, ys, marker="o", label=label, color=_COLORS.get(method))
         ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8,
                    label="Ratio = 1 (A = B)")
         ax.set_xscale("log")
@@ -1354,7 +1921,55 @@ class SpatialDetailAnalyzer:
         ax.set_title("Noise-corrected local contrast — cross-method overview")
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
+        finalize_layout(fig)
+        return fig
+
+    def _plot_localmax_ratio_overview(self, log_ratios_by_method: dict,
+                                       errors_by_method: dict | None = None) -> plt.Figure | None:
+        """One line per method: local-maxima masked log10(A/B) geometric-mean vs.
+        approximate spatial scale (px, log-x). Structurally identical to
+        _plot_nc_ratio_overview (Section 8i); y-axis is the local-maxima-masked
+        log-ratio (Section 8j) instead of the whole-nebula noise-corrected score
+        ratio. None if no method has any usable (non-None) value.
+        errors_by_method (optional): matching {method: {scale: error}} — ±1
+        standard deviation of the per-pixel log10(A/B) population within each
+        scale's mask, plotted directly with no unit conversion (both the value
+        and its error already live in log10 space, so this is an exact spread
+        measure, not an approximation), rendered as error bars when present for
+        a given point."""
+        _SCALE_LABEL = {
+            "std": "px", "entropy": "px", "log": "σ px",
+            "gradient": "σ px", "wavelet": "level (≈px)",
+        }
+        _COLORS = {
+            "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
+            "entropy": "seagreen", "gradient": "goldenrod",
+        }
+        series = self._ratio_series_with_errors(log_ratios_by_method, errors_by_method)
+        if not series:
+            return None
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        for method, pts in series.items():
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            es = [p[2] for p in pts]
+            label = f"{method} ({_SCALE_LABEL.get(method, 'px')})"
+            if any(e is not None for e in es):
+                yerr = [e if e is not None else 0.0 for e in es]
+                ax.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, linestyle="-",
+                            label=label, color=_COLORS.get(method))
+            else:
+                ax.plot(xs, ys, marker="o", label=label, color=_COLORS.get(method))
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=0.8,
+                   label="log ratio = 0 (A = B)")
+        ax.set_xscale("log")
+        ax.set_xlabel("Approximate spatial scale (px)")
+        ax.set_ylabel("Local-maxima masked log₁₀(A / B) (geometric mean ± SD)")
+        ax.set_title("Local-maxima masked contrast — cross-method overview (log ratio)")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        finalize_layout(fig)
         return fig
 
     @staticmethod
@@ -1473,7 +2088,7 @@ class SpatialDetailAnalyzer:
         if not any_data:
             plt.close(fig)
             return None
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig
 
     @staticmethod
@@ -1482,6 +2097,21 @@ class SpatialDetailAnalyzer:
         if arr.shape[0] > 2 * n and arr.shape[1] > 2 * n:
             return arr[n:-n, n:-n]
         return arr
+
+    @staticmethod
+    def _crosshair_to_cropped_px(crosshair: dict | None, shape: tuple,
+                                  crop_fraction: float) -> tuple[float, float, float, float] | None:
+        """Convert a normalised [0,1] crosshair dict (in the coordinate frame of an
+        array with `shape`) to pixel coords in the frame _crop_border(arr, crop_fraction)
+        produces for that array — mirrors _crop_border's own offset math exactly, so the
+        overlay lines up pixel-for-pixel with the already-cropped display arrays."""
+        if crosshair is None:
+            return None
+        H, W = shape[:2]
+        n = max(1, int(min(H, W) * crop_fraction))
+        off_y, off_x = (n, n) if (H > 2 * n and W > 2 * n) else (0, 0)
+        return (crosshair["x0"] * W - off_x, crosshair["y0"] * H - off_y,
+                crosshair["x1"] * W - off_x, crosshair["y1"] * H - off_y)
 
     @staticmethod
     def _stretch_for_display(arr: np.ndarray) -> np.ndarray:

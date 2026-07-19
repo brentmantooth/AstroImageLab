@@ -10,8 +10,8 @@ try:
 except ImportError:
     bn = np
 
-from core.astro_image import AstroImage
-from core.fig_utils import fig_to_b64
+from core.astro_image import AstroImage, _resolve_gain
+from core.fig_utils import fig_to_b64, finalize_layout
 
 
 class SNRAnalyzer:
@@ -87,25 +87,9 @@ class SNRAnalyzer:
                              if image.background is not None else None)
 
         # --- Camera gain from FITS header --------------------------------
-        # Try common keyword variants used by capture software (NINA, SGP, etc.).
-        # EGAIN is preferred: it is the FITS standard for the actual e⁻/ADU conversion
-        # factor. GAIN is ambiguous — many cameras write the gain mode index (0, 100,
-        # 200 …) there, not the physical conversion factor. Values ≤ 0 are always
-        # invalid for e⁻/ADU and are skipped so a zero gain mode index doesn't
-        # produce bogus 0.0 electron values in the SNR table.
-        gain_e_per_adu: float | None = None
-        hdr = getattr(image, 'header', None)
-        if hdr is not None:
-            for kw in ("EGAIN", "GAIN", "CCDGAIN", "GAINDB"):
-                v = hdr.get(kw)
-                if v is not None:
-                    try:
-                        g = float(v)
-                        if g > 0:
-                            gain_e_per_adu = g
-                            break
-                    except (TypeError, ValueError):
-                        pass
+        # See core.astro_image._resolve_gain for the EGAIN-priority rationale
+        # (GAIN alone is often an ambiguous camera mode index, not e⁻/ADU).
+        gain_e_per_adu: float | None = _resolve_gain(getattr(image, 'header', None))
 
         # --- Noise factor: σ_sky / √μ_sky --------------------------------
         # 1.0 = pure sky shot noise (Poisson); >1.0 = read noise / thermal contributions.
@@ -163,5 +147,5 @@ class SNRAnalyzer:
         ax.set_title(f"SNR map — {label}", fontsize=10)
         ax.set_xlabel("x (px)")
         ax.set_ylabel("y (px)")
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig_to_b64(fig, dpi=120)

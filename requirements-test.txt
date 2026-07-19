@@ -2,11 +2,12 @@
 pytest>=8.0
 pytest-cov>=5.0
 pytest-timeout>=2.3
+pytest-xdist>=3.5
 numpy
 scipy
 matplotlib
-astropy
-photutils
+astropy>=6.0
+photutils>=3.0
 PyWavelets
 Pillow
 lz4

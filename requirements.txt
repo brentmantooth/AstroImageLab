@@ -1,4 +1,4 @@
-# conda install -c conda-forge pyqt6 astropy photutils scipy numpy matplotlib astroalign pillow pywavelets
+# conda install -c conda-forge pyqt6 "astropy>=6.0" "photutils>=3.0" scipy numpy matplotlib astroalign pillow pywavelets
 # pip install xisf seaborn
 seaborn
 xisf

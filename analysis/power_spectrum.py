@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from astropy.stats import sigma_clip
 
 from core.astro_image import AstroImage
-from core.fig_utils import figs_to_b64
+from core.fig_utils import figs_to_b64, finalize_layout
 from core.models import POWER_SPECTRUM_NPIX
 
 LOW_FREQ_MAX = 0.10    # cycles/px boundary between low and mid+high
@@ -217,5 +217,5 @@ class PowerSpectrumAnalyzer:
         axes[1].legend(fontsize=8)
         axes[1].grid(True, alpha=0.3)
 
-        fig.tight_layout()
+        finalize_layout(fig)
         return fig

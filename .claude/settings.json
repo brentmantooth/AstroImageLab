@@ -7,7 +7,21 @@
       "WebSearch",
       "PowerShell(conda activate astrolab)",
       "PowerShell(python -m pytest tests/ -m \"not slow\" -q 2>&1)",
-      "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\" -Filter \"condabin\" -Directory -ErrorAction SilentlyContinue -Recurse -Depth 2 | Select-Object -First 5 FullName; Get-ChildItem -Path \"C:\\\\ProgramData\" -Filter \"condabin\" -Directory -ErrorAction SilentlyContinue | Select-Object FullName)"
+      "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\" -Filter \"condabin\" -Directory -ErrorAction SilentlyContinue -Recurse -Depth 2 | Select-Object -First 5 FullName; Get-ChildItem -Path \"C:\\\\ProgramData\" -Filter \"condabin\" -Directory -ErrorAction SilentlyContinue | Select-Object FullName)",
+      "PowerShell(Start-Process -FilePath \"python\" -ArgumentList \"AstroImageLab.py\" -WorkingDirectory \"d:\\\\GitHub\\\\AstroImageLab\" -PassThru)",
+      "PowerShell(Stop-Process -Id 25432 -Force -ErrorAction SilentlyContinue)",
+      "Bash(\"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/measure_control_panel.py\")",
+      "Bash(\"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/render_control_panel.py\")",
+      "Read(//c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/**)",
+      "Bash(python -c ' *)",
+      "Bash(\"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/crop_image.py\")",
+      "Bash(\"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/render_main_window.py\")",
+      "Bash(\"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/test_roi_reset.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 \"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/test_roi_reset.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 \"/c/Users/bmant/anaconda3/envs/astrolab/python.exe\" \"/c/Users/bmant/AppData/Local/Temp/claude/d--GitHub-AstroImageLab/689ff469-8361-4066-b1c5-da15c208080d/scratchpad/test_toolbar_sync.py\")",
+      "Bash(python -m py_compile gui/control_panel.py gui/main_window.py gui/image_panel.py)",
+      "Bash(/c/Users/bmant/anaconda3/envs/astrolab/python.exe -c ' *)",
+      "PowerShell(& \"$env:USERPROFILE\\\\miniconda3\\\\Scripts\\\\conda.exe\" --version 2>$null; if \\(-not $?\\) { & \"$env:USERPROFILE\\\\anaconda3\\\\Scripts\\\\conda.exe\" --version 2>$null })"
     ]
   }
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter
+from scipy.special import erfinv
 
 from analysis.edge_analyzer import EdgeAnalyzer
 from core.models import EDGE_ESF_MIN_MONOTONICITY
@@ -11,7 +12,8 @@ from core.models import EDGE_ESF_MIN_MONOTONICITY
 _RESULT_KEYS = {"edges", "n_edges", "rois_used"}
 
 
-def _make_clean_edge_roi(angle_deg: float = 30.0, size: int = 60) -> np.ndarray:
+def _make_clean_edge_roi(angle_deg: float = 30.0, size: int = 60,
+                          sigma: float = 1.5) -> np.ndarray:
     """Single straight edge through the box center, background-subtracted
     semantics (background ~ 0, signal positive) -- matches real bgsub data."""
     yy, xx = np.mgrid[0:size, 0:size]
@@ -19,7 +21,7 @@ def _make_clean_edge_roi(angle_deg: float = 30.0, size: int = 60) -> np.ndarray:
     theta = np.radians(angle_deg)
     d = (xx - c) * np.cos(theta) + (yy - c) * np.sin(theta)
     roi = np.where(d > 0, 200.0, 0.0).astype(float)
-    return gaussian_filter(roi, sigma=1.5)
+    return gaussian_filter(roi, sigma=sigma)
 
 
 def _make_double_edge_roi(size: int = 60) -> np.ndarray:
@@ -34,24 +36,24 @@ def _make_double_edge_roi(size: int = 60) -> np.ndarray:
 
 
 class TestAnalyze:
-    def test_returns_dict(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    @pytest.fixture(scope="class")
+    @classmethod
+    def result(cls, astro_image_a):
+        return EdgeAnalyzer().analyze(astro_image_a)
+
+    def test_returns_dict(self, result):
         assert isinstance(result, dict)
 
-    def test_required_keys_present(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_required_keys_present(self, result):
         assert _RESULT_KEYS.issubset(result.keys())
 
-    def test_n_edges_nonnegative(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_n_edges_nonnegative(self, result):
         assert result["n_edges"] >= 0
 
-    def test_edges_is_list(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_edges_is_list(self, result):
         assert isinstance(result["edges"], list)
 
-    def test_n_edges_matches_list_length(self, astro_image_a):
-        result = EdgeAnalyzer().analyze(astro_image_a)
+    def test_n_edges_matches_list_length(self, result):
         assert result["n_edges"] == len(result["edges"])
 
     def test_with_roi(self, astro_image_a):
@@ -65,14 +67,14 @@ class TestEsfQuality:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=30.0)
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert ea._esf_quality(esf) > 0.8
 
     def test_double_edge_scores_low(self):
         ea = EdgeAnalyzer()
         roi = _make_double_edge_roi()
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert ea._esf_quality(esf) < EDGE_ESF_MIN_MONOTONICITY
 
     def test_perfectly_flat_scores_zero(self):
@@ -93,7 +95,7 @@ class TestEsfQuality:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=angle_deg)
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert ea._esf_quality(esf) > 0.8
 
 
@@ -104,7 +106,7 @@ class TestExtractEsfDiscMask:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=45.0)
         edge_info = ea._detect_strongest_edge(roi)
-        positions, esf = ea._extract_esf(roi, edge_info)
+        positions, esf, _ = ea._extract_esf(roi, edge_info)
         assert esf is not None
         assert not np.any(np.isnan(esf))
         assert not np.any(np.isnan(positions))
@@ -113,16 +115,44 @@ class TestExtractEsfDiscMask:
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=45.0)
         edge_info = ea._detect_strongest_edge(roi)
-        positions, _ = ea._extract_esf(roi, edge_info)
+        positions, _, _ = ea._extract_esf(roi, edge_info)
         assert positions[0] == 0.0
 
     def test_esf_normalised_to_unit_range(self):
         ea = EdgeAnalyzer()
         roi = _make_clean_edge_roi(angle_deg=30.0)
         edge_info = ea._detect_strongest_edge(roi)
-        _, esf = ea._extract_esf(roi, edge_info)
+        _, esf, _ = ea._extract_esf(roi, edge_info)
         assert esf.min() >= -1e-9
         assert esf.max() <= 1.0 + 1e-9
+
+
+class TestEdgeWidthAccuracy:
+    """Regression guard for the rotation_angle sign bug in _extract_esf: a
+    step edge blurred by a known Gaussian sigma has an analytically known
+    10-90% width (the edge spread function of a Gaussian-blurred step is an
+    erf profile), so the measured width can be checked against ground truth
+    instead of only the shape/monotonicity properties the rest of this file
+    tests. A prior formula (-(90.0 - angle_deg), which looked plausible but
+    aligned the edge horizontally instead of vertically) passed every
+    existing test in this file while over-measuring width by 7-14x, because
+    none of them compared against a known true width."""
+
+    @staticmethod
+    def _expected_width(sigma: float) -> float:
+        # ESF(x) = 0.5*(1+erf(x/(sigma*sqrt2))); solve for the 10%/90% crossings.
+        return 2.0 * sigma * np.sqrt(2.0) * erfinv(0.8)
+
+    @pytest.mark.parametrize("angle_deg", [15.0, 30.0, 60.0, 75.0])
+    @pytest.mark.parametrize("sigma", [1.5, 3.0])
+    def test_measured_width_matches_known_sigma(self, angle_deg, sigma):
+        ea = EdgeAnalyzer()
+        roi = _make_clean_edge_roi(angle_deg=angle_deg, sigma=sigma)
+        edge_info = ea._detect_strongest_edge(roi)
+        positions, esf, _ = ea._extract_esf(roi, edge_info)
+        width = ea._measure_edge_width(positions, esf)
+        expected = self._expected_width(sigma)
+        assert width == pytest.approx(expected, rel=0.3)
 
 
 class TestQualityGateAutoDetect:

@@ -6,13 +6,46 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 from astropy.nddata import NDData, StdDevUncertainty
+from astropy.stats import SigmaClip
+from astropy.utils.exceptions import AstropyUserWarning
 from photutils.background import Background2D, SExtractorBackground, MADStdBackgroundRMS
 
 from core.models import DEFAULT_PIXEL_SCALE, FILTER_THICKNESS_MM
 
 
-# FITS keywords tried in priority order for pixel scale derivation
-_PIXEL_SCALE_KEYWORDS = ["CDELT1", "CD1_1", "PIXSCALE", "SCALE"]
+# FITS keywords tried in priority order for pixel scale derivation.
+# (keyword, multiplier to arcsec/px, apply_abs) — CDELT1/CD1_1 are in degrees/px
+# (abs() strips the sign some WCS conventions use to indicate axis-flip direction);
+# PIXSCALE/SCALE are already arcsec/px.
+_PIXEL_SCALE_KEYWORDS: list[tuple[str, float, bool]] = [
+    ("CDELT1", 3600.0, True),
+    ("CD1_1", 3600.0, True),
+    ("PIXSCALE", 1.0, False),
+    ("SCALE", 1.0, False),
+]
+
+
+def _resolve_gain(header: fits.Header | None) -> float | None:
+    """Resolve the physical e-/ADU gain from FITS header keywords.
+
+    EGAIN is preferred: it is the FITS standard for the actual e⁻/ADU conversion
+    factor. GAIN is ambiguous — many cameras write the gain mode index (0, 100,
+    200 …) there, not the physical conversion factor. Values <= 0 are always
+    invalid for e⁻/ADU and are skipped so a zero gain mode index doesn't
+    produce bogus 0.0 electron values.
+    """
+    if header is None:
+        return None
+    for kw in ("EGAIN", "GAIN", "CCDGAIN", "GAINDB"):
+        v = header.get(kw)
+        if v is not None:
+            try:
+                g = float(v)
+                if g > 0:
+                    return g
+            except (TypeError, ValueError):
+                pass
+    return None
 
 _DTYPE_LABELS: dict[str, str] = {
     "uint8":   "8-bit unsigned int",
@@ -45,7 +78,6 @@ class AstroImage:
         self.original_dtype: np.dtype | None = None   # dtype before float32 conversion
         self.background: Background2D | None = None
         self.background_rms: np.ndarray | None = None
-        self._load_error: str | None = None
         self.is_color: bool = False                    # True when RGB file was converted to luminance
         self.starless_image: AstroImage | None = None  # Set by ImagePanel when starless is loaded
 
@@ -125,7 +157,7 @@ class AstroImage:
                 self.is_color = True
             else:
                 img = img[:, :, 0]
-        self.data = img   # float64 conversion happens in load() after dtype is captured
+        self.data = img   # float32 conversion happens in load() after dtype is captured
         # Build a minimal header-like dict from XISF metadata
         if meta_list:
             self.header = fits.Header()
@@ -158,25 +190,23 @@ class AstroImage:
             self.pixel_scale_is_estimated = True
             return DEFAULT_PIXEL_SCALE
 
-        # CDELT1 in degrees/px
-        if "CDELT1" in self.header:
-            return abs(float(self.header["CDELT1"])) * 3600.0
-
-        # CD matrix
-        if "CD1_1" in self.header:
-            return abs(float(self.header["CD1_1"])) * 3600.0
-
-        # Direct arcsec/px keywords
-        for kw in ("PIXSCALE", "SCALE"):
+        for kw, factor, use_abs in _PIXEL_SCALE_KEYWORDS:
             if kw in self.header:
-                return float(self.header[kw])
+                try:
+                    v = float(self.header[kw])
+                    return (abs(v) if use_abs else v) * factor
+                except (ValueError, TypeError):
+                    pass
 
         # Derive from focal length + pixel size
         if "FOCALLEN" in self.header and "XPIXSZ" in self.header:
-            focallen_mm = float(self.header["FOCALLEN"])
-            xpixsz_um = float(self.header["XPIXSZ"])
-            if focallen_mm > 0:
-                return (xpixsz_um / focallen_mm) * 206.265
+            try:
+                focallen_mm = float(self.header["FOCALLEN"])
+                xpixsz_um = float(self.header["XPIXSZ"])
+                if focallen_mm > 0:
+                    return (xpixsz_um / focallen_mm) * 206.265
+            except (ValueError, TypeError):
+                pass
 
         self.pixel_scale_is_estimated = True
         return DEFAULT_PIXEL_SCALE
@@ -215,7 +245,6 @@ class AstroImage:
             "Pixel size":   ["XPIXSZ"],
             "Exposure":     ["EXPTIME", "EXPOSURE"],
             "Date":         ["DATE-OBS"],
-            "Gain":         ["GAIN"],
             "Binning":      ["XBINNING"],
             "Bandwidth":    ["BANDWID", "FWHM", "BANDWIDTH"],
         }
@@ -224,6 +253,16 @@ class AstroImage:
                 if kw in self.header:
                     self.meta[display_key] = str(self.header[kw]).strip()
                     break
+
+        # Gain — prefer the resolved physical e-/ADU value (EGAIN priority order,
+        # see _resolve_gain); fall back to the raw GAIN string (often a camera mode
+        # index) only when no keyword resolves to a valid value, so the display
+        # still shows *something* for files with only an ambiguous GAIN keyword.
+        gain = _resolve_gain(self.header)
+        if gain is not None:
+            self.meta["Gain"] = f"{gain:.3g} e⁻/ADU"
+        elif "GAIN" in self.header:
+            self.meta["Gain"] = str(self.header["GAIN"]).strip()
 
         # Focal ratio — prefer explicit keyword; fall back to FOCALLEN / APTDIA
         fr: float | None = None
@@ -275,13 +314,14 @@ class AstroImage:
         if self.background is not None:
             return   # already computed for this instance's data; self.data never changes post-load
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            warnings.filterwarnings("ignore", category=AstropyUserWarning)
             self.background = Background2D(
                 self.data,
                 box_size=box_size,
                 filter_size=3,
+                sigma_clip=SigmaClip(sigma=3.0, maxiters=10),
                 bkg_estimator=SExtractorBackground(),
-                bkgrms_estimator=MADStdBackgroundRMS(),
+                bkg_rms_estimator=MADStdBackgroundRMS(),
             )
         self.background_rms = self.background.background_rms
 
@@ -290,7 +330,7 @@ class AstroImage:
             raise RuntimeError("Image not loaded")
         if self.background is None:
             return self.data.copy()
-        return self.data - self.background.background
+        return (self.data - self.background.background).astype(np.float32)
 
     def saturation_threshold(self) -> float:
         if self.data is None:
