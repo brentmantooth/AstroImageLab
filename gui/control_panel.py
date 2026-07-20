@@ -310,7 +310,7 @@ class AnalysisControlPanel(QWidget):
         left_col.addLayout(align_row)
 
         self._parallel_cb = QCheckBox("Run metrics in parallel  (faster, uses more RAM)")
-        self._parallel_cb.setChecked(False)
+        self._parallel_cb.setChecked(True)
         self._parallel_cb.setToolTip(
             "When checked, all selected analysis metrics run concurrently in separate\n"
             "threads, which can significantly reduce total run time on multi-core CPUs.\n"
