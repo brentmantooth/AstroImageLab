@@ -25,6 +25,13 @@ import matplotlib.pyplot as plt
 # only savefig() leaves tight_layout() free to race and reproduces the same
 # ParseException. Use finalize_layout() below instead of calling
 # fig.tight_layout() directly.
+#
+# Nor is tight_layout() the last of it -- fig.colorbar() and ax.legend()
+# (particularly loc="best"/auto-placement, which needs text-extent
+# measurement to find a non-overlapping spot) can also hit the same cache
+# during figure *construction*, before savefig() is ever called. Use
+# locked_draw_call() below to wrap any such call in code that can run
+# concurrently with other figure-building code.
 _MPL_DRAW_LOCK = threading.Lock()
 
 
@@ -37,6 +44,18 @@ def finalize_layout(fig: plt.Figure, **kwargs) -> None:
     """
     with _MPL_DRAW_LOCK:
         fig.tight_layout(**kwargs)
+
+
+def locked_draw_call(fn, *args, **kwargs):
+    """Run a matplotlib call that can trigger draw-adjacent text/layout
+    measurement (colorbar placement, legend auto-placement, etc.) under the
+    same process-wide lock as finalize_layout()/fig_to_b64(). Call this
+    instead of calling fig.colorbar(...)/ax.legend(...) directly in any
+    analyzer/report figure builder that can execute concurrently with other
+    figure-building code (see the _MPL_DRAW_LOCK comment above for why).
+    """
+    with _MPL_DRAW_LOCK:
+        return fn(*args, **kwargs)
 
 
 def fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:

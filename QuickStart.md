@@ -13,7 +13,7 @@ different cameras, or different conditions), and the tool produces a side-by-sid
 - **Spatial detail** — local std, Laplacian of Gaussian, and wavelet maps
 - **Signal / Noise** — sky background, noise factor, and per-star SNR
 
-Output is an HTML or PDF report and an interactive Report Inspector window.
+Output is a self-contained HTML report and an interactive Report Inspector window. Image B is optional — loading only Image A runs the app in single-image analysis mode.
 
 ---
 
@@ -171,13 +171,18 @@ shows the filename and starless status (cyan arrows).
 
 ---
 
-### Step 3 — Load Image B
+### Step 3 — Load Image B *(optional)*
 
 Repeat Step 2 for the Image B panel (right side). Use the menu **File → Open Image B…**
 or the **"Open FITS / XISF…"** button in the Image B panel header.
 
 > Load images in order — Image A first, then Image B — so the starless prompts are
 > presented one at a time.
+
+**Image B is optional.** If you only load Image A, clicking **Run Analysis** shows a
+confirmation dialog and then runs in **single-image analysis mode**: PSF, SNR, halo,
+edge, power spectrum, and spatial detail all still run on Image A alone, but comparison
+tables and A/B differential metrics are unavailable.
 
 ---
 
@@ -192,7 +197,7 @@ Each image panel header contains two small input fields:
 
 **Filter thickness (mm)**
 - Enter the glass substrate thickness (e.g. `1` for a 1 mm filter).
-- Used for: ghost reflection geometry analysis.
+- Used for: the expected-halo-radius estimate shown in the Halo Analysis section, computed from filter thickness, focal ratio, and pixel size.
 - Default is `1` mm if not changed.
 
 ---
@@ -235,6 +240,10 @@ focusing on the nebula core and excluding frame edges, vignetting, or noisy corn
 Metrics that use the ROI (shown by **●** in the Metrics grid): Edge Analysis,
 Power Spectrum, Spatial Detail.
 
+> **Toolbar shortcut:** the **Select ROI…** and **Select Line…** actions in the toolbar
+> above the image panels do the same thing as the matching control-panel buttons — use
+> whichever is more convenient.
+
 > **💡 Tip:** The ROI does not need to cover the entire image. A tight ROI around the
 > nebula of interest produces cleaner local statistics than analysing the full frame
 > including dark sky borders.
@@ -270,13 +279,13 @@ run time. Each row also has:
 
 **Output settings**
 
-- **Output directory** — click Browse and select a folder. The HTML report and any
-  exported PNGs are written here.
-- **Report format** — choose HTML (default, always available) or PDF (requires
-  WeasyPrint; falls back to HTML if unavailable).
+- **Output directory** — click Browse and select a folder. The self-contained HTML
+  report and any exported PNGs are written here.
 - **Run metrics in parallel** — when checked, all selected metrics compute simultaneously
   in separate threads. Significantly faster on multi-core CPUs; uses more RAM because
-  all analyses hold their working data at once.
+  all analyses hold their working data at once. Unchecked by default.
+- **Dark mode graphics** — when checked (default), report figures use a dark
+  matplotlib theme instead of a white background.
 
 ![Metrics grid and output settings](resources/11_metrics_output.png)
 *Metrics grid with Export / ROI / XS / Time columns, plus output directory and format.*
@@ -311,8 +320,18 @@ Click **Run Analysis**. The button disables and the following happens:
 After a successful run:
 
 - **HTML report** opens automatically in your default web browser.
-- **Report Inspector** opens as a separate window for interactive side-by-side image
-  comparison with Before/After slider, zoom, and pan.
+- **Report Inspector** opens as a separate window for interactive comparison of every
+  figure the report generated.
+
+The Report Inspector is more capable than a simple slider: **Left**/**Right** dropdowns
+let you independently choose what each panel shows (Image A, Image B, a computed
+Reference, or a Diff), a **Mode** selector switches between side-by-side and
+before/after-slider views, and a **Section** dropdown exposes every Section 8 spatial-
+detail sub-map (LoG, wavelet, gradient, local σ, local entropy, at every scale) alongside
+the input images. Scroll to zoom and right-click-drag to pan — both panels stay
+synchronized. Drag directly on either image to draw a cross-section line; the chart
+below updates live with a profile plot that supports a log-scale Y-axis toggle, a hover
+tooltip, and a crosshair.
 
 You can reopen the inspector at any time via **File → Open Report Inspector…** and
 selecting either the `.html` report or the `_inspector.npz` data file.
@@ -327,11 +346,17 @@ selecting either the `.html` report or the `_inspector.npz` data file.
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | Min star S/N | 30 | 5 – 500 | SNR threshold for star inclusion in ePSF fitting. Raise to use only bright, unambiguous stars in sparse fields; lower cautiously if too few stars are detected. |
-| ePSF max stars | 500 | 10 – 2000 | Maximum candidate stars passed to the ePSF builder. Stars are ranked by peak flux; the brightest N are used. Reduce to 200–300 on crowded fields to cut computation time dramatically. |
-| PSF reference seeing (arcsec) | 2.00″ | 0.5 – 10.0″ | FWHM of the benchmark Moffat PSF plotted in PSF/MTF report figures. Set to the typical seeing for your site and session conditions. |
+| ePSF max stars | 600 | 10 – 2000 | Maximum candidate stars passed to the ePSF builder. Stars are ranked by peak flux; the brightest N are used. Reduce to 200–300 on crowded fields to cut computation time dramatically. |
+| PSF reference seeing (arcsec) | 3.00″ | 0.5 – 10.0″ | FWHM of the benchmark Moffat PSF plotted in PSF/MTF report figures. Set to the typical seeing for your site and session conditions. |
 | Seeing warn threshold | 3.00″ | 0.5 – 10.0″ | If the measured median star FWHM exceeds this value, the report flags a poor-seeing warning for that image. |
 | XS SNR region width (px) | 15 | 3 – 100 | Width in pixels of the bright and dark sample windows used in the Cross-Section SNR calculation. Wider windows average over more pixels (more stable); narrower windows are more spatially selective. |
 | Wavelet levels | 4 | 2 – 6 | Number of wavelet decomposition levels in Spatial Detail analysis. Level 1 ≈ 2 px finest detail; level 4 ≈ 16 px structure; level 6 ≈ 64 px. |
+| Nebula mask threshold (× RMS) | 1.70 | 0.5 – 5.0 | Nebula mask threshold for Section 8 spatial detail analysis. Pixels above this many RMS units over background are classified as Nebula. |
+| Nebula mask dilation (px) | 3 | 0 – 20 | Grows the Section 8 nebula mask outward by this many pixels to capture dim/dark transition regions at nebula edges. |
+| Nebula mask hole-fill (px) | 5 | 0 – 20 | Fills enclosed background gaps up to this size (px per side) inside the Section 8 nebula mask, before dilation. |
+| Local-maxima footprint (× scale) | 2.00 | 1.0 – 6.0 | Section 8j local-maxima mask: neighbourhood size, as a multiple of each metric's own spatial scale, used to test whether a pixel is a local maximum. |
+| Local-maxima prominence (pctl) | 99.0 | 50.0 – 99.9 | Section 8j local-maxima mask: minimum peak height, as a percentile of each scale's own combined \|A\|,\|B\| peak-source values. |
+| Local-maxima top-bright (%) | 5.0 | 0.5 – 25.0 | Section 8j local-maxima mask: pixels in the top N% of Image A's or Image B's own value distribution are unioned (OR) into the mask, so broad bright plateaus are captured even when they never register as an isolated local-maximum peak. |
 | Pixel scale override | 0.0 (from header) | 0.0 – 20.0 ″/px | Forces a specific plate scale instead of reading from the FITS/XISF WCS header. Set this when your header is missing or incorrect. Leave at 0.0 to use the header value automatically. |
 
 ---
@@ -345,9 +370,62 @@ selecting either the `.html` report or the `_inspector.npz` data file.
 | **Halo analysis** | — | — | Measures the extended scattering halo around bright stars: halo radius, brightness profile, and integrated halo flux compared to star core flux. Broad halos indicate internal reflection or coating scatter in the filter. |
 | **Edge analysis (LSF)** | ● | — | Locates high-contrast edges in the image (or the user-drawn cross-section), fits an Edge Spread Function and Line Spread Function, and derives MTF50 and Edge Contrast Ratio. Restricted to the ROI when one is set. Uses the starless image when available. |
 | **Power spectrum** | ● | — | Radial azimuthally-averaged power spectral density from 0 to the Nyquist frequency. Reports the mid/high-frequency ratio as a single measure of fine-detail preservation. Restricted to the ROI when set; uses the starless image when available. |
-| **Spatial detail (std / LoG / wavelet)** | ● | ● | Three complementary spatial analysis techniques: local standard-deviation maps (texture), Laplacian of Gaussian maps (edge/feature response), and wavelet per-level SNR. Also produces cross-section profiles along the drawn line and a Cross-Section SNR estimate with bright/dark sample windows. |
+| **Spatial detail** | ● | ● | Five complementary spatial analysis families — local standard deviation (texture), Laplacian of Gaussian (edge/feature response), wavelet decomposition, gradient magnitude (edge sharpness), and local entropy (texture complexity) — each compared via a log-ratio map and correlation scatter, plus a noise-corrected cross-method overview and scale-adaptive local-maxima masked metrics. Also produces cross-section profiles along the drawn line and a Cross-Section SNR estimate with bright/dark sample windows. |
 
 **Legend:** ● = metric uses this input when provided; — = not applicable.
+
+---
+
+## Additional Tools
+
+Three standalone utilities live in the **Tools** menu. They are independent of the
+Steps 1–10 workflow above — use them before generating input data, or on the side for
+per-star inspection.
+
+### Synthetic Data Generator
+
+**Tools → Synthetic Star Data…**
+
+Generates a fully synthetic FITS star field for testing the app without real data.
+Choose from a 24-camera database (ZWO, QHY, Player One), configure a Moffat PSF and
+field-position-dependent optical aberrations (coma, field curvature, astigmatism,
+spherical, collimation, defocus, backfocus, guiding error, halo), and optionally add a
+simulated nebula and sky background at a chosen Bortle class. A live STF-stretched
+preview updates as you adjust sliders. Click **Generate** to write a FITS file — a
+matching `_starless` companion is always written alongside it — and optionally load the
+result directly into Image A or Image B.
+
+![Synthetic Data Generator dialog](resources/15_synthetic_generator.png)
+*The Synthetic Data Generator, configured for a ZWO ASI2600MM Pro field with a simulated nebula.*
+
+### Spatial Target Generator
+
+**Tools → Synthetic Spatial Detail Target…**
+
+Generates a calibrated 4-column × 3-row grid of test patterns at known spatial
+frequencies — sine and square-wave gratings at frequencies aligned to the wavelet
+decomposition levels, a Siemens star, and a slant edge — with a contrast ramp from top
+to bottom. Always produces a clean/degraded FITS pair. Load the clean version into
+Image A and the degraded version into Image B to calibrate the Spatial Detail metrics
+against a known ground truth, rather than real (and therefore unknown) filter
+differences.
+
+![Spatial Target Generator dialog](resources/16_spatial_target_generator.png)
+*The Spatial Target Generator dialog.*
+
+### Halo Analyzer
+
+**Tools → Halo Analyzer…**
+
+An interactive, click-a-star inspector for PSF and halo shape, independent of the main
+report's Halo Analysis section. Requires Image A to already be loaded (Image B is
+optional). Click any detected star to see a Moffat fit, shape metrics (eccentricity,
+ellipticity, orientation), a cross-section profile, and a radial distribution function
+(RDF) plot — all recomputed live as you click different stars or adjust the sample
+radius. Saturated stars are flagged "Sat." in the results table.
+
+![Halo Analyzer dialog with a star selected](resources/17_halo_analyzer.png)
+*The Halo Analyzer, showing the Moffat-fit cutout, cross-section, and RDF for a selected star.*
 
 ---
 
@@ -378,12 +456,6 @@ If the drawn line extends beyond the ROI boundary, a warning dialog explains tha
 Section 8 (Spatial Detail) profiles will clip the line to the ROI for derived-map
 sampling. To avoid clipping, either redraw the line entirely within the ROI, or clear
 the ROI (click Select ROI → Cancel ROI before the warning appears).
-
-**PDF report fails to generate**
-WeasyPrint is required for PDF output. If it is not installed or missing a system font
-dependency, the report automatically falls back to HTML format. Install WeasyPrint with
-`pip install weasyprint` and ensure GTK or Pango fonts are available on your system
-(platform-specific — see the WeasyPrint documentation for Windows/macOS details).
 
 **Inspector file not found**
 The Report Inspector reads a `_inspector.npz` data file saved alongside the HTML report.

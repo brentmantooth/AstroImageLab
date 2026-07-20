@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import concurrent.futures
+import time
 import numpy as np
 try:
     import bottleneck as bn
@@ -11,11 +12,11 @@ import matplotlib.colors as mcolors
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from scipy.ndimage import generic_filter, uniform_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, binary_dilation, binary_fill_holes, label
+from scipy.ndimage import uniform_filter, gaussian_filter, gaussian_laplace, gaussian_gradient_magnitude, map_coordinates, zoom, maximum_filter, binary_dilation, binary_fill_holes, label
 import pywt
 
 from core.astro_image import AstroImage
-from core.fig_utils import fig_to_b64, figs_to_b64, finalize_layout
+from core.fig_utils import fig_to_b64, figs_to_b64, finalize_layout, locked_draw_call
 from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEVELS,
                          ENTROPY_KERNEL_SIZES,
                          XS_LINE_ALPHA, SECTION8_BORDER_CROP_FRACTION, SECTION8_ANALYSIS_CMAP,
@@ -28,7 +29,7 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          SECTION8_LOCALMAX_DIST_MAX_SAMPLES, SECTION8_LOCALMAX_TOP_PERCENT,
                          SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE)
 
-MAX_DIM_FOR_STD = 2048   # downsample to this before generic_filter (performance)
+MAX_DIM_FOR_STD = 2048   # downsample to this before the local-std/entropy windowed filters (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
 
 
@@ -212,7 +213,7 @@ class SpatialDetailAnalyzer:
                 f"Original (normalised) — {image_a.label}",
                 f"Original (normalised) — {_label_b}",
                 diff_title="Log ratio (A/B), original image",
-                cmap=SECTION8_ANALYSIS_CMAP,
+                cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
                 display_roi=None,
                 xs_data=xs_raw_orig,
                 xs_line=xs_line_orig,
@@ -221,7 +222,7 @@ class SpatialDetailAnalyzer:
             orig_fig = self._plot_single(
                 self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
                 f"Original (normalised) — {image_a.label}",
-                cmap=SECTION8_ANALYSIS_CMAP,
+                cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
             )
         figures["original"] = fig_to_b64(orig_fig, dpi=150)
 
@@ -307,11 +308,25 @@ class SpatialDetailAnalyzer:
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
             )
-            std_b64, std_partial = _f_std.result()
-            log_b64, log_partial = _f_log.result()
-            wav_b64, wav_partial = _f_wav.result()
-            ent_b64, ent_partial = _f_ent.result()
-            grad_b64, grad_partial = _f_grad.result()
+            # Retrieve in actual-completion order (not submission order) so that,
+            # if a run ever stalls again, the printed timings show exactly which
+            # of the 5 families finished and which never did -- fixed-order
+            # .result() calls would block on an early name even if later ones
+            # had secretly already finished.
+            _futures = {"std": _f_std, "log": _f_log, "wavelet": _f_wav,
+                        "entropy": _f_ent, "gradient": _f_grad}
+            _fut_to_name = {v: k for k, v in _futures.items()}
+            _t0 = time.perf_counter()
+            _results = {}
+            for _fut in concurrent.futures.as_completed(_futures.values()):
+                _name = _fut_to_name[_fut]
+                _results[_name] = _fut.result()
+                print(f"[SpatialDetail] {_name} finished in {time.perf_counter() - _t0:.1f}s")
+            std_b64, std_partial = _results["std"]
+            log_b64, log_partial = _results["log"]
+            wav_b64, wav_partial = _results["wavelet"]
+            ent_b64, ent_partial = _results["entropy"]
+            grad_b64, grad_partial = _results["gradient"]
 
         figures.update(std_b64)
         figures.update(log_b64)
@@ -863,7 +878,16 @@ class SpatialDetailAnalyzer:
             data = zoom(norm, (new_h / norm.shape[0], new_w / norm.shape[1]), order=1)
             kernel_size = max(3, int(kernel_size * factor) | 1)
 
-        std_map = generic_filter(data, np.std, size=kernel_size)
+        # Vectorized box-filter variance (mirrors _compute_entropy_map's migration
+        # off generic_filter -- a per-pixel Python callback benchmarked at
+        # ~10-50x slower than this uniform_filter-based approach at the same
+        # array size). float64 accumulation avoids cancellation error in
+        # mean_sq - mean**2; clip guards residual float noise before sqrt.
+        data64 = data.astype(np.float64)
+        mean = uniform_filter(data64, size=kernel_size, mode="reflect")
+        mean_sq = uniform_filter(data64 * data64, size=kernel_size, mode="reflect")
+        var = np.clip(mean_sq - mean * mean, 0.0, None)
+        std_map = np.sqrt(var).astype(np.float32)
 
         if factor < 1.0:
             std_map = zoom(std_map,
@@ -1572,7 +1596,8 @@ class SpatialDetailAnalyzer:
         of bin b within each window -- summing -p_b*log2(p_b) across bins then
         gives the entropy map with no per-pixel Python-level histogram ever
         built. A per-pixel generic_filter callback (the initial approach here,
-        mirroring _compute_std_map) measured ~10-50x slower than Weber's fully
+        mirroring _compute_std_map's original implementation before it was
+        likewise vectorized) measured ~10-50x slower than Weber's fully
         vectorized maximum/minimum/median_filter maps at the same array size;
         this reuses that same vectorization principle for entropy.
         """
@@ -1687,14 +1712,14 @@ class SpatialDetailAnalyzer:
                         linewidth=1.5, alpha=XS_LINE_ALPHA, zorder=5)
             ax.set_title(title, fontsize=10)
             ax.axis("off")
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            locked_draw_call(fig.colorbar, im, ax=ax, fraction=0.046, pad=0.04)
 
         im_diff = ax_diff.imshow(diff, origin="upper", cmap="bwr",
                                   vmin=dvmin, vmax=dvmax,
                                   interpolation="nearest", aspect="equal")
         ax_diff.set_title(diff_title, fontsize=10)
         ax_diff.axis("off")
-        fig.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
+        locked_draw_call(fig.colorbar, im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
 
         if xs_data is not None:
             pos, prof_a, prof_b, xs_label_a, xs_label_b, xs_title = xs_data
@@ -1748,7 +1773,7 @@ class SpatialDetailAnalyzer:
                        interpolation="nearest", aspect="equal")
         ax.set_title(title_a, fontsize=10)
         ax.axis("off")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        locked_draw_call(fig.colorbar, im, ax=ax, fraction=0.046, pad=0.04)
         return fig
 
     def _plot_mask_illustration(self, base: np.ndarray, mask_neb: np.ndarray,
@@ -1790,7 +1815,7 @@ class SpatialDetailAnalyzer:
             Patch(facecolor="tomato", edgecolor="none", alpha=0.7, label="Background"),
             Patch(facecolor="0.5", edgecolor="none", label="Unclassified"),
         ]
-        ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.8)
+        locked_draw_call(ax.legend, handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.8)
         finalize_layout(fig)
         return fig
 
@@ -1855,7 +1880,7 @@ class SpatialDetailAnalyzer:
         ax.set_ylabel("Signal energy / Noise energy")
         ax.set_xticks(x)
         ax.set_xticklabels([f"Level {i}" for i in x])
-        ax.legend(fontsize=8)
+        locked_draw_call(ax.legend, fontsize=8)
         ax.grid(True, axis="y", alpha=0.3)
         finalize_layout(fig)
         return fig
@@ -1919,7 +1944,7 @@ class SpatialDetailAnalyzer:
         ax.set_xlabel("Approximate spatial scale (px)")
         ax.set_ylabel("Noise-corrected score ratio (A / B)")
         ax.set_title("Noise-corrected local contrast — cross-method overview")
-        ax.legend(fontsize=8)
+        locked_draw_call(ax.legend, fontsize=8)
         ax.grid(True, alpha=0.3)
         finalize_layout(fig)
         return fig
@@ -1967,7 +1992,7 @@ class SpatialDetailAnalyzer:
         ax.set_xlabel("Approximate spatial scale (px)")
         ax.set_ylabel("Local-maxima masked log₁₀(A / B) (geometric mean ± SD)")
         ax.set_title("Local-maxima masked contrast — cross-method overview (log ratio)")
-        ax.legend(fontsize=8)
+        locked_draw_call(ax.legend, fontsize=8)
         ax.grid(True, alpha=0.3)
         finalize_layout(fig)
         return fig
@@ -2003,7 +2028,7 @@ class SpatialDetailAnalyzer:
         ax.set_xlabel("Position along line (px)", fontsize=8)
         ax.set_ylabel("Map value", fontsize=8)
         ax.tick_params(labelsize=7)
-        ax.legend(loc="upper left", fontsize=6.5, labelspacing=0.3)
+        locked_draw_call(ax.legend, loc="upper left", fontsize=6.5, labelspacing=0.3)
         ax.grid(True, alpha=0.3)
         ax.set_title(title, fontsize=9)
 
@@ -2074,7 +2099,7 @@ class SpatialDetailAnalyzer:
                              alpha=0.55, s=8, zorder=3, edgecolors="none", rasterized=True)
             ax.plot([lo, hi], [lo, hi], color=orig_color, linestyle="--",
                     linewidth=1.2, zorder=4, label="Slope = 1 (A = B)")
-            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04, label="log10(|A|/|B|)")
+            locked_draw_call(fig.colorbar, sc, ax=ax, fraction=0.046, pad=0.04, label="log10(|A|/|B|)")
             ax.set_xlim(lo, hi)
             ax.set_ylim(lo, hi)
             ax.set_aspect("equal")
@@ -2082,7 +2107,7 @@ class SpatialDetailAnalyzer:
             ax.set_ylabel(f"{metric_title} — {label_a} (y)", fontsize=8)
             ax.set_title(f"{region_name} (n={n})", fontsize=9)
             ax.tick_params(labelsize=7)
-            ax.legend(fontsize=6.5, loc="best", labelspacing=0.3)
+            locked_draw_call(ax.legend, fontsize=6.5, loc="best", labelspacing=0.3)
             ax.grid(True, alpha=0.3)
 
         if not any_data:
@@ -2175,7 +2200,7 @@ class SpatialDetailAnalyzer:
         ax.set_xlabel("Position along line (px)")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.legend(fontsize=9)
+        locked_draw_call(ax.legend, fontsize=9)
         ax.grid(True, alpha=0.3)
         return fig
 
@@ -2190,7 +2215,7 @@ class SpatialDetailAnalyzer:
         ax.set_xlabel("Position along line (px)")
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.legend(fontsize=9)
+        locked_draw_call(ax.legend, fontsize=9)
         ax.grid(True, alpha=0.3)
         return fig
 
@@ -2266,7 +2291,7 @@ class SpatialDetailAnalyzer:
         ax.set_xlabel("Distance (px)")
         ax.set_ylabel("Pixel value (ADU)")
         ax.set_title("Cross-section SNR — bright/dark sample regions")
-        ax.legend(fontsize=8)
+        locked_draw_call(ax.legend, fontsize=8)
         ax.grid(True, alpha=0.3)
 
         return {

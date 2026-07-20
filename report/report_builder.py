@@ -550,19 +550,14 @@ def _localmax_distributions_figure(localmax: dict) -> tuple[str, str]:
     caption_html = (
         '<p class="caption">'
         "<b>Masked-region pixel value distributions (Image A vs Image B).</b> "
+        "Magnitudes are the absolute values of the masked pixels within each row's local-maxima mask. "
+        "In most cases, larger magnitudes indicate sharper local detail. "
         "Each row is one Section 8j metric/scale, shown as a "
         "<b>violin plot</b> (kernel density estimate, randomly subsampled for "
         "display) with an IQR box-plot overlay: "
         "a <span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, "
         "a <span style='color:magenta'><b>magenta centre line</b></span> at the "
-        "median. These are the raw masked-pixel magnitude populations the "
-        "Mean/Std/Ratio/Significance columns above are computed from — see the "
-        "table for exact values (computed from the full, unsampled population, not "
-        "this figure's subsampled copy). "
-        "Each row's x-axis is independently clipped to its own 1st&ndash;99th "
-        "percentile range so the IQR box stays visible; rows with rare "
-        "extreme-outlier magnitudes may have a small fraction of the violin's tail "
-        "extend beyond the visible axis."
+        "median. "
         "</p>"
     )
     return img_html, caption_html
@@ -592,6 +587,9 @@ def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
     if not rows or not has_data:
         return "", ""
 
+    _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+    orig_color = "white" if _is_dark else "black"
+
     fig, axes = plt.subplots(len(rows), 1, figsize=(7, 1.1 * len(rows) + 1))
     fig.subplots_adjust(hspace=0.65, left=0.22, right=0.97, top=0.97, bottom=0.04)
 
@@ -617,7 +615,7 @@ def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
 
         sns.violinplot(x=vlr, orient="h", color="steelblue", inner=None, linewidth=0.8, ax=ax)
         _draw_boxwhisker(ax, [vlr])
-        ax.axvline(0.0, color="black", linestyle="--", linewidth=0.8, zorder=4)
+        ax.axvline(0.0, color=orig_color, linestyle="--", linewidth=0.8, zorder=4)
 
         lo, hi = np.percentile(vlr, [1.0, 99.0])
         if hi > lo:
@@ -636,6 +634,8 @@ def _localmax_log_ratio_distribution_figure(localmax: dict) -> tuple[str, str]:
     caption_html = (
         '<p class="caption">'
         "<b>Masked-region log ratio distributions (log&#8321;&#8320;(A / B)).</b> "
+        "Values greater than 0 indicate that Image A's pixel magnitudes are larger than Image B's, "
+        "and values less than 0 indicate the opposite. "
         "Each row is one Section 8j metric/scale, shown as a "
         "<b>violin plot</b> (kernel density estimate, randomly subsampled for "
         "display) of the per-pixel log10(|A|/|B|) population within that row's "
@@ -941,6 +941,28 @@ def _power_ratio_db(freq_a, rp_a, freq_b, rp_b) -> tuple[np.ndarray, np.ndarray]
     return freq_a, ratio_db
 
 
+def _mtf_ratio_db(freq_a, mtf_a, freq_b, mtf_b) -> tuple[np.ndarray, np.ndarray] | None:
+    """20*log10(MTF_A/MTF_B) resampled onto a common frequency grid. MTF is an
+    amplitude/modulation ratio, not power, hence 20x rather than _power_ratio_db's 10x.
+    Resampling (rather than requiring exact bin alignment like _power_ratio_db) is needed
+    because each image's MTF bin count depends on its own median star FWHM even though
+    both curves share the same fixed domain (EPSF_OVERSAMPLING is a global constant)."""
+    if freq_a is None or mtf_a is None or freq_b is None or mtf_b is None:
+        return None
+    freq_a = np.asarray(freq_a, dtype=float); mtf_a = np.asarray(mtf_a, dtype=float)
+    freq_b = np.asarray(freq_b, dtype=float); mtf_b = np.asarray(mtf_b, dtype=float)
+    if freq_a.size == 0 or freq_b.size == 0:
+        return None
+    freq_common = np.linspace(0, min(freq_a.max(), freq_b.max()),
+                               max(len(freq_a), len(freq_b)))
+    a_i = np.interp(freq_common, freq_a, mtf_a)
+    b_i = np.interp(freq_common, freq_b, mtf_b)
+    positive = np.concatenate([a_i[a_i > 0], b_i[b_i > 0]])
+    eps = float(positive.min()) * 0.01 if positive.size > 0 else 1e-12
+    ratio_db = 20.0 * np.log10(np.clip(a_i, eps, None) / np.clip(b_i, eps, None))
+    return freq_common, ratio_db
+
+
 def _focal_ratio(img: AstroImage) -> float | None:
     hdr = img.header
     if hdr is None:
@@ -1137,9 +1159,14 @@ class ReportBuilder:
             _add("epsf_b", np.log1p(eb - eb.min()).astype(np.float32))
             ref_fwhm = _ref_fwhm_px(pa, pb, self._ref_seeing_arcsec)
             if ref_fwhm is not None:
-                # Match the measured ePSF size so cross-sections sample the same pixel grid
+                # Match the measured ePSF's oversampled grid so cross-sections sample the
+                # same pixel scale. ref_fwhm is in native-pixel units (from _ref_fwhm_px),
+                # but epsf_size is the oversampled array size — scale the FWHM by the
+                # oversampling factor before building the kernel, or it renders artificially
+                # narrow relative to the measured (oversampled) ePSF images beside it.
+                oversampling = pa.get("epsf_oversampling") or pb.get("epsf_oversampling") or 1
                 epsf_size = int(ea.shape[0])
-                kern_ref = _make_moffat_kernel(ref_fwhm, size=epsf_size)
+                kern_ref = _make_moffat_kernel(ref_fwhm * oversampling, size=epsf_size)
                 kr = np.log1p(kern_ref - kern_ref.min()).astype(np.float32)
                 _add("epsf_ref", kr)
             epsf_opts: dict[str, str] = {"Image A": "epsf_a", "Image B": "epsf_b"}
@@ -1540,6 +1567,16 @@ class ReportBuilder:
                                         freq_ref, mtf_ref, ref_label)
 
         img_mtf = _img_tag(fig_mtf, "MTF comparison")
+        img_mtf_ratio = _img_tag(
+            self._plot_mtf_ratio_db(freq_a, mtf_a, freq_b, mtf_b, ra.label, rb.label),
+            "MTF ratio (dB)",
+        )
+        mtf_ratio_html = (
+            f"{img_mtf_ratio}\n"
+            '<p class="caption">Ratio of MTF curves in decibels (20·log10). Positive values '
+            f'indicate {ra.label} has higher modulation transfer (better contrast) at that '
+            f'frequency, negative values mean {rb.label} does.</p>'
+        ) if img_mtf_ratio else ""
         img_epsf_a = _img_tag((pa.get("figures") or {}).get("epsf"), f"ePSF {ra.label}")
         img_epsf_b = _img_tag((pb.get("figures") or {}).get("epsf"), f"ePSF {rb.label}")
         img_scatter = _img_tag(self._plot_fwhm_scatter(ra, rb), "FWHM scatter")
@@ -1783,6 +1820,8 @@ Higher curve = better contrast preservation at fine scales.</p>
     '<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset, filter tilt, or '
     'optical aberrations in the filter glass.',
     title="How the MTF is derived")}
+
+{mtf_ratio_html}
 
 {self._psf_simulation_html(ra, rb)}""" + self._section_psf_aberration(ra, rb, img_a, img_b)
 
@@ -2332,8 +2371,37 @@ Higher curve = better contrast preservation at fine scales.</p>
         ax.set_xlabel("Spatial frequency (cycles/pixel)")
         ax.set_ylabel("MTF")
         ax.set_xlim(0, 0.5)
-        ax.set_ylim(0, 1.05)
+        ax.set_yscale("log")
+        ax.set_ylim(1e-3, 1.05)
         ax.set_title("MTF comparison")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        return fig
+
+    def _plot_mtf_ratio_db(self, freq_a, mtf_a, freq_b, mtf_b,
+                            label_a: str, label_b: str) -> plt.Figure | None:
+        """dB ratio of A's to B's MTF curve. Amplitude quantity — 20*log10 convention."""
+        result = _mtf_ratio_db(freq_a, mtf_a, freq_b, mtf_b)
+        if result is None:
+            return None
+        freq, ratio_db = result
+
+        import matplotlib
+        _is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
+        orig_color = "white" if _is_dark else "black"
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(freq, ratio_db, color="mediumpurple", linewidth=2)
+        ax.axhline(0.0, color=orig_color, linestyle="--", linewidth=0.8, label="0 dB (A = B)")
+        ax.axvline(0.5, color="red", linestyle=":", linewidth=0.8, label="Nyquist")
+        ax.set_xlabel("Spatial frequency (cycles/pixel)")
+        ax.set_ylabel("Ratio (dB) = 20·log10(MTF_A / MTF_B)")
+        ax.set_title(f"MTF ratio (dB): {label_a} / {label_b}")
+        ax.set_xlim(0, 0.5)
+        peak = float(np.max(np.abs(ratio_db))) if ratio_db.size else 3.0
+        ylim = max(3.0, peak * 1.1)
+        ax.set_ylim(-ylim, ylim)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -3760,6 +3828,12 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
         ca, cb = _better_worse_class(ea.get("edge_width_10_90_px"),
                                       eb.get("edge_width_10_90_px"),
                                       higher_is_better=False)
+        eca, ecb = _better_worse_class(ea.get("edge_contrast_ratio"),
+                                        eb.get("edge_contrast_ratio"),
+                                        higher_is_better=True)
+        gma, gmb = _better_worse_class(ea.get("gradient_magnitude"),
+                                        eb.get("gradient_magnitude"),
+                                        higher_is_better=True)
         ecr_warn = (' &nbsp;<span class="metric-label-warn">⚠ bandwidth-sensitive</span>'
                     if bw_differ else "")
 
@@ -3902,8 +3976,8 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Edge width 10–90% (px) ✓</td><td class="{ca}">{_val(ea.get("edge_width_10_90_px"))}</td><td class="{cb}">{_val(eb.get("edge_width_10_90_px"))}</td></tr>
   <tr><td>Edge width 10–90% (arcsec) ✓</td><td>{_val(ea.get("edge_width_10_90_arcsec"))}</td><td>{_val(eb.get("edge_width_10_90_arcsec"))}</td></tr>
-  <tr><td>Edge contrast ratio{ecr_warn}</td><td>{_val(ea.get("edge_contrast_ratio"))}</td><td>{_val(eb.get("edge_contrast_ratio"))}</td></tr>
-  <tr><td>Gradient magnitude</td><td>{_val(ea.get("gradient_magnitude"), ".2f")}</td><td>{_val(eb.get("gradient_magnitude"), ".2f")}</td></tr>
+  <tr><td>Edge contrast ratio{ecr_warn}</td><td class="{eca}">{_val(ea.get("edge_contrast_ratio"))}</td><td class="{ecb}">{_val(eb.get("edge_contrast_ratio"))}</td></tr>
+  <tr><td>Gradient magnitude</td><td class="{gma}">{_val(ea.get("gradient_magnitude"), ".2e")}</td><td class="{gmb}">{_val(eb.get("gradient_magnitude"), ".2e")}</td></tr>
 </table>
 
 {edge_figures_html}
@@ -4110,11 +4184,13 @@ power through their profiles, halos, and diffraction spikes.</p>"""
            'bandwidths; mean subtraction and windowing suppress DC leakage from the image edges. '
            'Residual power at the lowest frequencies reflects genuine large-scale nebula structure '
            'rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px) '
-           'measures fine detail content relative to coarse structure.<br>'
+           'measures mid/high-frequency energy relative to coarse structure; that energy can include '
+           'real detail, residual noise, registration texture, and star-removal artifacts.<br>'
            '<strong>Note:</strong> This comparison is only meaningful when both images cover '
            'the same target region. The ratio curve below expresses this directly in decibels '
            '(10·log10(P<sub>A</sub> / P<sub>B</sub>)): positive values mean Image A has more '
-           'power (finer detail) at that frequency, negative values mean Image B does.',
+           'mean-normalised power at that frequency, negative values mean Image B does. Read this '
+           'alongside the noise-corrected spatial-detail metrics before calling the difference real detail.',
            title="About the power spectrum")}
 
 <table>
@@ -4124,15 +4200,19 @@ power through their profiles, halos, and diffraction spikes.</p>"""
 
 {img_overlay}
 <p class="caption">Radial power spectra overlaid (log scale). Solid curves = starless; dashed curves = with stars (when starless images were provided). Curves that diverge at
-high frequencies indicate one filter preserves more fine-scale spatial detail. The
+high frequencies indicate a difference in mid/high-frequency energy, which may be real detail or residual noise/artifact power. The
 dashed vertical line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
 
 {img_ratio}
-<p class="caption">Ratio of radial power spectra in decibels. Solid = starless-pair
+<p class="caption">Ratio of radial power spectra in decibels. Values greater than 0 indicate 
+that Image A has more mean-normalised power at that frequency, negative values mean Image B does.
+Solid = starless-pair
 ratio; dashed = with-stars-pair ratio (only when both images used a starless primary
 input). Shown only where both images' frequency bins are exactly aligned bin-for-bin —
 always true when an analysis ROI is set, true in auto-ROI mode only when both images'
-analysed regions share the same pixel dimensions. If only one pair aligns, only that
+analysed regions share the same pixel dimensions. FFT power is not noise-corrected, so
+small positive or negative offsets should be interpreted as spectral-energy differences,
+not by themselves as proof of better preserved structure. If only one pair aligns, only that
 curve is shown.</p>
 
 <div style="display:flex;gap:10px;">
@@ -4209,9 +4289,10 @@ curve is shown.</p>
         nc_methodology_box = _info_box(
             'Each detail map above additionally yields a <strong>noise-corrected local '
             'contrast score</strong> at every scale: score = median(|detail|) over the '
-            'region BOTH images classify as nebula (intersection of each image\'s own '
-            'nebula mask), divided by median(|detail|) over that image\'s OWN background '
-            'region (its empirical per-scale noise floor). <strong>Ratio A/B</strong> '
+            'shared nebula region (the union of each image\'s own nebula mask, so marginal '
+            'nebula signal in either image still counts as signal), divided by median(|detail|) '
+            'over that image\'s OWN background region (its empirical per-scale noise floor, '
+            'using only pixels both images classify as background). <strong>Ratio A/B</strong> '
             'divides Image A\'s score by Image B\'s score at each scale — greater than 1 '
             'means Image A shows relatively stronger detail than Image B at that scale, '
             'after accounting for each image\'s own noise level. Scale units differ by '
@@ -4635,7 +4716,9 @@ background populations behind each score are not pixel-paired between A and B.</
 {_hires_img_tag(figs.get("localmax_ratio_overview"), "Local-maxima ratio overview")}
 <p class="caption">Local-maxima masked log&#8321;&#8320;(A/B) for every metric plotted
 against its approximate spatial scale (same scale convention as 8i). Compare within a
-method's own line, not numerically across methods. Error bars show &plusmn;1 standard
+method's own line, not numerically across methods. Values greater than 0 indicate that 
+Image A's pixel magnitudes are larger than Image B's, and values less than 0 indicate the opposite. 
+Error bars show &plusmn;1 standard
 deviation of the per-pixel log10(A/B) population within each scale's own mask, plotted
 directly with no unit conversion — an exact spread measure, since the masked pixels are
 genuinely paired between Image A and Image B at each scale.</p>
@@ -5033,7 +5116,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         def row(metric, val_a, val_b, fmt=".3f",
                 higher_is_better=True, bw_flag="✓"):
             ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
-            label = f'{metric} <span class="metric-label-ok">{bw_flag}</span>'
+            flag_class = "metric-label-warn" if bw_flag == "⚠" else "metric-label-ok"
+            label = f'{metric} <span class="{flag_class}">{bw_flag}</span>'
             return (f"<tr><td>{label}</td>"
                     f"<td class='{ca}'>{_val(val_a, fmt)}</td>"
                     f"<td class='{cb}'>{_val(val_b, fmt)}</td></tr>")
@@ -5060,7 +5144,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         def row_pm(metric, val_a, val_b, spread_a, spread_b, fmt=".3f",
                    higher_is_better=True, bw_flag="✓"):
             ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
-            label = f'{metric} <span class="metric-label-ok">{bw_flag}</span>'
+            flag_class = "metric-label-warn" if bw_flag == "⚠" else "metric-label-ok"
+            label = f'{metric} <span class="{flag_class}">{bw_flag}</span>'
             return (f"<tr><td>{label}</td>"
                     f"<td class='{ca}'>{_val_pm(val_a, spread_a, fmt)}</td>"
                     f"<td class='{cb}'>{_val_pm(val_b, spread_b, fmt)}</td></tr>")
@@ -5088,8 +5173,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                    psf_a.get("fwhm_arcsec_mad"), psf_b.get("fwhm_arcsec_mad"),
                    higher_is_better=False),
             row_pm("Moffat β", psf_a.get("beta"), psf_b.get("beta"),
-                   psf_a.get("beta_mad"), psf_b.get("beta_mad"),
-                   higher_is_better=False),
+                   psf_a.get("beta_mad"), psf_b.get("beta_mad")),
             row_pm("Ellipticity", psf_a.get("ellipticity"), psf_b.get("ellipticity"),
                    psf_a.get("ellipticity_mad"), psf_b.get("ellipticity_mad"),
                    higher_is_better=False),

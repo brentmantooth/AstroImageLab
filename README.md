@@ -1,6 +1,6 @@
 # Astro Image Lab
 
-A Python desktop application for characterizing narrowband astrophotography filters through quantitative image analysis. Load two calibrated images taken through different filters and generate a detailed comparison report covering PSF quality, halo artifacts, ghost images, edge sharpness, spatial frequency content, multi-scale detail preservation, and signal-to-noise ratio.
+A Python desktop application for characterizing narrowband astrophotography filters through quantitative image analysis. Load one or two calibrated images taken through different filters and generate a detailed comparison report covering PSF quality, halo artifacts, edge sharpness, spatial frequency content, multi-scale detail preservation, and signal-to-noise ratio. Includes built-in tools for generating synthetic test images, calibration targets, and interactive per-star halo inspection.
 
 ---
 
@@ -10,12 +10,9 @@ A Python desktop application for characterizing narrowband astrophotography filt
 |--------|-------------|----------------------|
 | **PSF / MTF** | Moffat profile fitting, empirical PSF, MTF curve and MTF50 | ✓ Yes |
 | **Halo analysis** | Two-component radial profile fit; halo-to-core ratio | ✓ Yes |
-| **Ghost detection** | Secondary reflection search around bright stars | ✓ Yes |
 | **Edge analysis (LSF)** | Edge Spread Function, 10–90% edge width, Line Spread Function | ✓ Yes (width) / ⚠ (contrast ratio) |
 | **Power spectrum** | Signal-normalised 2D FFT, mid/high spatial frequency ratio | ✓ Normalised |
-| **Local std maps** | Local standard deviation at 3 kernel scales; contrast ratio metric | ✓ Normalised |
-| **Laplacian of Gaussian** | Edge/detail enhancement at 3 spatial scales | ✓ Normalised |
-| **Wavelet decomposition** | 4-level Daubechies-4 decomposition; per-level SNR; detail images | ✓ Normalised |
+| **Spatial detail** | Local σ, Laplacian of Gaussian, wavelet, gradient magnitude, and local entropy maps across multiple scales; log-ratio and noise-corrected cross-method comparison; scale-adaptive local-maxima masked metrics | ✓ Normalised |
 | **Signal / Noise (SNR)** | Global sky-σ SNR, median star SNR ± IQR, per-pixel SNR map, pixel percentile table | ✓ Yes |
 
 All analysis runs on linear (unstretched) calibrated image data. Images with different filter bandwidths are handled correctly — metrics are clearly labelled as bandwidth-independent or bandwidth-sensitive, and a warning banner appears in the report when bandwidths differ.
@@ -70,14 +67,13 @@ This creates a conda environment named `astrolab` with all required packages. **
 
 ### Manual installation
 
-Install the scientific stack via conda-forge, then add PyQt6 and XISF support via pip:
+Install the whole scientific stack via pip into an existing conda environment (not conda-forge — see the note below):
 
 ```bash
-conda install -c conda-forge numpy scipy matplotlib astropy photutils bottleneck pywavelets astroalign pillow lz4 zstandard
-pip install pyqt6 xisf
+pip install numpy scipy seaborn matplotlib astropy photutils bottleneck pywavelets astroalign pillow lz4 zstandard pyqt6 xisf
 ```
 
-> **Important:** Install PyQt6 via `pip`, not `conda install pyqt6`. The conda-forge PyQt6 package uses a different DLL layout that conflicts with PyInstaller's hook discovery and with the pip-installed Qt runtime. Using pip for PyQt6 avoids this conflict.
+> **Important:** Install the entire stack — including PyQt6 — via `pip`, not `conda install`. The conda-forge builds of PyQt6 and several scientific packages pull in a `qt6-main` package with a DLL layout that conflicts with PyInstaller's hook discovery and with the pip-installed Qt runtime. `environment.yml` installs everything via pip specifically to avoid this.
 
 ---
 
@@ -92,8 +88,7 @@ conda env create -f environment.yml
 conda activate astrolab
 
 # Option B — manual install into an existing environment
-conda install -c conda-forge numpy scipy matplotlib astropy photutils bottleneck pywavelets astroalign pillow lz4 zstandard
-pip install pyqt6 xisf
+pip install numpy scipy seaborn matplotlib astropy photutils bottleneck pywavelets astroalign pillow lz4 zstandard pyqt6 xisf
 ```
 
 ---
@@ -107,10 +102,10 @@ python AstroImageLab.py
 
 ### Image Preparation
 
-**Required — two images of the same sky region:**
-- Image A and Image B must cover the same field of view, captured through different filters (or different filter configurations you want to compare).
+**Required — one or two images of the same sky region:**
+- Image A is required; Image B is optional — loading only Image A runs the app in single-image analysis mode (per-image metrics still run, but comparison tables and A/B differential metrics are unavailable). When both are loaded, Image A and Image B must cover the same field of view, captured through different filters (or different filter configurations you want to compare).
 - Images should be **calibrated and stacked** (bias/dark/flat corrected) but **not stretched**. Linear data is required for valid metric calculations.
-- Supported formats: `.fits`, `.fit`, `.fts`, `.xisf`.
+- Supported formats: `.fits`, `.fit`, `.fts`, `.xisf`, `.tiff`, `.tif`.
 
 **Suggested — starless versions of each image:**
 - Creating starless counterparts (using tools such as [Star XTerminator](https://www.rc-astro.com/resources/StarXTerminator/), [StarNet++](https://www.starnetastro.com/), or equivalent) and loading them alongside the original images significantly improves edge, power spectrum, and spatial detail analysis by removing the PSF contribution of stars from nebula regions.
@@ -134,26 +129,27 @@ python AstroImageLab.py
 4. **Draw a cross-section line** *(recommended)* — Click **Select Line…** and drag a line across a region of interest. The line appears overlaid on both images. This drives cross-section profile analysis in the report.
 5. **Select ROI** *(optional)* — Click **Select ROI…** and draw a rectangle to target a specific nebula region for edge and power spectrum analysis. If no ROI is selected, the app auto-detects the strongest edge and a star-free region automatically.
 6. **Select metrics** — Check or uncheck the metrics you want to run in the control panel. Each metric can also have its figures exported as standalone PNG files using the corresponding export checkbox.
-7. **Set output directory and format** — Browse to where the report should be saved. Choose HTML (default) or PDF from the format selector. PDF requires WeasyPrint or xhtml2pdf (see Requirements).
-8. **Run** — Click **Run Analysis**. Images are aligned automatically using `astroalign` before per-pixel comparisons. A progress bar and elapsed timer are shown during analysis.
-9. **Review report** — The HTML report opens automatically in your default browser when analysis completes.
+7. **Set output directory** — Browse to where the self-contained HTML report should be saved.
+8. **Run** — Click **Run Analysis**. Images are aligned automatically using `astroalign` before per-pixel comparisons. A progress bar and per-metric timer are shown during analysis.
+9. **Review report** — The HTML report and an interactive Report Inspector window both open automatically when analysis completes.
+
+The **Tools** menu also has three standalone utilities not part of this linear workflow: a Synthetic Data Generator and a Spatial Target Generator for producing test images, and an interactive Halo Analyzer for click-a-star PSF/halo inspection. See [QuickStart.md](QuickStart.md#additional-tools) for details.
 
 ---
 
 ## Output Report
 
-The report is saved to your chosen output directory as a self-contained HTML file (all plots embedded as base64 PNG) or as a PDF if a renderer is installed. HTML is the default and requires no additional packages. It contains ten sections:
+The report is saved to your chosen output directory as a single self-contained HTML file (all plots embedded as base64 PNG). HTML is the only output format and requires no additional packages. It contains nine sections:
 
 1. **Image metadata** — Side-by-side header info for both filters; bandwidth warning banner if bandwidths differ
 2. **Observation context** — Seeing warning if FWHM > 3″; notes on valid comparison conditions
-3. **PSF / MTF** — FWHM, Moffat β, ellipticity, MTF50, MTF at Nyquist; overlaid MTF curves; ePSF images
-4. **Halo analysis** — Halo-to-core ratio, halo radius; side-by-side semi-log radial profiles
-5. **Ghost detection** — Candidate table (separation, intensity ratio, classification); annotated image
+3. **Signal / Noise (SNR)** — Global sky-σ SNR, median star SNR ± IQR, per-pixel SNR map (side-by-side, plasma colourmap), and a pixel percentile table showing what fraction of the field exceeds 3σ / 5σ / 10σ / 20σ
+4. **PSF / MTF** — FWHM, Moffat β, ellipticity, MTF50, MTF at Nyquist; overlaid MTF curves; ePSF images; field aberration scoring (coma, collimation, field curvature)
+5. **Halo analysis** — Halo-to-core ratio, halo radius; side-by-side semi-log radial profiles
 6. **Edge analysis** — 10–90% edge width in pixels and arcseconds; ESF and LSF plots; edge contrast ratio (flagged ⚠ if bandwidths differ); cross-section profile overlay if a line was drawn
-7. **Power spectrum** — Signal-normalised 2D power spectrum; radial power comparison; mid/high ratio
-8. **Spatial detail** — Local σ maps (3 scales), |LoG| maps (3 scales), wavelet detail images and SNR bar chart; cross-section profile overlays if a line was drawn
-9. **Signal / Noise (SNR)** — Global sky-σ SNR, median star SNR ± IQR, per-pixel SNR map (side-by-side, plasma colourmap), and a pixel percentile table showing what fraction of the field exceeds 3σ / 5σ / 10σ / 20σ
-10. **Summary table** — All scalar metrics side by side; better value highlighted green, worse value highlighted red
+7. **Power spectrum** — Signal-normalised 2D power spectrum; radial power comparison; mid/high ratio and dB ratio curve
+8. **Spatial detail** — Local σ, Laplacian of Gaussian, wavelet, gradient magnitude, and local entropy maps at multiple scales; log-ratio comparison and correlation scatter plots per family; noise-corrected cross-method overview; scale-adaptive local-maxima masked metrics; cross-section profile overlays if a line was drawn
+9. **Summary table** — All scalar metrics side by side; better value highlighted green, worse value highlighted red
 
 ---
 
@@ -163,6 +159,7 @@ The report is saved to your chosen output directory as a self-contained HTML fil
 |--------|-----------|-------|
 | FITS | `.fits` `.fit` `.fts` | Standard calibrated output from all major acquisition software |
 | XISF | `.xisf` | PixInsight native format; requires `pip install xisf` |
+| TIFF | `.tiff` `.tif` | 16-/32-bit calibrated TIFF stacks |
 
 ---
 
@@ -172,7 +169,7 @@ This tool is designed for **on-sky images**, not optical bench tests. Several im
 
 - **Seeing is the dominant PSF contribution** on most nights. PSF/MTF comparisons between filters are most meaningful when both images were captured on the same night under similar atmospheric conditions.
 - The app flags `seeing_dominated = True` and adds a warning in the report when FWHM exceeds 3″.
-- **Halo, ghost, edge width, and spatial detail metrics** are less sensitive to seeing and are more reliably attributable to filter differences.
+- **Halo, edge width, and spatial detail metrics** are less sensitive to seeing and are more reliably attributable to filter differences.
 - **Astroalign** is used to register Image A onto the coordinate frame of Image B before any per-pixel comparison metrics are computed.
 
 ---
@@ -183,9 +180,9 @@ Filters with different bandwidths (e.g., 3 nm vs 7 nm) produce different absolut
 
 **Bandwidth-independent metrics** (ratio or normalised — valid as-is):
 - PSF FWHM and MTF (normalised PSF shape)
-- Halo-to-core ratio and ghost-to-parent ratio
+- Halo-to-core ratio
 - Edge 10–90% width (normalised ESF)
-- Local std contrast ratio, LoG maps, wavelet SNR (all mean-signal normalised)
+- Spatial detail log-ratio maps and local-maxima masked metrics (all mean-signal normalised)
 - Power spectrum mid/high ratio (mean-signal normalised before FFT)
 - SNR metrics (all expressed as signal / noise ratios, independent of absolute flux)
 
@@ -198,28 +195,43 @@ When filter bandwidths differ, a banner appears at the top of the report, and ea
 
 ## Project Structure
 
-```
-AstroImageLab.py            # Entry point
-environment.yml             # Conda environment specification
+```text
+AstroImageLab.py             # Entry point
+environment.yml              # Conda environment specification
 core/
-  models.py                 # Constants, AnalysisResult dataclass
-  astro_image.py            # FITS/XISF loading, background estimation, statistical stretch
+  models.py                  # Constants, AnalysisResult dataclass
+  astro_image.py              # FITS/XISF/TIFF loading, background estimation
+  fig_utils.py                # fig_to_b64(), finalize_layout() — thread-safe figure rendering
+  stretch.py                  # STF stretch + normalize_for_display()
+  stats_utils.py              # mannwhitney_effect() — shared significance testing
+  update_checker.py           # GitHub-release update check
 analysis/
-  star_catalog.py           # DAOStarFinder + isolation filtering
-  psf_analyzer.py           # Moffat fitting, ePSF builder, MTF via FFT
-  halo_analyzer.py          # Radial profile extraction, two-component Moffat fit
-  ghost_detector.py         # Secondary source search in annular regions
-  edge_analyzer.py          # Sobel edge detection, ESF/LSF extraction
-  power_spectrum.py         # Signal-normalised 2D FFT and radial average
-  image_filters.py          # Local std maps, LoG maps, wavelet decomposition
-  snr_analyzer.py           # Global SNR, per-star SNR, local SNR map, percentile table
+  star_catalog.py             # DAOStarFinder + isolation filtering
+  psf_analyzer.py              # Moffat fitting, ePSF builder, MTF via FFT
+  moffat_fit.py                # Shared Moffat-fitting helpers
+  halo_analyzer.py             # Radial profile extraction, two-component Moffat fit
+  edge_analyzer.py             # Sobel edge detection, ESF/LSF extraction
+  power_spectrum.py            # Signal-normalised 2D FFT and radial average
+  image_filters.py             # Local σ, LoG, wavelet, gradient, entropy, local-maxima
+  snr_analyzer.py               # Global SNR, per-star SNR, local SNR map, percentile table
 report/
-  report_builder.py         # Self-contained HTML report generator
+  report_builder.py            # Self-contained HTML report generator
 gui/
-  image_panel.py            # PyQt6 image display with ROI rubber-band and line selection
-  control_panel.py          # Metric checkboxes, parameters, output directory
-  analysis_thread.py        # QThread orchestrator; runs all engines off the main thread
-  main_window.py            # QMainWindow; assembles panels, menu, signal wiring
+  image_panel.py                # PyQt6 image display with ROI rubber-band and line selection
+  control_panel.py              # Metric checkboxes, parameters, output directory
+  analysis_thread.py            # QThread orchestrator; runs all engines off the main thread
+  main_window.py                # QMainWindow; assembles panels, toolbar, menu, signal wiring
+  report_inspector.py           # Interactive side-by-side figure viewer
+  synthetic_dialog.py           # Synthetic Data Generator dialog
+  spatial_target_dialog.py      # Spatial Target Generator dialog
+  halo_dialog.py                 # Halo Analyzer interactive tool
+synthetic/
+  cameras.py                     # Camera database (24 models)
+  generator.py                   # Synthetic star-field image generation engine
+  target_generator.py            # Spatial calibration target generation engine
+tools/
+  generate_icon.py                # Regenerates resources/icon.ico
+  generate_screenshots.py         # Regenerates resources/*.png doc screenshots
 ```
 
 ---
@@ -237,8 +249,6 @@ gui/
 | [xisf](https://pypi.org/project/xisf/) | PixInsight XISF format support |
 | [PyQt6](https://riverbankcomputing.com/software/pyqt/) | GUI framework |
 | [matplotlib](https://matplotlib.org/) | All plots and figures |
-| [WeasyPrint](https://weasyprint.org/) *(optional)* | High-fidelity HTML→PDF rendering |
-| [xhtml2pdf](https://xhtml2pdf.readthedocs.io/) *(optional)* | Pure-Python HTML→PDF fallback |
 
 Wavelet noise estimation uses the robust MAD estimator from Donoho & Johnstone (1994).
 SNR background estimation uses photutils `Background2D` with `MADStdBackgroundRMS`.
