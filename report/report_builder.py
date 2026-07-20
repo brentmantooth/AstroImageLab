@@ -1159,9 +1159,14 @@ class ReportBuilder:
             _add("epsf_b", np.log1p(eb - eb.min()).astype(np.float32))
             ref_fwhm = _ref_fwhm_px(pa, pb, self._ref_seeing_arcsec)
             if ref_fwhm is not None:
-                # Match the measured ePSF size so cross-sections sample the same pixel grid
+                # Match the measured ePSF's oversampled grid so cross-sections sample the
+                # same pixel scale. ref_fwhm is in native-pixel units (from _ref_fwhm_px),
+                # but epsf_size is the oversampled array size — scale the FWHM by the
+                # oversampling factor before building the kernel, or it renders artificially
+                # narrow relative to the measured (oversampled) ePSF images beside it.
+                oversampling = pa.get("epsf_oversampling") or pb.get("epsf_oversampling") or 1
                 epsf_size = int(ea.shape[0])
-                kern_ref = _make_moffat_kernel(ref_fwhm, size=epsf_size)
+                kern_ref = _make_moffat_kernel(ref_fwhm * oversampling, size=epsf_size)
                 kr = np.log1p(kern_ref - kern_ref.min()).astype(np.float32)
                 _add("epsf_ref", kr)
             epsf_opts: dict[str, str] = {"Image A": "epsf_a", "Image B": "epsf_b"}
