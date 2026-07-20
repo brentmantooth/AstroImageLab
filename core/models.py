@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     import matplotlib.figure
 
 
-APP_VERSION = "0.0.9"       # semver string; bump on each GitHub release tag
+APP_VERSION = "0.0.10"       # semver string; bump on each GitHub release tag
 
 # === CONSTANTS ===
 
