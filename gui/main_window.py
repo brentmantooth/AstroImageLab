@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -122,6 +122,11 @@ class MainWindow(QMainWindow):
         act_halo = QAction("&Halo Analyzer…", self)
         act_halo.triggered.connect(self._open_halo_dialog)
         tools_menu.addAction(act_halo)
+
+        tools_menu.addSeparator()
+        act_extract = QAction("&Extract Images from HTML…", self)
+        act_extract.triggered.connect(self._extract_images_from_html)
+        tools_menu.addAction(act_extract)
 
         help_menu = mb.addMenu("&Help")
         act_quickstart = QAction("&Quick Start Guide", self)
@@ -448,6 +453,39 @@ class MainWindow(QMainWindow):
             return
         self._inspector = ReportInspector(npz_path, parent=self)
         self._inspector.show()
+
+    def _extract_images_from_html(self) -> None:
+        from pathlib import Path as _Path
+        from tools.extract_images import extract_images
+
+        settings = QSettings("FilterImageComparator", "FilterImageComparator")
+        start_dir = settings.value("last_extract_html_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select HTML Report to Extract Images From",
+            start_dir,
+            "HTML files (*.html *.htm);;All files (*)",
+        )
+        if not path:
+            return
+        input_path = _Path(path)
+        settings.setValue("last_extract_html_dir", str(input_path.parent))
+
+        try:
+            output_html, image_dir, count = extract_images(input_path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Extract Images Failed",
+                f"Could not extract images from this file:\n\n{exc}",
+            )
+            return
+
+        QMessageBox.information(
+            self, "Extract Images",
+            f"Extracted {count} image(s).\n\n"
+            f"Report: {output_html.name}\n"
+            f"Images folder: {image_dir.name}",
+        )
 
     def _reset_zoom(self) -> None:
         self._panel_a._img_label.reset_zoom()
