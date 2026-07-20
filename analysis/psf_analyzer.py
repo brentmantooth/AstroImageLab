@@ -408,9 +408,13 @@ class PSFAnalyzer:
         y_idx, x_idx = np.mgrid[0:n, 0:n]
         r = np.sqrt((x_idx - cx) ** 2 + (y_idx - cy) ** 2)
 
-        # Frequency in cycles/native-pixel (account for oversampling)
+        # Frequency in cycles/native-pixel (account for oversampling). The ePSF is
+        # sampled EPSF_OVERSAMPLING x finer than native pixels, so the FFT's own
+        # Nyquist bin (r = max_r) corresponds to EPSF_OVERSAMPLING x the native-pixel
+        # Nyquist, not a fraction of it — native Nyquist (0.5 cyc/px) falls at the
+        # midpoint of the array (r = max_r / EPSF_OVERSAMPLING), not at its edge.
         max_r = n / 2.0
-        freq_max = 0.5 / EPSF_OVERSAMPLING   # Nyquist of native pixels
+        freq_max = 0.5 * EPSF_OVERSAMPLING   # true freq at r = max_r, in cycles/native-px
 
         nbins = n // 2
         freq_edges = np.linspace(0, max_r, nbins + 1)

@@ -78,6 +78,7 @@ tools/
 | `_format_significance_html(p, delta)` / `_sig_td(html, p)` | `report_builder.py` | Shared star-rating/p-value HTML cell + colored `<td>` wrapper for any Mann-Whitney significance column — used by both Section 4's PSF table and Section 8j's local-maxima table |
 | `SpatialDetailAnalyzer._ratio_series_with_errors(ratios_by_method, errors_by_method=None)` | `analysis/image_filters.py` | `{method: {scale: value}}` (+ optional matching errors) → sorted `{method: [(x_px, value, error_or_None), ...]}` point lists for a cross-method overview line plot; shared by `_plot_nc_ratio_overview` (8i) and `_plot_localmax_ratio_overview` (8j) |
 | `_nc_ratio_rows(score_a, score_b, ratio, scale_label, val_fmt=".3f", method_label=None)` | `report_builder.py` | `<tr>` rows for a noise-corrected score table (Scale \| A \| B \| Ratio A/B). Pass `method_label` to prepend a Method-name `<td>` when consolidating several per-family tables that share this schema into one combined table — precedent: Section 8j's cross-method NC table, which concatenates the row-strings from all five `_nc_ratio_rows` calls (LoG/Wavelet/Gradient/Std/Entropy) into a single `<table>` |
+| `_better_worse_class(val_a, val_b, higher_is_better=True)` | `report_builder.py` | Returns a `("better", "worse")` (or reversed) CSS class-name pair for a comparison table's `<td class="...">` — direction is per-metric via `higher_is_better`, not global. Used across Section 4's PSF table, Section 6's edge table, Section 7's power-spectrum table, and Section 10's summary table; reuse this rather than hand-rolling a new green/red comparison whenever a table gains an A-vs-B metric column |
 
 ---
 
@@ -137,6 +138,15 @@ Use significant-figure formats for any value that can span orders of magnitude:
 | Electron sky values | `.3g` |
 | Dimensionless ratios (noise factor) | `.3f` |
 | Percentages | `.4f` |
+
+**Use literal `e` format (`.2e`/`.3e`), not `.Ng`, when scientific notation is
+specifically required.** `.Ng` only switches to exponential form when the value's
+exponent falls outside roughly `[-4, N)` — `0.0034` under `.3g` prints as plain
+`0.0034`, not scientific notation. For a column that must always render in
+`d.dde±dd` form regardless of magnitude (e.g. Section 6's Gradient magnitude,
+typically sub-0.01 ADU-scale Sobel gradients), use `.2e` directly rather than
+reaching for this codebase's usual `.Ng` significant-figure convention — the two
+solve different problems (never-collapses-to-zero vs. always-scientific).
 
 ### Long f-string HTML blocks
 
@@ -285,6 +295,22 @@ When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_rati
   values — same tool as the existing display-clipping precedent
   (`_plot_side_by_side`'s `np.percentile(arr, 0.5)`), applied to the epsilon floor
   instead of just the color scale.
+- **Resample onto a common grid instead of requiring exact bin alignment when the
+  domain is fixed by a shared constant, even if bin count varies per-image.** The
+  "guard bin alignment, return `None`" rule above is correct when two frequency axes
+  come from independently-sized data with no guaranteed relationship (Section 7's
+  power-spectrum ROI). It's the wrong tool when the axis *domain* is fixed by a
+  global constant even though *bin count* varies per-image — e.g. Section 4's MTF
+  ratio (`_mtf_ratio_db`/`_plot_mtf_ratio_db`), where each image's MTF bin count
+  depends on that image's own median star FWHM (`_compute_mtf`'s `nbins = n // 2`,
+  with `n` derived from `box_size`/`fwhm_estimate`) but the frequency domain is
+  always `[0, 0.5 * EPSF_OVERSAMPLING]` cycles/native-px since `EPSF_OVERSAMPLING`
+  is a fixed module constant, not per-image. Requiring exact alignment there would
+  make the ratio figure almost never render — differing FWHM between the two images
+  being compared is the point of the comparison, not an edge case. Resample both
+  curves onto a shared `np.interp`-built grid before dividing instead (precedented
+  on this exact data: `mtf_nyq = float(np.interp(0.5, freq, mtf))`,
+  `psf_analyzer.py:142`).
 
 ### Background estimation — compute once via the pre-pass, never redundantly
 
@@ -546,6 +572,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Removing a feature doesn't auto-sync README.md/QuickStart.md | Ghost detection (removed 2026-05-22) and PDF export (removed 2026-06-01) both stayed documented as live, working features in README.md and QuickStart.md for nearly two months after removal — QuickStart's own Troubleshooting section told users to `pip install weasyprint` to fix a feature that no longer existed anywhere in the codebase. Root cause: the removal commits didn't touch either doc, and nothing else prompts a check. QuickStart.md is opened directly by the app's own **Help → Quick Start Guide** menu item, so this isn't just GitHub-browsing staleness — it's live in-app UX. When removing or fundamentally changing a user-facing feature, grep README.md and QuickStart.md for it as part of the same change, not as a separate later cleanup pass. |
 | `_compute_std_map` used `generic_filter(np.std)` long after entropy was migrated off the same pattern | `SpatialDetailAnalyzer._compute_std_map` (`analysis/image_filters.py`) computed local σ via a per-pixel `generic_filter(data, np.std, size=kernel_size)` callback — the exact pattern `_compute_entropy_map`'s own docstring documents as "~10-50x slower" than a vectorized `uniform_filter` approach (entropy was migrated off it; std was not). It ran up to 6x sequentially (3 `STD_KERNEL_SIZES` × A/B) inside `_std_analysis`, one of 5 families `SpatialDetailAnalyzer.analyze()` runs concurrently via its own always-on `ThreadPoolExecutor(max_workers=5)` — the likely cause of a user report where running "Spatial Detail" alone took 10+ minutes and never completed instead of the usual ~2. (The user's own hypothesis — a serial-vs-parallel dispatch bug in `gui/analysis_thread.py` — did not hold up: see the next pitfall row.) Fixed by computing variance as `mean_sq - mean**2` from two `uniform_filter` passes (float64 accumulation to avoid cancellation error, `mode="reflect"`, cast to float32 on return), mirroring the entropy precedent exactly. When adding any new windowed per-pixel statistic, check `_compute_entropy_map`'s docstring first — `generic_filter` with a Python callable is a documented anti-pattern in this codebase, not a reasonable first draft. |
 | "Run metrics in parallel" checkbox is a no-op whenever only one metric is selected | `gui/analysis_thread.py`'s dispatch gate is `if parallel and len(tasks) > 1: self._run_parallel(...) else: self._run_serial(...)`. With a single metric checked, `len(tasks) == 1`, so this is always `False` regardless of the checkbox — both settings take the identical `_run_serial()` path, calling that one metric's closure directly with no executor at all. A slow/hung single-metric run is therefore never explained by the parallel checkbox; look inside that analyzer's own internal concurrency instead (e.g. `SpatialDetailAnalyzer`'s always-on 5-way `ThreadPoolExecutor`, unrelated to this outer setting). Separately, the background/RMS pre-pass at `gui/analysis_thread.py:115-127` ("Pre-compute background once per distinct image object") also runs unconditionally regardless of `parallel` or which metrics are selected — it cannot explain a serial-only slowdown either, though it is real, currently-unfiltered waste when a selected metric doesn't touch every image object. `control_panel.py`'s `_parallel_cb` now defaults to checked (`setChecked(True)`) — parallel mode has no known downside besides RAM, and multi-metric runs benefit from it by default. |
+| MTF frequency axis mislabeled by `EPSF_OVERSAMPLING²` | `PSFAnalyzer._compute_mtf` (`analysis/psf_analyzer.py`) builds the ePSF at `EPSF_OVERSAMPLING`× finer sampling than native pixels, so the FFT's own Nyquist bin (`r = max_r = n/2`) actually corresponds to `0.5 * EPSF_OVERSAMPLING` cycles/native-px — oversampling lets you resolve frequencies *beyond* the native Nyquist, so native Nyquist (0.5 cyc/px) sits at the *midpoint* of the array, not its edge. The code instead set `freq_max = 0.5 / EPSF_OVERSAMPLING` (dividing, not multiplying), compressing the whole axis by `EPSF_OVERSAMPLING²` (4× at the default oversampling=2): the Section 4 MTF plot silently stalled at 0.25 cyc/px instead of reaching 0.5, `mtf50_cycles_per_px` was under-reported by ~4×, and `mtf_nyquist = np.interp(0.5, freq, mtf)` (`psf_analyzer.py:142`) clamped to the array's stale edge instead of interpolating at true Nyquist, since `freq` never actually reached 0.5. The bug passed every existing test because `_compute_mtf`'s output stayed monotonic and bounded [0,1] — it just meant something different than its own axis label claimed. Confirmed and fixed by feeding a synthetic ePSF containing a pure cosine at a *known* frequency through the real function: the peak was mislabeled ~0.10 cyc/px for a true 0.4 cyc/px signal before the fix, ~0.41 after. Fixed with `freq_max = 0.5 * EPSF_OVERSAMPLING`. When adding any new oversampled-grid frequency axis, verify calibration with a known-frequency synthetic test signal rather than trusting the scaling formula by inspection. |
 
 ---
 
