@@ -4179,11 +4179,13 @@ power through their profiles, halos, and diffraction spikes.</p>"""
            'bandwidths; mean subtraction and windowing suppress DC leakage from the image edges. '
            'Residual power at the lowest frequencies reflects genuine large-scale nebula structure '
            'rather than a DC artifact. The mid/high-frequency ratio (0.1–0.5 cyc/px vs 0–0.1 cyc/px) '
-           'measures fine detail content relative to coarse structure.<br>'
+           'measures mid/high-frequency energy relative to coarse structure; that energy can include '
+           'real detail, residual noise, registration texture, and star-removal artifacts.<br>'
            '<strong>Note:</strong> This comparison is only meaningful when both images cover '
            'the same target region. The ratio curve below expresses this directly in decibels '
            '(10·log10(P<sub>A</sub> / P<sub>B</sub>)): positive values mean Image A has more '
-           'power (finer detail) at that frequency, negative values mean Image B does.',
+           'mean-normalised power at that frequency, negative values mean Image B does. Read this '
+           'alongside the noise-corrected spatial-detail metrics before calling the difference real detail.',
            title="About the power spectrum")}
 
 <table>
@@ -4193,17 +4195,19 @@ power through their profiles, halos, and diffraction spikes.</p>"""
 
 {img_overlay}
 <p class="caption">Radial power spectra overlaid (log scale). Solid curves = starless; dashed curves = with stars (when starless images were provided). Curves that diverge at
-high frequencies indicate one filter preserves more fine-scale spatial detail. The
+high frequencies indicate a difference in mid/high-frequency energy, which may be real detail or residual noise/artifact power. The
 dashed vertical line marks the boundary between low (coarse structure) and mid/high frequencies.</p>
 
 {img_ratio}
 <p class="caption">Ratio of radial power spectra in decibels. Values greater than 0 indicate 
-that Image A has more power (finer detail) at that frequency, negative values mean Image B does.
+that Image A has more mean-normalised power at that frequency, negative values mean Image B does.
 Solid = starless-pair
 ratio; dashed = with-stars-pair ratio (only when both images used a starless primary
 input). Shown only where both images' frequency bins are exactly aligned bin-for-bin —
 always true when an analysis ROI is set, true in auto-ROI mode only when both images'
-analysed regions share the same pixel dimensions. If only one pair aligns, only that
+analysed regions share the same pixel dimensions. FFT power is not noise-corrected, so
+small positive or negative offsets should be interpreted as spectral-energy differences,
+not by themselves as proof of better preserved structure. If only one pair aligns, only that
 curve is shown.</p>
 
 <div style="display:flex;gap:10px;">
@@ -4280,9 +4284,10 @@ curve is shown.</p>
         nc_methodology_box = _info_box(
             'Each detail map above additionally yields a <strong>noise-corrected local '
             'contrast score</strong> at every scale: score = median(|detail|) over the '
-            'region BOTH images classify as nebula (intersection of each image\'s own '
-            'nebula mask), divided by median(|detail|) over that image\'s OWN background '
-            'region (its empirical per-scale noise floor). <strong>Ratio A/B</strong> '
+            'shared nebula region (the union of each image\'s own nebula mask, so marginal '
+            'nebula signal in either image still counts as signal), divided by median(|detail|) '
+            'over that image\'s OWN background region (its empirical per-scale noise floor, '
+            'using only pixels both images classify as background). <strong>Ratio A/B</strong> '
             'divides Image A\'s score by Image B\'s score at each scale — greater than 1 '
             'means Image A shows relatively stronger detail than Image B at that scale, '
             'after accounting for each image\'s own noise level. Scale units differ by '
@@ -5106,7 +5111,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         def row(metric, val_a, val_b, fmt=".3f",
                 higher_is_better=True, bw_flag="✓"):
             ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
-            label = f'{metric} <span class="metric-label-ok">{bw_flag}</span>'
+            flag_class = "metric-label-warn" if bw_flag == "⚠" else "metric-label-ok"
+            label = f'{metric} <span class="{flag_class}">{bw_flag}</span>'
             return (f"<tr><td>{label}</td>"
                     f"<td class='{ca}'>{_val(val_a, fmt)}</td>"
                     f"<td class='{cb}'>{_val(val_b, fmt)}</td></tr>")
@@ -5133,7 +5139,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         def row_pm(metric, val_a, val_b, spread_a, spread_b, fmt=".3f",
                    higher_is_better=True, bw_flag="✓"):
             ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
-            label = f'{metric} <span class="metric-label-ok">{bw_flag}</span>'
+            flag_class = "metric-label-warn" if bw_flag == "⚠" else "metric-label-ok"
+            label = f'{metric} <span class="{flag_class}">{bw_flag}</span>'
             return (f"<tr><td>{label}</td>"
                     f"<td class='{ca}'>{_val_pm(val_a, spread_a, fmt)}</td>"
                     f"<td class='{cb}'>{_val_pm(val_b, spread_b, fmt)}</td></tr>")
@@ -5161,8 +5168,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                    psf_a.get("fwhm_arcsec_mad"), psf_b.get("fwhm_arcsec_mad"),
                    higher_is_better=False),
             row_pm("Moffat β", psf_a.get("beta"), psf_b.get("beta"),
-                   psf_a.get("beta_mad"), psf_b.get("beta_mad"),
-                   higher_is_better=False),
+                   psf_a.get("beta_mad"), psf_b.get("beta_mad")),
             row_pm("Ellipticity", psf_a.get("ellipticity"), psf_b.get("ellipticity"),
                    psf_a.get("ellipticity_mad"), psf_b.get("ellipticity_mad"),
                    higher_is_better=False),
