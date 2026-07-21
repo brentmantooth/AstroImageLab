@@ -1237,7 +1237,7 @@ class TestSectionSpatialReportOrder:
         "Show Local entropy maps & figures",
         "Show Local Gradient Energy maps & figures",
         "Show Local Laplacian Variance maps & figures",
-        "Show all local-maxima distributions (A/B magnitude & log ratio)",
+        "Show all Metric Distributions (A/B magnitude & log ratio)",
     ])
     def test_family_images_are_collapsed_by_default(self, section_html, title):
         # Each metric family's map/correlation/noise-normalised figures (8d-8j),

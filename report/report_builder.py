@@ -4447,8 +4447,8 @@ curve is shown.</p>
         )
         localmax_dist_box = (
             _info_box(_all_family_dist_html,
-                      title="Show all local-maxima distributions (A/B magnitude & log ratio)",
-                      open=False)
+                      title="Show all Metric Distributions (A/B magnitude & log ratio)",
+                      open=True)
             if _all_family_dist_html else ""
         )
 
@@ -4865,8 +4865,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 '<p>The families above (8d&ndash;8l) reduce every detail map to a '
                 '<strong>median</strong> nebula&divide;background <strong>ratio</strong> &mdash; '
                 'deliberately bandwidth-normalised so two <em>different</em> filters can be '
-                'compared fairly. That same design makes them nearly blind to '
-                '<strong>deconvolution / AI sharpening of the same image</strong>: the median is a '
+                'compared fairly. The median is a '
                 'central-tendency statistic dominated by the millions of low-gradient interior '
                 'pixels, so it barely moves when sharpening steepens the relatively few strong '
                 'edges (the <em>tail</em> of the gradient distribution); and a nebula&divide;'
