@@ -4448,7 +4448,7 @@ curve is shown.</p>
         localmax_dist_box = (
             _info_box(_all_family_dist_html,
                       title="Show all Metric Distributions (A/B magnitude & log ratio)",
-                      open=True)
+                      open=False)
             if _all_family_dist_html else ""
         )
 
