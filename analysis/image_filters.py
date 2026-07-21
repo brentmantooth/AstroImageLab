@@ -27,7 +27,8 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                          SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
                          SECTION8_LOCALMAX_DIST_MAX_SAMPLES, SECTION8_LOCALMAX_TOP_PERCENT,
-                         SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE)
+                         SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE,
+                         SECTION8_LOCAL_ENERGY_WINDOW_MULT)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before the local-std/entropy windowed filters (performance)
 _DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
@@ -100,6 +101,17 @@ class SpatialDetailAnalyzer:
             "gm_nc_score_a": {}, "gm_nc_score_b": {},
             "gm_nc_noise_a": {}, "gm_nc_noise_b": {}, "gm_nc_ratio": {},
             "gm_nc_neb_std_a": {}, "gm_nc_neb_std_b": {}, "gm_nc_ratio_err": {},
+            "localgrad_nc_score_a": {}, "localgrad_nc_score_b": {},
+            "localgrad_nc_noise_a": {}, "localgrad_nc_noise_b": {}, "localgrad_nc_ratio": {},
+            "localgrad_nc_neb_std_a": {}, "localgrad_nc_neb_std_b": {}, "localgrad_nc_ratio_err": {},
+            "loclap_nc_score_a": {}, "loclap_nc_score_b": {},
+            "loclap_nc_noise_a": {}, "loclap_nc_noise_b": {}, "loclap_nc_ratio": {},
+            "loclap_nc_neb_std_a": {}, "loclap_nc_neb_std_b": {}, "loclap_nc_ratio_err": {},
+            # Section 8k global acutance / perceived-sharpness scalars (absolute
+            # second-moment measures over the nebula mask, not the nebula/background
+            # ratio the families above use). Empty in single-image mode.
+            "lap_var_a": {}, "lap_var_b": {}, "lap_var_ratio": {},
+            "grad_energy_a": {}, "grad_energy_b": {}, "grad_energy_ratio": {},
         }
         figures: dict = {}
 
@@ -352,10 +364,28 @@ class SpatialDetailAnalyzer:
         result["localmax"].update(ent_partial["localmax"])
         result["localmax"].update(grad_partial["localmax"])
 
+        # Section 8k global acutance scalars: Laplacian variance from the LoG family,
+        # gradient energy from the gradient family. A/B ratio reuses _compute_nc_ratios
+        # (returns {} when either side is empty, i.e. single-image mode).
+        result["lap_var_a"].update(log_partial["lap_var_a"])
+        result["lap_var_b"].update(log_partial["lap_var_b"])
+        result["grad_energy_a"].update(grad_partial["grad_energy_a"])
+        result["grad_energy_b"].update(grad_partial["grad_energy_b"])
+        result["lap_var_ratio"] = self._compute_nc_ratios(
+            result["lap_var_a"], result["lap_var_b"])
+        result["grad_energy_ratio"] = self._compute_nc_ratios(
+            result["grad_energy_a"], result["grad_energy_b"])
+
         # Merge noise-corrected scores/noise-floors and compute A/B ratios centrally.
+        # "localgrad" reads from grad_partial and "loclap" reads from log_partial --
+        # Section 8l's local gradient energy / 8m's local Laplacian variance are each
+        # computed inside their parent family's method (_gradient_analysis / _log_analysis)
+        # alongside "gm" / "log", just under a distinct key prefix so the two metrics'
+        # per-scale dicts don't collide.
         for prefix, partial in (("std", std_partial), ("log", log_partial),
                                  ("wavelet", wav_partial), ("entropy", ent_partial),
-                                 ("gm", grad_partial)):
+                                 ("gm", grad_partial), ("localgrad", grad_partial),
+                                 ("loclap", log_partial)):
             for suffix in ("nc_score_a", "nc_score_b", "nc_noise_a", "nc_noise_b",
                             "nc_neb_std_a", "nc_neb_std_b"):
                 result[f"{prefix}_{suffix}"].update(partial[f"{prefix}_{suffix}"])
@@ -371,6 +401,8 @@ class SpatialDetailAnalyzer:
                 "std": result["std_nc_ratio_err"], "log": result["log_nc_ratio_err"],
                 "wavelet": result["wavelet_nc_ratio_err"], "entropy": result["entropy_nc_ratio_err"],
                 "gradient": result["gm_nc_ratio_err"],
+                "local_grad_energy": result["localgrad_nc_ratio_err"],
+                "local_lap_variance": result["loclap_nc_ratio_err"],
             }
             nc_fig = self._plot_nc_ratio_overview({
                 "std": result["std_nc_ratio"],
@@ -378,6 +410,8 @@ class SpatialDetailAnalyzer:
                 "wavelet": result["wavelet_nc_ratio"],
                 "entropy": result["entropy_nc_ratio"],
                 "gradient": result["gm_nc_ratio"],
+                "local_grad_energy": result["localgrad_nc_ratio"],
+                "local_lap_variance": result["loclap_nc_ratio"],
             }, nc_errors_by_method)
             if nc_fig is not None:
                 figures["nc_ratio_overview"] = fig_to_b64(nc_fig, dpi=150)
@@ -388,6 +422,8 @@ class SpatialDetailAnalyzer:
                 "wavelet": wav_partial["localmax_log_ratio"],
                 "entropy": ent_partial["localmax_log_ratio"],
                 "gradient": grad_partial["localmax_log_ratio"],
+                "local_grad_energy": grad_partial["localgrad_localmax_log_ratio"],
+                "local_lap_variance": log_partial["loclap_localmax_log_ratio"],
             }
             localmax_log_ratio_errors_by_method = {
                 "std": std_partial["localmax_log_ratio_err"],
@@ -395,6 +431,8 @@ class SpatialDetailAnalyzer:
                 "wavelet": wav_partial["localmax_log_ratio_err"],
                 "entropy": ent_partial["localmax_log_ratio_err"],
                 "gradient": grad_partial["localmax_log_ratio_err"],
+                "local_grad_energy": grad_partial["localgrad_localmax_log_ratio_err"],
+                "local_lap_variance": log_partial["loclap_localmax_log_ratio_err"],
             }
             lm_ratio_fig = self._plot_localmax_ratio_overview(
                 localmax_log_ratios_by_method, localmax_log_ratio_errors_by_method)
@@ -413,6 +451,8 @@ class SpatialDetailAnalyzer:
                 ("Gradient |G|",   [(f"gradient_{s}",   float(s),       f"Gradient |G| — σ={s} px") for s in log_sigmas]),
                 ("Wavelet",        [(f"wavelet_{lvl}",  float(2 ** lvl), f"Wavelet — level {lvl}")   for lvl in (2, 3)]),
                 ("Local entropy",  [(f"entropy_{ks}px", float(ks),      f"Entropy — {ks} px")       for ks in entropy_kernel_sizes]),
+                ("Local grad. energy", [(f"localgrad_{s}", float(s),   f"Local gradient energy — σ={s} px") for s in log_sigmas]),
+                ("Local Laplacian var.", [(f"loclap_{s}", float(s),    f"Local Laplacian variance — σ={s} px") for s in log_sigmas]),
             ]
             grid_rows = []
             for family_label, entries in _grid_families:
@@ -867,6 +907,20 @@ class SpatialDetailAnalyzer:
 
         return figs_to_b64(figures, dpi=150), partial
 
+    @staticmethod
+    def _windowed_variance(data: np.ndarray, window_px: int) -> np.ndarray:
+        """Vectorized box-filter variance (mirrors _compute_entropy_map's migration
+        off generic_filter -- a per-pixel Python callback benchmarked at ~10-50x
+        slower than this uniform_filter-based approach at the same array size).
+        float64 accumulation avoids cancellation error in mean_sq - mean**2; clip
+        guards residual float noise. Shared by _compute_std_map (8g, sqrt'd for
+        std) and the Section 8m local-Laplacian-variance family (used as-is, on
+        the signed Laplacian rather than the raw image)."""
+        data64 = data.astype(np.float64)
+        mean = uniform_filter(data64, size=window_px, mode="reflect")
+        mean_sq = uniform_filter(data64 * data64, size=window_px, mode="reflect")
+        return np.clip(mean_sq - mean * mean, 0.0, None)
+
     def _compute_std_map(self, norm: np.ndarray, kernel_size: int) -> np.ndarray:
         # Downsample for performance if image is large
         factor = 1.0
@@ -878,16 +932,7 @@ class SpatialDetailAnalyzer:
             data = zoom(norm, (new_h / norm.shape[0], new_w / norm.shape[1]), order=1)
             kernel_size = max(3, int(kernel_size * factor) | 1)
 
-        # Vectorized box-filter variance (mirrors _compute_entropy_map's migration
-        # off generic_filter -- a per-pixel Python callback benchmarked at
-        # ~10-50x slower than this uniform_filter-based approach at the same
-        # array size). float64 accumulation avoids cancellation error in
-        # mean_sq - mean**2; clip guards residual float noise before sqrt.
-        data64 = data.astype(np.float64)
-        mean = uniform_filter(data64, size=kernel_size, mode="reflect")
-        mean_sq = uniform_filter(data64 * data64, size=kernel_size, mode="reflect")
-        var = np.clip(mean_sq - mean * mean, 0.0, None)
-        std_map = np.sqrt(var).astype(np.float32)
+        std_map = np.sqrt(self._windowed_variance(data, kernel_size)).astype(np.float32)
 
         if factor < 1.0:
             std_map = zoom(std_map,
@@ -937,6 +982,21 @@ class SpatialDetailAnalyzer:
             return None, None, None
         neb_std = float(np.std(neb_vals))
         return float(bn.median(neb_vals)) / noise_floor, noise_floor, neb_std
+
+    @staticmethod
+    def _masked_reduce(values: np.ndarray, mask: np.ndarray, fn) -> float | None:
+        """Apply a scalar reduction `fn` to the `values` pixels selected by boolean
+        `mask`, cropping both to their common shape first — mirrors _nc_score's crop,
+        since two-image analysis can reach here with the map and mask differing by a
+        row/column when astroalign registration fails and analysis proceeds unaligned.
+        Returns None if the mask selects zero pixels. Used by the Section 8k global
+        acutance scalars (Laplacian variance, gradient energy) over the nebula mask."""
+        h = min(values.shape[0], mask.shape[0])
+        w = min(values.shape[1], mask.shape[1])
+        sel = values[:h, :w][mask[:h, :w]]
+        if sel.size == 0:
+            return None
+        return float(fn(sel))
 
     @staticmethod
     def _log_ratio_map(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -1034,21 +1094,51 @@ class SpatialDetailAnalyzer:
                        localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                        localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                        localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
-                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
+                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
+                       local_energy_window_mult=SECTION8_LOCAL_ENERGY_WINDOW_MULT) -> tuple[dict, dict]:
+        """|LoG| detail map at Gaussian scale sigma. Also builds the Section 8m
+        "Local Variance of Laplacian" map (windowed var(signed Laplacian), prefix
+        "loclap") in the same per-sigma loop, reusing lap_a/lap_b so no extra
+        Laplacian convolution is needed. Unlike 8d's |LoG| map or 8k's single
+        whole-nebula lap_var scalar, this is a per-pixel spatial map of where
+        curvature *fluctuation* concentrates -- wired through the full standard
+        map-pair/log-ratio/correlation/noise-normalised/local-maxima pipeline like
+        every other family, with its own "loclap_localmax_log_ratio(_err)" dicts
+        (kept separate from "localmax_log_ratio(_err)" above, which are the |LoG|
+        family's own -- both are keyed by sigma, so sharing one dict would silently
+        overwrite entries between the two metrics -- see _gradient_analysis's
+        identical "localgrad" pattern for 8l)."""
         figures = {}
         partial: dict = {
             "log_nc_score_a": {}, "log_nc_score_b": {},
             "log_nc_noise_a": {}, "log_nc_noise_b": {},
             "log_nc_neb_std_a": {}, "log_nc_neb_std_b": {},
+            "lap_var_a": {}, "lap_var_b": {},   # Section 8k: variance of the signed Laplacian over the nebula mask
+            "loclap_nc_score_a": {}, "loclap_nc_score_b": {},
+            "loclap_nc_noise_a": {}, "loclap_nc_noise_b": {},
+            "loclap_nc_neb_std_a": {}, "loclap_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
             "localmax_log_ratio": {},
             "localmax_log_ratio_err": {},
+            "loclap_localmax_log_ratio": {},
+            "loclap_localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for sigma in sigmas:
-            log_a = np.abs(gaussian_laplace(norm_a, sigma=sigma))
-            log_b = np.abs(gaussian_laplace(norm_b, sigma=sigma)) if not single else None
+            # Signed Laplacian kept for the 8k variance-of-Laplacian acutance scalar;
+            # abs() taken immediately after for the existing |LoG| detail map.
+            lap_a = gaussian_laplace(norm_a, sigma=sigma)
+            lap_b = gaussian_laplace(norm_b, sigma=sigma) if not single else None
+            log_a = np.abs(lap_a)
+            log_b = np.abs(lap_b) if not single else None
+
+            # 8k: variance of the signed Laplacian over the shared nebula mask — a
+            # classic (Pech-Pacheco) focus/acutance measure. Two-image mode only
+            # (mask_neb_shared is None in single-image mode, mirroring _nc_score).
+            if mask_neb_shared is not None:
+                partial["lap_var_a"][sigma] = self._masked_reduce(lap_a, mask_neb_shared, np.var)
+                partial["lap_var_b"][sigma] = self._masked_reduce(lap_b, mask_neb_shared, np.var)
 
             noise_a = noise_b = None
             if not single:
@@ -1138,6 +1228,103 @@ class SpatialDetailAnalyzer:
                     xs_data=xs_nrm,
                     xs_line=xs_line,
                 )
+
+            # ---- Section 8m: Local Variance of Laplacian (windowed var(lap)) ----
+            # Reuses lap_a/lap_b (the signed Laplacian) computed above -- no extra
+            # convolution. Window grows with this sigma (scale-relative, like the
+            # local-maxima footprint and 8l's local gradient energy window).
+            window_px = max(3, int(round(local_energy_window_mult * sigma)))
+            lv_a = self._windowed_variance(lap_a, window_px).astype(np.float32)
+            lv_b = self._windowed_variance(lap_b, window_px).astype(np.float32) if not single else None
+
+            lv_noise_a = lv_noise_b = None
+            if not single:
+                lv_nc_a, lv_noise_a, lv_neb_std_a = self._nc_score(lv_a, mask_neb_shared, mask_bg_a)
+                partial["loclap_nc_score_a"][sigma] = lv_nc_a
+                partial["loclap_nc_noise_a"][sigma] = lv_noise_a
+                partial["loclap_nc_neb_std_a"][sigma] = lv_neb_std_a
+                lv_nc_b, lv_noise_b, lv_neb_std_b = self._nc_score(lv_b, mask_neb_shared, mask_bg_b)
+                partial["loclap_nc_score_b"][sigma] = lv_nc_b
+                partial["loclap_nc_noise_b"][sigma] = lv_noise_b
+                partial["loclap_nc_neb_std_b"][sigma] = lv_neb_std_b
+
+            lv_diff = self._log_ratio_map(lv_a, lv_b) if lv_b is not None else None
+            partial["panels"][f"loclap_{sigma}"] = {
+                "a":    lv_a,
+                "b":    lv_b,
+                "diff": lv_diff,
+            }
+            if lv_diff is not None:
+                lv_lm_entry = self._localmax_entry(
+                    lv_a, lv_b, lv_diff, sigma,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"loclap_{sigma}"] = lv_lm_entry
+                partial["loclap_localmax_log_ratio"][sigma] = lv_lm_entry["log_ratio_mean"]
+                partial["loclap_localmax_log_ratio_err"][sigma] = lv_lm_entry["log_ratio_std"]
+            if not single:
+                lv_corr_fig = self._plot_metric_correlation(
+                    lv_a, lv_b, lv_diff, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Local Laplacian variance (σ={sigma}px, window={window_px}px)", rng)
+                if lv_corr_fig is not None:
+                    figures[f"corr_loclap_{sigma}"] = lv_corr_fig
+            if not single and lv_noise_a and lv_noise_b:
+                partial["panels"][f"nrm_loclap_{sigma}"] = {
+                    "a": (lv_a / lv_noise_a).astype(np.float32),
+                    "b": (lv_b / lv_noise_b).astype(np.float32),
+                    "diff": None,
+                }
+
+            lv_xs_raw = None
+            lv_xs_line = None
+            if crosshair is not None and not single:
+                lv_pos, lv_pa = self._sample_line(lv_a, **crosshair)
+                _, lv_pb = self._sample_line(lv_b, **crosshair)
+                lv_xs_raw = (lv_pos, lv_pa, lv_pb, label_a, label_b,
+                             f"Cross-section — Local Laplacian Variance, σ={sigma}px")
+                lv_xs_line = self._crosshair_to_cropped_px(crosshair, lv_a.shape, SECTION8_BORDER_CROP_FRACTION)
+
+            if not single:
+                lv_fig = self._plot_side_by_side(
+                    self._crop_border(lv_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(lv_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_a}",
+                    f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_b}",
+                    diff_title=f"Local Laplacian variance log-ratio (A/B), σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                    display_roi=None,
+                    xs_data=lv_xs_raw,
+                    xs_line=lv_xs_line,
+                )
+            else:
+                lv_fig = self._plot_single(
+                    self._crop_border(lv_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_a}",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                )
+            figures[f"loclap_{sigma}"] = lv_fig
+
+            if not single and lv_noise_a and lv_noise_b:
+                lv_xs_nrm = None
+                if crosshair is not None:
+                    lv_pos_n, lv_pa_n = self._sample_line(lv_a / lv_noise_a, **crosshair)
+                    _, lv_pb_n = self._sample_line(lv_b / lv_noise_b, **crosshair)
+                    lv_xs_nrm = (lv_pos_n, lv_pa_n, lv_pb_n, label_a, label_b,
+                                 f"Cross-section — Local Laplacian Variance (× noise floor), σ={sigma}px")
+                figures[f"nrm_loclap_{sigma}"] = self._plot_side_by_side(
+                    self._crop_border(lv_a / lv_noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(lv_b / lv_noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local Laplacian Variance (× noise floor) σ={sigma}px — {label_a}",
+                    f"Local Laplacian Variance (× noise floor) σ={sigma}px — {label_b}",
+                    diff_title=f"Log ratio (A/B), noise-normalised, σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    display_roi=None,
+                    xs_data=lv_xs_nrm,
+                    xs_line=lv_xs_line,
+                )
         return figs_to_b64(figures, dpi=150), partial
 
     # ------------------------------------------------------------------
@@ -1154,24 +1341,52 @@ class SpatialDetailAnalyzer:
                             localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                             localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                             localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
-                            localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
+                            localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
+                            local_energy_window_mult=SECTION8_LOCAL_ENERGY_WINDOW_MULT) -> tuple[dict, dict]:
         """G = |gradient| at Gaussian scale sigma (first spatial derivative magnitude).
         Reuses the LOG_SIGMAS scale set so gradient and |LoG| are directly comparable
-        at identical spatial scales. Structured identically to _log_analysis."""
+        at identical spatial scales. Structured identically to _log_analysis.
+
+        Also builds the Section 8l "Local Gradient Energy" map (windowed mean(|G|^2),
+        prefix "localgrad") in the same per-sigma loop, reusing gm_a/gm_b so no extra
+        gradient convolution is needed. Unlike 8f's raw |G| map or 8k's single
+        whole-nebula grad_energy scalar, this is a per-pixel spatial map of where
+        high-frequency energy concentrates -- wired through the full standard
+        map-pair/log-ratio/correlation/noise-normalised/local-maxima pipeline like
+        every other family, with its own "localgrad_localmax_log_ratio(_err)" dicts
+        (kept separate from "localmax_log_ratio(_err)" above, which are the gradient
+        family's own — both are keyed by sigma, so sharing one dict would silently
+        overwrite entries between the two metrics)."""
         figures = {}
         partial: dict = {
             "gm_nc_score_a": {}, "gm_nc_score_b": {},
             "gm_nc_noise_a": {}, "gm_nc_noise_b": {},
             "gm_nc_neb_std_a": {}, "gm_nc_neb_std_b": {},
+            "grad_energy_a": {}, "grad_energy_b": {},   # Section 8k: mean(|G|^2) over the nebula mask
+            "localgrad_nc_score_a": {}, "localgrad_nc_score_b": {},
+            "localgrad_nc_noise_a": {}, "localgrad_nc_noise_b": {},
+            "localgrad_nc_neb_std_a": {}, "localgrad_nc_neb_std_b": {},
             "panels": {},
             "localmax": {},
             "localmax_log_ratio": {},
             "localmax_log_ratio_err": {},
+            "localgrad_localmax_log_ratio": {},
+            "localgrad_localmax_log_ratio_err": {},
         }
         single = norm_b is None
         for sigma in sigmas:
             gm_a = gaussian_gradient_magnitude(norm_a, sigma=sigma)
             gm_b = gaussian_gradient_magnitude(norm_b, sigma=sigma) if not single else None
+
+            # 8k: gradient energy = mean squared gradient magnitude over the shared
+            # nebula mask — a Tenengrad-family acutance measure (Gaussian-derivative
+            # gradient, so noise suppression is scale-controlled by sigma). Two-image
+            # mode only (mask_neb_shared is None in single-image mode).
+            if mask_neb_shared is not None:
+                partial["grad_energy_a"][sigma] = self._masked_reduce(
+                    gm_a, mask_neb_shared, lambda v: np.mean(v ** 2))
+                partial["grad_energy_b"][sigma] = self._masked_reduce(
+                    gm_b, mask_neb_shared, lambda v: np.mean(v ** 2))
 
             noise_a = noise_b = None
             if not single:
@@ -1260,6 +1475,104 @@ class SpatialDetailAnalyzer:
                     display_roi=None,
                     xs_data=xs_nrm,
                     xs_line=xs_line,
+                )
+
+            # ---- Section 8l: Local Gradient Energy (windowed mean(|G|^2)) ----
+            # Reuses gm_a/gm_b computed above -- no extra gradient convolution.
+            # Window grows with this sigma (scale-relative, like the local-maxima
+            # footprint) so "how local" the energy aggregation is tracks the
+            # gradient operator's own smoothing scale.
+            window_px = max(3, int(round(local_energy_window_mult * sigma)))
+            le_a = uniform_filter(gm_a ** 2, size=window_px).astype(np.float32)
+            le_b = uniform_filter(gm_b ** 2, size=window_px).astype(np.float32) if not single else None
+
+            le_noise_a = le_noise_b = None
+            if not single:
+                le_nc_a, le_noise_a, le_neb_std_a = self._nc_score(le_a, mask_neb_shared, mask_bg_a)
+                partial["localgrad_nc_score_a"][sigma] = le_nc_a
+                partial["localgrad_nc_noise_a"][sigma] = le_noise_a
+                partial["localgrad_nc_neb_std_a"][sigma] = le_neb_std_a
+                le_nc_b, le_noise_b, le_neb_std_b = self._nc_score(le_b, mask_neb_shared, mask_bg_b)
+                partial["localgrad_nc_score_b"][sigma] = le_nc_b
+                partial["localgrad_nc_noise_b"][sigma] = le_noise_b
+                partial["localgrad_nc_neb_std_b"][sigma] = le_neb_std_b
+
+            le_diff = self._log_ratio_map(le_a, le_b) if le_b is not None else None
+            partial["panels"][f"localgrad_{sigma}"] = {
+                "a":    le_a,
+                "b":    le_b,
+                "diff": le_diff,
+            }
+            if le_diff is not None:
+                le_lm_entry = self._localmax_entry(
+                    le_a, le_b, le_diff, sigma,
+                    localmax_footprint_mult, localmax_prominence_percentile,
+                    localmax_region_fraction, localmax_presmooth_fraction,
+                    localmax_top_percent, rng)
+                partial["localmax"][f"localgrad_{sigma}"] = le_lm_entry
+                partial["localgrad_localmax_log_ratio"][sigma] = le_lm_entry["log_ratio_mean"]
+                partial["localgrad_localmax_log_ratio_err"][sigma] = le_lm_entry["log_ratio_std"]
+            if not single:
+                le_corr_fig = self._plot_metric_correlation(
+                    le_a, le_b, le_diff, mask_neb_shared, mask_bg_shared,
+                    label_a, label_b, f"Local gradient energy (σ={sigma}px, window={window_px}px)", rng)
+                if le_corr_fig is not None:
+                    figures[f"corr_localgrad_{sigma}"] = le_corr_fig
+            if not single and le_noise_a and le_noise_b:
+                partial["panels"][f"nrm_localgrad_{sigma}"] = {
+                    "a": (le_a / le_noise_a).astype(np.float32),
+                    "b": (le_b / le_noise_b).astype(np.float32),
+                    "diff": None,
+                }
+
+            le_xs_raw = None
+            le_xs_line = None
+            if crosshair is not None and not single:
+                le_pos, le_pa = self._sample_line(le_a, **crosshair)
+                _, le_pb = self._sample_line(le_b, **crosshair)
+                le_xs_raw = (le_pos, le_pa, le_pb, label_a, label_b,
+                             f"Cross-section — Local Gradient Energy, σ={sigma}px")
+                le_xs_line = self._crosshair_to_cropped_px(crosshair, le_a.shape, SECTION8_BORDER_CROP_FRACTION)
+
+            if not single:
+                le_fig = self._plot_side_by_side(
+                    self._crop_border(le_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(le_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_a}",
+                    f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_b}",
+                    diff_title=f"Local gradient energy log-ratio (A/B), σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                    display_roi=None,
+                    xs_data=le_xs_raw,
+                    xs_line=le_xs_line,
+                )
+            else:
+                le_fig = self._plot_single(
+                    self._crop_border(le_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_a}",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    nonlinear_norm=True,
+                )
+            figures[f"localgrad_{sigma}"] = le_fig
+
+            if not single and le_noise_a and le_noise_b:
+                le_xs_nrm = None
+                if crosshair is not None:
+                    le_pos_n, le_pa_n = self._sample_line(le_a / le_noise_a, **crosshair)
+                    _, le_pb_n = self._sample_line(le_b / le_noise_b, **crosshair)
+                    le_xs_nrm = (le_pos_n, le_pa_n, le_pb_n, label_a, label_b,
+                                 f"Cross-section — Local Gradient Energy (× noise floor), σ={sigma}px")
+                figures[f"nrm_localgrad_{sigma}"] = self._plot_side_by_side(
+                    self._crop_border(le_a / le_noise_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(le_b / le_noise_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Local Gradient Energy (× noise floor) σ={sigma}px — {label_a}",
+                    f"Local Gradient Energy (× noise floor) σ={sigma}px — {label_b}",
+                    diff_title=f"Log ratio (A/B), noise-normalised, σ={sigma}px",
+                    cmap=SECTION8_ANALYSIS_CMAP,
+                    display_roi=None,
+                    xs_data=le_xs_nrm,
+                    xs_line=le_xs_line,
                 )
         return figs_to_b64(figures, dpi=150), partial
 
@@ -1917,10 +2230,14 @@ class SpatialDetailAnalyzer:
         _SCALE_LABEL = {
             "std": "px", "entropy": "px", "log": "σ px",
             "gradient": "σ px", "wavelet": "level (≈px)",
+            "local_grad_energy": "σ px",
+            "local_lap_variance": "σ px",
         }
         _COLORS = {
             "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
             "entropy": "seagreen", "gradient": "goldenrod",
+            "local_grad_energy": "slategray",
+            "local_lap_variance": "darkorange",
         }
         series = self._ratio_series_with_errors(ratios_by_method, errors_by_method)
         if not series:
@@ -1965,10 +2282,14 @@ class SpatialDetailAnalyzer:
         _SCALE_LABEL = {
             "std": "px", "entropy": "px", "log": "σ px",
             "gradient": "σ px", "wavelet": "level (≈px)",
+            "local_grad_energy": "σ px",
+            "local_lap_variance": "σ px",
         }
         _COLORS = {
             "std": "steelblue", "log": "tomato", "wavelet": "mediumpurple",
             "entropy": "seagreen", "gradient": "goldenrod",
+            "local_grad_energy": "slategray",
+            "local_lap_variance": "darkorange",
         }
         series = self._ratio_series_with_errors(log_ratios_by_method, errors_by_method)
         if not series:

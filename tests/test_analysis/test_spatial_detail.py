@@ -161,6 +161,8 @@ class TestNoiseCorrectedContrast:
         ("log", LOG_SIGMAS),
         ("entropy", ENTROPY_KERNEL_SIZES),
         ("gm", LOG_SIGMAS),
+        ("localgrad", LOG_SIGMAS),
+        ("loclap", LOG_SIGMAS),
     ])
     def test_nc_score_dict_keys_match_scales(self, nc_result, prefix, scales):
         assert set(nc_result[f"{prefix}_nc_score_a"].keys()) == set(scales)
@@ -171,7 +173,7 @@ class TestNoiseCorrectedContrast:
         assert set(nc_result["wavelet_nc_score_a"].keys()) == expected
         assert set(nc_result["wavelet_nc_score_b"].keys()) == expected
 
-    @pytest.mark.parametrize("prefix", ["std", "log", "wavelet", "entropy", "gm"])
+    @pytest.mark.parametrize("prefix", ["std", "log", "wavelet", "entropy", "gm", "localgrad", "loclap"])
     def test_nc_noise_floor_positive_or_none(self, nc_result, prefix):
         for side in ("a", "b"):
             for v in nc_result[f"{prefix}_nc_noise_{side}"].values():
@@ -200,6 +202,90 @@ class TestNoiseCorrectedContrast:
         # fine checkerboard before the derivative is taken) — check the strongest
         # response across scales rather than pinning to one bin.
         values = [v for v in nc_result["gm_nc_ratio"].values() if v is not None]
+        assert values and max(values) > 1.05
+
+    def test_local_grad_energy_nc_ratio_captures_finer_detail_in_a(self, nc_result):
+        # Same rationale as the gradient test above: check the strongest response
+        # across scales rather than pinning to one bin.
+        values = [v for v in nc_result["localgrad_nc_ratio"].values() if v is not None]
+        assert values and max(values) > 1.05
+
+    # --- Section 8i local gradient energy: full family wiring ---
+
+    def test_local_grad_energy_panels_present(self, nc_result):
+        panels = nc_result["panels"]
+        for sigma in LOG_SIGMAS:
+            assert f"localgrad_{sigma}" in panels
+            assert f"nrm_localgrad_{sigma}" in panels
+
+    def test_local_grad_energy_localmax_entries_present(self, nc_result):
+        for sigma in LOG_SIGMAS:
+            assert f"localgrad_{sigma}" in nc_result["localmax"]
+
+    def test_local_grad_energy_corr_figures_present(self, nc_result):
+        for sigma in LOG_SIGMAS:
+            assert f"corr_localgrad_{sigma}" in nc_result["figures"]
+
+    def test_local_grad_energy_values_nonnegative(self, nc_result):
+        # Local gradient energy is a windowed mean of a squared quantity -- must be >= 0.
+        for sigma in LOG_SIGMAS:
+            panel = nc_result["panels"][f"localgrad_{sigma}"]
+            assert np.all(panel["a"] >= 0)
+            assert np.all(panel["b"] >= 0)
+
+    def test_local_lap_variance_nc_ratio_captures_finer_detail_in_a(self, nc_result):
+        # Same rationale as the gradient/local-grad-energy tests above: check the
+        # strongest response across scales rather than pinning to one bin.
+        values = [v for v in nc_result["loclap_nc_ratio"].values() if v is not None]
+        assert values and max(values) > 1.05
+
+    # --- Section 8j local Laplacian variance: full family wiring ---
+
+    def test_local_lap_variance_panels_present(self, nc_result):
+        panels = nc_result["panels"]
+        for sigma in LOG_SIGMAS:
+            assert f"loclap_{sigma}" in panels
+            assert f"nrm_loclap_{sigma}" in panels
+
+    def test_local_lap_variance_localmax_entries_present(self, nc_result):
+        for sigma in LOG_SIGMAS:
+            assert f"loclap_{sigma}" in nc_result["localmax"]
+
+    def test_local_lap_variance_corr_figures_present(self, nc_result):
+        for sigma in LOG_SIGMAS:
+            assert f"corr_loclap_{sigma}" in nc_result["figures"]
+
+    def test_local_lap_variance_values_nonnegative(self, nc_result):
+        # Windowed variance -- must be >= 0.
+        for sigma in LOG_SIGMAS:
+            panel = nc_result["panels"][f"loclap_{sigma}"]
+            assert np.all(panel["a"] >= 0)
+            assert np.all(panel["b"] >= 0)
+
+    # --- Section 8m global acutance scalars (absolute, not nebula/bg ratio) ---
+
+    @pytest.mark.parametrize("key", ["lap_var_a", "lap_var_b",
+                                      "grad_energy_a", "grad_energy_b"])
+    def test_acutance_keys_match_log_sigmas(self, nc_result, key):
+        # Both acutance metrics reuse the LOG_SIGMAS scale set (lap_var from the LoG
+        # family, grad_energy from the gradient family).
+        assert set(nc_result[key].keys()) == set(LOG_SIGMAS)
+
+    def test_acutance_values_positive(self, nc_result):
+        for key in ("lap_var_a", "lap_var_b", "grad_energy_a", "grad_energy_b"):
+            for v in nc_result[key].values():
+                assert v is not None and v > 0.0
+
+    def test_lap_var_ratio_captures_finer_detail_in_a(self, nc_result):
+        # Image A carries a fine checkerboard the plain-blob Image B lacks, so its
+        # variance-of-Laplacian acutance is higher. Like the gradient nc test, the
+        # peak-response scale isn't necessarily the finest sigma, so check the
+        # strongest response across scales rather than pinning to one bin.
+        values = [v for v in nc_result["lap_var_ratio"].values() if v is not None]
+        assert values and max(values) > 1.05
+
+    def test_grad_energy_ratio_captures_finer_detail_in_a(self, nc_result):
+        values = [v for v in nc_result["grad_energy_ratio"].values() if v is not None]
         assert values and max(values) > 1.05
 
     def test_normalized_panels_present_two_image(self, nc_result):
@@ -257,6 +343,11 @@ class TestNoiseCorrectedContrastSingleImage:
         "wavelet_nc_score_a", "wavelet_nc_score_b", "wavelet_nc_ratio",
         "entropy_nc_score_a", "entropy_nc_score_b", "entropy_nc_ratio",
         "gm_nc_score_a", "gm_nc_score_b", "gm_nc_ratio",
+        "localgrad_nc_score_a", "localgrad_nc_score_b", "localgrad_nc_ratio",
+        "loclap_nc_score_a", "loclap_nc_score_b", "loclap_nc_ratio",
+        # Section 8m acutance scalars follow the same present-but-empty invariant.
+        "lap_var_a", "lap_var_b", "lap_var_ratio",
+        "grad_energy_a", "grad_energy_b", "grad_energy_ratio",
     ])
     def test_nc_key_empty_in_single_image_mode(self, single_result, key):
         assert not single_result[key]
@@ -320,6 +411,35 @@ class TestNcScoreHelper:
         assert score == pytest.approx(5.0)
         assert neb_std == pytest.approx(0.0)   # nebula region is a constant 10.0 block
         assert noise == pytest.approx(2.0)
+
+
+class TestWindowedVariance:
+    """Regression guard for extracting _windowed_variance out of _compute_std_map
+    (Section 8j): sqrt(_windowed_variance(data, k)) must exactly reproduce
+    _compute_std_map's existing output for the same data/kernel, confirming the
+    extraction preserved 8g's behavior. Also used directly (no sqrt) by 8j's
+    local Laplacian variance map."""
+
+    def test_matches_compute_std_map_via_sqrt(self):
+        analyzer = SpatialDetailAnalyzer()
+        rng = np.random.default_rng(0)
+        data = rng.normal(0, 1, (64, 64)).astype(np.float32)
+        via_helper = np.sqrt(analyzer._windowed_variance(data, 7))
+        via_std_map = analyzer._compute_std_map(data, 7)
+        assert np.allclose(via_helper, via_std_map, atol=1e-5)
+
+    def test_constant_input_has_zero_variance(self):
+        analyzer = SpatialDetailAnalyzer()
+        data = np.full((20, 20), 3.0, dtype=np.float32)
+        result = analyzer._windowed_variance(data, 5)
+        assert np.allclose(result, 0.0, atol=1e-6)
+
+    def test_output_always_nonnegative(self):
+        analyzer = SpatialDetailAnalyzer()
+        rng = np.random.default_rng(1)
+        data = rng.normal(0, 1, (50, 50)).astype(np.float32)
+        result = analyzer._windowed_variance(data, 9)
+        assert np.all(result >= 0.0)
 
 
 class TestComputeNcRatioErrors:
@@ -826,6 +946,8 @@ class TestCorrelationScatterFigures:
         + [f"corr_gradient_{s}" for s in LOG_SIGMAS]
         + ["corr_wavelet_2", "corr_wavelet_3"]
         + [f"corr_entropy_{ks}px" for ks in ENTROPY_KERNEL_SIZES]
+        + [f"corr_localgrad_{s}" for s in LOG_SIGMAS]
+        + [f"corr_loclap_{s}" for s in LOG_SIGMAS]
     )
 
     @pytest.mark.parametrize("key", _CORR_KEYS)
@@ -840,7 +962,7 @@ class TestCorrelationScatterFigures:
 
 
 class TestLocalMaxIntegration:
-    """Section 8j: result["localmax"] population across all metric/scale
+    """Section 8l: result["localmax"] population across all metric/scale
     combinations, mirroring the corr_* key set in TestCorrelationScatterFigures."""
 
     _LOCALMAX_KEYS = (
@@ -849,6 +971,8 @@ class TestLocalMaxIntegration:
         + [f"gradient_{s}" for s in LOG_SIGMAS]
         + ["wavelet_2", "wavelet_3"]
         + [f"entropy_{ks}px" for ks in ENTROPY_KERNEL_SIZES]
+        + [f"localgrad_{s}" for s in LOG_SIGMAS]
+        + [f"loclap_{s}" for s in LOG_SIGMAS]
     )
 
     @pytest.mark.parametrize("key", _LOCALMAX_KEYS)
@@ -911,8 +1035,8 @@ class TestLocalMaxFigures:
 
     def test_localmax_entries_carry_vals_log_ratio_for_distribution_figure(self, nc_result):
         # Same contract as vals_a/vals_b above, for the log-ratio distribution
-        # figure (report_builder.py::_localmax_log_ratio_distribution_figure),
-        # which reads result["localmax"][key]["vals_log_ratio"].
+        # figure (report_builder.py::_localmax_family_distributions_figure,
+        # right column), which reads result["localmax"][key]["vals_log_ratio"].
         any_present = any(
             entry.get("vals_log_ratio") is not None and entry["vals_log_ratio"].size > 0
             for entry in nc_result["localmax"].values()
@@ -1010,8 +1134,14 @@ class TestSectionSpatialReportOrder:
     """Integration check on report/report_builder.py::_section_spatial's HTML
     output: the reorganized subsection order (8a Background, 8b Original Image,
     8c Mask Overview, 8d LoG, 8e Wavelet, 8f Gradient, 8g Local Std,
-    8h Local Entropy, 8i NC overview, 8j Local-Maxima Masked Metrics), and the
-    fix for the alphabetic-sort bug that put e.g. nrm_std_10px before nrm_std_3px/5px."""
+    8h Local Entropy, 8i Local Gradient Energy, 8j Local Variance of Laplacian,
+    8k NC overview, 8l Local-Maxima Masked Metrics, 8m Global Acutance), and the
+    fix for the alphabetic-sort bug that put e.g. nrm_std_10px before
+    nrm_std_3px/5px. 8i/8j/8m were reordered from their original append-only
+    positions (formerly 8l/8m/8k after 8j) so that every per-scale family with
+    a methodology box and cross-method contribution (8d-8j) is physically
+    contiguous, immediately before the two cross-method summary sections
+    (8k, 8l) and the standalone whole-nebula scalar section (8m)."""
 
     @pytest.fixture(scope="class")
     @classmethod
@@ -1025,8 +1155,8 @@ class TestSectionSpatialReportOrder:
 
     def test_headings_present_in_order(self, section_html):
         import re
-        expected = ["8a", "8b", "8c", "8d", "8e", "8f", "8g", "8h", "8i", "8j"]
-        found = re.findall(r"<h3>(8[a-j])\.", section_html)
+        expected = ["8a", "8b", "8c", "8d", "8e", "8f", "8g", "8h", "8i", "8j", "8k", "8l", "8m"]
+        found = re.findall(r"<h3>(8[a-m])\.", section_html)
         assert found == expected
 
     def test_original_image_section_present(self, section_html):
@@ -1059,11 +1189,11 @@ class TestSectionSpatialReportOrder:
         # blobs incidentally contain "8<letter>" substrings that aren't section
         # references at all.
         prose = re.sub(r"data:image/png;base64,[A-Za-z0-9+/=]+", "", section_html)
-        # Every literal "8<letter>" reference must be one of the 10 valid
+        # Every literal "8<letter>" reference must be one of the 12 valid
         # letters — a stray old letter (e.g. a missed "8e" -> "8h" rename)
         # would show up here.
         for m in re.finditer(r"\b8([a-z])\b", prose):
-            assert m.group(1) in "abcdefghij", f"unexpected section letter: 8{m.group(1)}"
+            assert m.group(1) in "abcdefghijklm", f"unexpected section letter: 8{m.group(1)}"
 
     def test_8c_mask_overview_survives_violin_removal(self, section_html):
         # Regression test: 8c's HTML block used to be gated on the (now-removed)
@@ -1078,14 +1208,18 @@ class TestSectionSpatialReportOrder:
         # Nebula-vs-Background log-ratio violin figure's distinctive caption
         # text must no longer appear anywhere in the section. "ratio
         # distributions" alone is no longer a safe substring to check on its
-        # own -- the (legitimate, newer) 8j log-ratio distribution figure's
+        # own -- the (legitimate, newer) 8l log-ratio distribution figure's
         # caption also contains that phrase -- so match the old figure's
         # full distinctive title instead.
         assert "Pixel-wise log" not in section_html
         assert "Pixel-wise log₁₀(A / B) ratio distributions" not in section_html
 
     def test_localmax_distribution_figure_present(self, section_html):
-        assert 'alt="localmax_distributions"' in section_html
+        # One N x 2 figure per family (magnitude violins left, log-ratio violins
+        # right) replaces the old single all-family combined figure -- check a
+        # representative subset of the new per-family alt tags.
+        for slug in ("std", "log", "wavelet", "gradient", "entropy", "localgrad", "loclap"):
+            assert f'alt="localmax_distributions_{slug}"' in section_html
 
     def test_old_mask_grid_illustrative_caption_removed(self, section_html):
         # Regression test: the old single-scale illustration's "not literally
@@ -1101,13 +1235,17 @@ class TestSectionSpatialReportOrder:
         "Show Gradient maps & figures",
         "Show Local σ maps & figures",
         "Show Local entropy maps & figures",
+        "Show Local Gradient Energy maps & figures",
+        "Show Local Laplacian Variance maps & figures",
+        "Show all Metric Distributions (A/B magnitude & log ratio)",
     ])
     def test_family_images_are_collapsed_by_default(self, section_html, title):
-        # Each of the 5 metric families' map/correlation/noise-normalised figures
-        # (8d-8h) must be wrapped in a closed-by-default <details> box, keeping
-        # the report compact. The heading/methodology/table above each family
-        # stay outside the box (checked implicitly: the table for that family
-        # still appears earlier in section_html than this collapsible summary).
+        # Each metric family's map/correlation/noise-normalised figures (8d-8j),
+        # plus the combined 8l local-maxima distributions box, must be wrapped
+        # in a closed-by-default <details> box, keeping the report compact. The
+        # heading/methodology/table above each family stay outside the box
+        # (checked implicitly: the table for that family still appears earlier
+        # in section_html than this collapsible summary).
         idx = section_html.find(f"<summary>{title}</summary>")
         assert idx > 0, f"collapsible box with title {title!r} not found"
         # The <details> tag immediately preceding this <summary> must not carry
@@ -1118,7 +1256,12 @@ class TestSectionSpatialReportOrder:
         assert " open" not in details_tag
 
     def test_localmax_log_ratio_distribution_figure_present(self, section_html):
-        assert 'alt="localmax_log_ratio_distributions"' in section_html
+        # The log-ratio distribution is now the right column of each per-family
+        # N x 2 figure (see test_localmax_distribution_figure_present) rather
+        # than a separately alt-tagged image. The column header itself is drawn
+        # via fig.text() onto the PNG (pixels, not searchable HTML text), so
+        # check the caption's own prose instead, which IS literal HTML.
+        assert "per-pixel log<sub>10</sub>(|A|/|B|) population" in section_html
 
     def test_log_ratio_table_column_present(self, section_html):
         assert "log ratio A/B (geo. mean" in section_html
