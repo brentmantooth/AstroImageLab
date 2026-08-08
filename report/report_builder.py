@@ -224,6 +224,14 @@ def _val_pm(v, spread, fmt=".3f", fallback="—") -> str:
     return s
 
 
+def _ratio_str(va, vb, fmt=".3f", fallback="—") -> str:
+    """Format the row ratio va / vb (Image A / Image B); fallback when either
+    value is missing or vb is zero."""
+    if va is None or vb is None or vb == 0:
+        return fallback
+    return f"{format(va / vb, fmt)}×"
+
+
 def _format_significance_html(p: float, delta: float) -> str:
     """Compact two-line significance cell: effect rating + stars on line 1,
     p-value and Cliff's delta on line 2. Shared by _psf_stat_test (Section 4)
@@ -5042,7 +5050,8 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
             cpa, cpb = _better_worse_class(va, vb, higher_is_better=True)
             return (f"<tr><td>{label}</td>"
                     f"<td class='{cpa}'>{_val(va, '.4f')} %</td>"
-                    f"<td class='{cpb}'>{_val(vb, '.4f')} %</td></tr>")
+                    f"<td class='{cpb}'>{_val(vb, '.4f')} %</td>"
+                    f"<td>{_ratio_str(va, vb, '.3f')}</td></tr>")
 
         pct_rows = "".join([
             pct_row("Pixels &gt; 3 σ <small style='color:#555'>(detected signal)</small>",  "pct_above_3"),
@@ -5295,48 +5304,69 @@ signal in the dark region produce a higher SNR.</p>
             title="Understanding the SNR metrics",
         )
 
+        # Ratio column values (Image A / Image B), pre-computed to keep the
+        # f-string below free of nested substitutions.
+        ratio_noise = _ratio_str(pa.get("noise_median"), pb.get("noise_median"))
+        ratio_bg = _ratio_str(pa.get("background_median"), pb.get("background_median"))
+        ratio_nf = _ratio_str(nf_a, nf_b)
+        ratio_gain = _ratio_str(gain_a, gain_b, ".2f")
+        ratio_sky_e = _ratio_str(sky_e_a, sky_e_b, ".3g")
+        ratio_sky_ne = _ratio_str(sky_ne_a, sky_ne_b, ".3g")
+        ratio_snr_global = _ratio_str(pa.get("snr_global"), pb.get("snr_global"), ".4f")
+        ratio_snr_global_db = _ratio_str(pa.get("snr_global_db"), pb.get("snr_global_db"), ".2f")
+        ratio_star_snr = _ratio_str(pa.get("star_snr_median"), pb.get("star_snr_median"), ".4f")
+
         return f"""
 <h2>3. Signal-to-Noise Ratio (SNR)</h2>
 {err}
 {_snr_metrics_box}
 
 <table>
-  <tr><th>Sky metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
+  <tr><th>Sky metric</th><th>{ra.label}</th><th>{rb.label}</th><th>Ratio (A/B)</th></tr>
   <tr><td>Sky RMS noise &sigma;<sub>sky</sub> (ADU) &mdash; lower is better</td>
       <td class="{cn_a}">{_val(pa.get("noise_median"), ".6g")}</td>
-      <td class="{cn_b}">{_val(pb.get("noise_median"), ".6g")}</td></tr>
+      <td class="{cn_b}">{_val(pb.get("noise_median"), ".6g")}</td>
+      <td>{ratio_noise}</td></tr>
   <tr><td>Sky background &mu;<sub>sky</sub> (ADU) &mdash; lower is better</td>
       <td class="{cn_bg_a}">{_val(pa.get("background_median"), ".6g")}</td>
-      <td class="{cn_bg_b}">{_val(pb.get("background_median"), ".6g")}</td></tr>
+      <td class="{cn_bg_b}">{_val(pb.get("background_median"), ".6g")}</td>
+      <td>{ratio_bg}</td></tr>
   <tr><td>Noise factor &sigma;/&radic;&mu; &mdash; lower = sky-limited (ideal &asymp;1.0)</td>
       <td class="{cn_nf_a}">{_val(nf_a, ".3f")}</td>
-      <td class="{cn_nf_b}">{_val(nf_b, ".3f")}</td></tr>
+      <td class="{cn_nf_b}">{_val(nf_b, ".3f")}</td>
+      <td>{ratio_nf}</td></tr>
 {"" if not either_gain else f"""  <tr><td>Gain (e<sup>&minus;</sup>/ADU, from FITS header)</td>
       <td>{"—" if gain_a is None else _val(gain_a, ".2f")}</td>
-      <td>{"—" if gain_b is None else _val(gain_b, ".2f")}</td></tr>
+      <td>{"—" if gain_b is None else _val(gain_b, ".2f")}</td>
+      <td>{ratio_gain}</td></tr>
   <tr><td>Sky background &mu;<sub>sky</sub> (e<sup>&minus;</sup>) &mdash; lower is better</td>
       <td class="{cn_sky_e_a}">{"—" if sky_e_a is None else _val(sky_e_a, ".3g")}</td>
-      <td class="{cn_sky_e_b}">{"—" if sky_e_b is None else _val(sky_e_b, ".3g")}</td></tr>
+      <td class="{cn_sky_e_b}">{"—" if sky_e_b is None else _val(sky_e_b, ".3g")}</td>
+      <td>{ratio_sky_e}</td></tr>
   <tr><td>Sky noise &sigma;<sub>sky</sub> (e<sup>&minus;</sup>) &mdash; lower is better</td>
       <td class="{cn_sky_ne_a}">{"—" if sky_ne_a is None else _val(sky_ne_a, ".3g")}</td>
-      <td class="{cn_sky_ne_b}">{"—" if sky_ne_b is None else _val(sky_ne_b, ".3g")}</td></tr>"""}
+      <td class="{cn_sky_ne_b}">{"—" if sky_ne_b is None else _val(sky_ne_b, ".3g")}</td>
+      <td>{ratio_sky_ne}</td></tr>"""}
 </table>
 
 <table>
-  <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
+  <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th><th>Ratio (A/B)</th></tr>
   <tr><td>Global SNR (&sigma;)</td>
       <td class="{ca}">{_val(pa.get("snr_global"), ".4f")} &sigma;</td>
-      <td class="{cb}">{_val(pb.get("snr_global"), ".4f")} &sigma;</td></tr>
+      <td class="{cb}">{_val(pb.get("snr_global"), ".4f")} &sigma;</td>
+      <td>{ratio_snr_global}</td></tr>
   <tr><td>Global SNR (dB)</td>
       <td class="{ca_db}">{_val(pa.get("snr_global_db"), ".2f")} dB</td>
-      <td class="{cb_db}">{_val(pb.get("snr_global_db"), ".2f")} dB</td></tr>
+      <td class="{cb_db}">{_val(pb.get("snr_global_db"), ".2f")} dB</td>
+      <td>{ratio_snr_global_db}</td></tr>
   <tr><td>Median star SNR &plusmn; IQR</td>
       <td class="{cs_a}">{star_a_cell}</td>
-      <td class="{cs_b}">{star_b_cell}</td></tr>
+      <td class="{cs_b}">{star_b_cell}</td>
+      <td>{ratio_star_snr}</td></tr>
 </table>
 
 <table>
-  <tr><th>Threshold</th><th>{ra.label}</th><th>{rb.label}</th></tr>
+  <tr><th>Threshold</th><th>{ra.label}</th><th>{rb.label}</th><th>Ratio (A/B)</th></tr>
   {pct_rows}
 </table>
 
