@@ -554,10 +554,14 @@ def _draw_log_ratio_violin_ax(ax, vlr, title: "str | None", orig_color: str) -> 
     _draw_boxwhisker(ax, [vlr])
     ax.axvline(0.0, color=orig_color, linestyle="--", linewidth=0.8, zorder=4)
 
+    # Symmetric about zero — log ratio is signed (A louder vs B louder), so an
+    # asymmetric percentile-clipped range would visually skew "no difference"
+    # off-center.
     lo, hi = np.percentile(vlr, [1.0, 99.0])
-    if hi > lo:
-        pad = 0.05 * (hi - lo)
-        ax.set_xlim(lo - pad, hi + pad)
+    m = max(abs(lo), abs(hi))
+    if m > 0:
+        pad = 0.05 * m
+        ax.set_xlim(-m - pad, m + pad)
 
     if title is not None:
         ax.set_title(title, fontsize=8, loc="left", pad=2)
@@ -567,6 +571,17 @@ def _draw_log_ratio_violin_ax(ax, vlr, title: "str | None", orig_color: str) -> 
     ax.tick_params(axis="x", labelsize=7)
     ax.spines[["top", "right"]].set_visible(False)
     return True
+
+
+_LOCALMAX_FAMILY_MEASURES = {
+    "Local σ": "Detail (texture / variability) &mdash; any local brightness variation",
+    "|LoG|": "Detail (edge / curvature strength) &mdash; intensity boundaries surviving smoothing at this scale",
+    "Wavelet": "Detail by scale band, plus explicit SNR",
+    "Gradient |G|": "Detail (edge sharpness) &mdash; how abrupt a boundary is at this scale",
+    "Local entropy": "Detail (texture complexity, bits, log&#8322;)",
+    "Local grad. energy": "Acutance (sharpness concentration) &mdash; where windowed edge energy concentrates",
+    "Local Laplacian var.": "Acutance (focus concentration) &mdash; where windowed curvature fluctuation concentrates",
+}
 
 
 def _localmax_family_distributions_figure(family_label: str, rows: list, localmax: dict) -> tuple[str, str]:
@@ -612,21 +627,15 @@ def _localmax_family_distributions_figure(family_label: str, rows: list, localma
     family_slug = present_rows[0][0].split("_", 1)[0]
     img_html = _img_tag(fig, f"localmax_distributions_{family_slug}")
 
+    measures = _LOCALMAX_FAMILY_MEASURES.get(family_label, "spatial detail")
     caption_html = (
         '<p class="caption">'
-        f"<b>{family_label} &mdash; masked-region distributions.</b> "
-        "<b>Left:</b> Image A (steelblue) vs Image B (tomato) violin of the masked pixel "
-        "magnitudes within each row's local-maxima mask &mdash; in most cases, larger "
-        "magnitudes indicate sharper local detail. <b>Right:</b> the same row's per-pixel "
-        "log<sub>10</sub>(|A|/|B|) population within that mask; the dashed line marks 0 (A = B). "
-        "This is the same masked pixel population the &ldquo;log ratio A/B (geo. mean "
-        "&plusmn; SD)&rdquo; table column and the 8i/8j cross-method overview plots' error bars "
-        "are computed from &mdash; a roughly symmetric, unimodal shape on the right supports "
-        "summarising it with a mean &plusmn; SD. Each violin has an IQR box-plot overlay: a "
-        "<span style='color:#00e5ff'><b>cyan box</b></span> spanning Q1&ndash;Q3, a "
-        "<span style='color:magenta'><b>magenta centre line</b></span> at the median. Violins "
-        "are randomly subsampled for display, and each panel's x-axis is independently clipped "
-        "to its own 1st&ndash;99th percentile range so the IQR box stays visible."
+        f"<b>{family_label}</b> &mdash; which measures {measures}. "
+        "<b>Left:</b> Image A vs Image B violin of the masked pixel magnitudes within "
+        "each image's local-maxima mask; in most cases, larger magnitudes indicate "
+        "sharper local detail. <b>Right:</b> the matched-pixel ratio, "
+        "log<sub>10</sub>(|A|/|B|), within that mask. Negative values indicate Image B "
+        "has more detail for this metric; positive values indicate Image A has more."
         "</p>"
     )
     return img_html, caption_html
@@ -4562,13 +4571,6 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 open=True,
             )
 
-        smooth_note = _info_box(
-            'ℹ All spatial detail maps are smoothed with a '
-            'Gaussian filter (σ = 1.0 px) <strong>for display only</strong>. '
-            'Scalar metric values (contrast ratios, wavelet SNR) are computed on '
-            'the raw unsmoothed data.',
-            title="Display smoothing note",
-        )
         _wavelet_box = _info_box(
             f'A 4-level Daubechies-4 wavelet decomposition separates the '
             f'image into spatial scale bands. Level 1 (~2 px) is noise-dominated and used only '
@@ -4923,7 +4925,6 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
 {_SPATIAL_GLOSSARY_HTML}
 {sl_note}
 {roi_note}
-{smooth_note}
 {_info_box('All maps below are computed on mean-signal-normalised data '
            '(each image divided by its own mean signal), making them dimensionless and comparable '
            'across different filter bandwidths. Each figure has Image A (top-left) and Image B '
@@ -4944,7 +4945,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
 {corr_methodology_box}
 {xs_note}
 
-<h3>8d. Laplacian of Gaussian (LoG) Maps</h3>
+<h3>8d. Laplacian of Gaussian (LoG) Maps: Detail (edge / curvature strength)</h3>
 {_info_box('The Laplacian of Gaussian highlights regions of rapid intensity '
            'change at a specific spatial scale (controlled by σ). Brighter regions in |LoG| maps '
            'indicate stronger local curvature — sharper edges and finer nebula filaments. '
@@ -4957,11 +4958,11 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
            'reveals subtle differences in edge sharpness along the selected line.',
            title="Laplacian of Gaussian (LoG)")}
 {_log_images_box}
-<h3>8e. Wavelet Decomposition</h3>
+<h3>8e. Wavelet Decomposition: Detail by scale band and SNR</h3>
 {_wavelet_box}
 {_wavelet_images_box}
 
-<h3>8f. Gradient Magnitude (Edge Sharpness)</h3>
+<h3>8f. Gradient Magnitude: Detail (Edge Sharpness)</h3>
 {_info_box('The gradient magnitude G = |∇I| = sqrt((∂I/∂x)² + (∂I/∂y)²) highlights regions '
            'of rapid intensity change at a specific spatial scale (controlled by σ), computed '
            'as the first spatial derivative rather than the second derivative (curvature) LoG uses. '
@@ -4977,7 +4978,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
            title="Gradient magnitude / edge sharpness")}
 {_gradient_images_box}
 
-<h3>8g. Local Standard Deviation Maps</h3>
+<h3>8g. Local Standard Deviation Maps: Detail (texture / variability)</h3>
 {_info_box('Measures how much pixel values vary within a neighbourhood. '
            'Higher values in nebula regions indicate more preserved local detail and contrast. '
            '<strong>Contrast ratio</strong> = median(nebula std) / median(background std); '
@@ -4990,7 +4991,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
            'each map figure below, showing how local detail amplitude varies along the selected line.',
            title="Local standard deviation")}
 {_std_images_box}
-<h3>8h. Local Entropy Maps</h3>
+<h3>8h. Local Entropy Maps: Detail (texture complexity, bits)</h3>
 {_info_box(
     '<p><strong>Formula:</strong> H = &minus;&Sigma; p<sub>i</sub> log&#8322;(p<sub>i</sub>) '
     '(Shannon entropy, in bits), computed from the local gray-level histogram over '
@@ -5203,8 +5204,13 @@ Use this to assess absolute signal levels and dynamic range between filters.</p>
             xs_width      = xs_snr.get("width", 15)
 
             ca_snr, cb_snr = _better_worse_class(snr_a_val, snr_b_val, higher_is_better=True)
-            exp_a = 1.0 if higher_label == ra.label else (factor_val if factor_val else float("nan"))
-            exp_b = 1.0 if higher_label == rb.label else (factor_val if factor_val else float("nan"))
+            _xs_abs_a = abs(snr_a_val) if snr_a_val is not None and not np.isnan(snr_a_val) else 0.0
+            _xs_abs_b = abs(snr_b_val) if snr_b_val is not None and not np.isnan(snr_b_val) else 0.0
+            if _xs_abs_a > 0 and _xs_abs_b > 0:
+                exp_a = (_xs_abs_b / _xs_abs_a) ** 2
+                exp_b = (_xs_abs_a / _xs_abs_b) ** 2
+            else:
+                exp_a = exp_b = float("nan")
             ca_exp, cb_exp = _better_worse_class(exp_a, exp_b, higher_is_better=False)
 
             if factor_val and not (isinstance(factor_val, float) and factor_val != factor_val):

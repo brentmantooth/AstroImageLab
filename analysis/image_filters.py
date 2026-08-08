@@ -31,7 +31,6 @@ from core.models import (STD_KERNEL_SIZES, LOG_SIGMAS, WAVELET_NAME, WAVELET_LEV
                          SECTION8_LOCAL_ENERGY_WINDOW_MULT)
 
 MAX_DIM_FOR_STD = 2048   # downsample to this before the local-std/entropy windowed filters (performance)
-_DISPLAY_SMOOTH_SIGMA = 1.0   # applied to maps before plotting; does NOT affect metrics
 
 
 class SpatialDetailAnalyzer:
@@ -771,11 +770,6 @@ class SpatialDetailAnalyzer:
             return None
         return (r0, r1, c0, c1)
 
-    @staticmethod
-    def _smooth_for_display(arr: np.ndarray) -> np.ndarray:
-        """Gaussian σ=1.0 smoothing for visualisation only."""
-        return gaussian_filter(arr.astype(float), sigma=_DISPLAY_SMOOTH_SIGMA)
-
     # ------------------------------------------------------------------
     # Local standard deviation maps
     # ------------------------------------------------------------------
@@ -1038,6 +1032,25 @@ class SpatialDetailAnalyzer:
         log-ratio map panel, its histogram, and the correlation scatter dots."""
         d_max = float(np.percentile(np.abs(diff), 99.5)) or 1.0
         return -d_max, d_max
+
+    @staticmethod
+    def _draw_boxwhisker(ax, vals_list):
+        """Shared horizontal IQR box-plot overlay (median magenta, IQR cyan) —
+        same styling as report_builder.py's _draw_boxwhisker, reproduced locally
+        since analysis/ must not import from report/ (report/ consumes
+        analysis/, not the reverse)."""
+        for i, vals in enumerate(vals_list):
+            ax.boxplot(
+                [vals], positions=[i], vert=False,
+                widths=0.6, zorder=5,
+                patch_artist=True,
+                manage_ticks=False,
+                boxprops=dict(facecolor="none", edgecolor="#00e5ff", linewidth=1.5, alpha=0.9),
+                medianprops=dict(color="magenta", linewidth=2.0, alpha=0.9),
+                whiskerprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                capprops=dict(color="#00e5ff", linewidth=1.5, alpha=0.9),
+                flierprops=dict(marker="", visible=False),
+            )
 
     @staticmethod
     def _compute_nc_ratios(score_a: dict, score_b: dict) -> dict:
@@ -1948,7 +1961,6 @@ class SpatialDetailAnalyzer:
                             cmap: str = "viridis",
                             nonlinear_norm: bool = False,
                             display_roi=None,
-                            smooth_display: bool = True,
                             xs_data: tuple | None = None,
                             xs_line: tuple | None = None) -> plt.Figure:
         """xs_data, if given, is (pos, prof_a, prof_b, label_a, label_b, xs_title)
@@ -1961,11 +1973,6 @@ class SpatialDetailAnalyzer:
             r0, r1, c0, c1 = display_roi
             arr_a = arr_a[r0:r1, c0:c1]
             arr_b = arr_b[r0:r1, c0:c1]
-
-        # Smooth for display only (does not affect any metric values)
-        if smooth_display:
-            arr_a = self._smooth_for_display(arr_a)
-            arr_b = self._smooth_for_display(arr_b)
 
         # Shared color scale: use percentile clipping to prevent bright outliers
         # from compressing the interesting nebula detail range.
@@ -1987,11 +1994,11 @@ class SpatialDetailAnalyzer:
         is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
         orig_color = "white" if is_dark else "black"
 
-        # 3-row grid: A|B on top, log-ratio diff | cross-section in the middle,
-        # a log-ratio pixel-value histogram spanning both columns on the bottom.
+        # 3-row grid: A|B on top, log-ratio diff | [box-whisker over histogram]
+        # in the middle, cross-section spanning both columns on the bottom.
         # A/B/diff share the source array's pixel aspect ratio (aspect="equal"
         # imshow); the cross-section panel is a line plot with no such constraint
-        # but occupies an equal-size grid cell so the other three panels stay
+        # but occupies an equal-size-budget grid row so the other panels stay
         # geometrically identical whether or not a crosshair (and thus xs_data)
         # is set.
         h, w = arr_a.shape[:2]
@@ -1999,14 +2006,17 @@ class SpatialDetailAnalyzer:
         panel_w = 5.0   # half the old single-column width — 2 columns now share it
         panel_h = panel_w * aspect_ratio
         hist_h = 2.2
-        fig = plt.figure(figsize=(panel_w * 2, panel_h * 2 + hist_h + 1.5),
+        box_h = 0.5   # marginal IQR box-whisker strip above the histogram
+        fig = plt.figure(figsize=(panel_w * 2, panel_h * 2 + hist_h + box_h + 1.5),
                           constrained_layout=True)
-        gs = fig.add_gridspec(3, 2, height_ratios=[panel_h, panel_h, hist_h])
+        gs = fig.add_gridspec(3, 2, height_ratios=[panel_h, panel_h, hist_h + box_h])
         ax_a = fig.add_subplot(gs[0, 0])
         ax_b = fig.add_subplot(gs[0, 1])
         ax_diff = fig.add_subplot(gs[1, 0])
-        ax_xs = fig.add_subplot(gs[1, 1])
-        ax_hist = fig.add_subplot(gs[2, :])
+        gs_box_hist = gs[1, 1].subgridspec(2, 1, height_ratios=[box_h, hist_h])
+        ax_box = fig.add_subplot(gs_box_hist[0, 0])
+        ax_hist = fig.add_subplot(gs_box_hist[1, 0], sharex=ax_box)
+        ax_xs = fig.add_subplot(gs[2, :])
 
         for ax, arr, title in zip([ax_a, ax_b], [arr_a, arr_b], [title_a, title_b]):
             im = ax.imshow(arr, origin="upper", cmap=cmap,
@@ -2060,15 +2070,24 @@ class SpatialDetailAnalyzer:
         ax_hist.legend(fontsize=6.5, loc="upper right")
         ax_hist.grid(True, alpha=0.3)
         ax_hist.set_title("Log-ratio pixel distribution", fontsize=9)
+        hist_xmax = float(np.abs(bin_edges).max())
+        ax_hist.set_xlim(-hist_xmax, hist_xmax)
+
+        # Marginal horizontal IQR box-whisker strip directly above the
+        # histogram, sharing its x-axis — same median-magenta/IQR-cyan
+        # convention as the Section 8l distribution violin panels.
+        self._draw_boxwhisker(ax_box, [diff.ravel()])
+        ax_box.axvline(0.0, color=orig_color, linestyle="--", linewidth=1.0)
+        ax_box.set_ylim(-1, 1)
+        ax_box.set_yticks([])
+        ax_box.tick_params(axis="x", labelbottom=False, length=0)
+        ax_box.spines[["top", "right", "left", "bottom"]].set_visible(False)
 
         return fig
 
     def _plot_single(self, arr_a: np.ndarray, title_a: str,
                      cmap: str = "viridis",
-                     nonlinear_norm: bool = False,
-                     smooth_display: bool = True) -> plt.Figure:
-        if smooth_display:
-            arr_a = self._smooth_for_display(arr_a)
+                     nonlinear_norm: bool = False) -> plt.Figure:
         vmin = float(np.percentile(arr_a, 0.5))
         vmax = float(np.percentile(arr_a, 99.5))
         if vmax <= vmin:
