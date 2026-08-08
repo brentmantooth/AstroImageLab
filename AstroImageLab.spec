@@ -29,6 +29,14 @@ binaries     += ph_bins
 hiddenimports += ph_hidden
 datas += copy_metadata("photutils")
 
+# pyqtgraph — ships icons/, colors/maps/*.csv and .ui files as package data, and
+# resolves many of its graphicsItems submodules lazily, so static analysis misses
+# them.  Same collect_all treatment as photutils above.
+pg_datas, pg_bins, pg_hidden = collect_all("pyqtgraph")
+datas        += pg_datas
+binaries     += pg_bins
+hiddenimports += pg_hidden
+
 # Hidden imports that PyInstaller's static analysis misses
 hiddenimports += [
     "xisf", "zstandard", "lz4", "lz4.block",
@@ -64,7 +72,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        # pyqtgraph probes for every Qt binding at import time; without these the
+        # bundle can pick up a second, unwanted binding alongside PyQt6.
         "PySide6",
+        "PySide2",
+        "PyQt5",
         "tkinter",
     ],
     noarchive=False,

@@ -31,6 +31,7 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE,
                           SECTION8_LOCAL_ENERGY_WINDOW_MULT)
 from core.astro_image import AstroImage
+from core.inspector_catalog import panel_display_name, panel_concept
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
 
@@ -856,81 +857,11 @@ _SPATIAL_GLOSSARY_HTML = (
 )
 
 
-def _panel_display_name(pkey: str) -> str:
-    """Derive a human-readable label from a SpatialDetailAnalyzer panels dict key.
-    Dynamic (not a hardcoded map) so every scale it computes — including future
-    additions — automatically appears in the Report Inspector catalog."""
-    nrm = pkey.startswith("nrm_")
-    base = pkey[4:] if nrm else pkey
-    if base == "original":
-        name = "Original Image (ROI)"
-    elif base.startswith("std_") and base.endswith("px"):
-        name = f"Std Dev {base[4:-2]} px"
-    elif base.startswith("log_"):
-        name = f"LoG σ {base[4:]} px"
-    elif base.startswith("wavelet_"):
-        name = f"Wavelet level {base[8:]}"
-    elif base.startswith("entropy_") and base.endswith("px"):
-        name = f"Entropy {base[8:-2]} px"
-    elif base.startswith("gradient_"):
-        name = f"Gradient σ {base[9:]} px"
-    else:
-        name = base
-    return f"{name} (noise-normalized)" if nrm else name
-
-
-def _panel_concept(pkey: str) -> str:
-    """Short explanatory text for the Report Inspector's concept box: what
-    concept a Spatial Detail panel measures, what it responds to, and whether
-    higher or lower indicates a stronger response. Dynamic (not a hardcoded
-    map), mirroring _panel_display_name's key-family parsing."""
-    nrm = pkey.startswith("nrm_")
-    base = pkey[4:] if nrm else pkey
-    if base == "original":
-        return ("Source image (mean-signal-normalised), not a detail metric itself — "
-                 "shown for reference alongside the derived maps below.")
-    elif base.startswith("std_") and base.endswith("px"):
-        concept = ("Measures <b>Detail</b> (local texture / variability) within a square "
-                   "window. Responds to any local brightness variation — nebula filaments, "
-                   "star halos, and pixel noise all raise this value; it cannot distinguish "
-                   "real structure from noise on its own. <b>Higher = more local variation</b> "
-                   "(more preserved detail in nebula regions, but also more noise in blank sky).")
-    elif base.startswith("log_"):
-        concept = ("Measures <b>Detail</b> as edge/curvature strength (2nd derivative) at a "
-                   "Gaussian smoothing scale σ. Responds to intensity boundaries — filament "
-                   "edges, shell rims — that survive smoothing at this scale. "
-                   "<b>Higher = sharper, more defined edges</b> at this scale (also amplifies "
-                   "noise at small σ).")
-    elif base.startswith("wavelet_"):
-        concept = ("Measures <b>Detail</b> at a specific spatial scale (~2<sup>level</sup> px) "
-                   "via wavelet decomposition. Responds to structure whose size matches this "
-                   "level — fine filaments/star cores at low levels, broader emission knots/"
-                   "shell edges at higher levels. <b>Higher coefficient magnitude = more "
-                   "structure at this scale</b>; see the wavelet SNR chart for whether it's "
-                   "signal- or noise-dominated.")
-    elif base.startswith("entropy_") and base.endswith("px"):
-        concept = ("Measures <b>Detail</b> as texture complexity (Shannon entropy, bits, log&#8322;) "
-                   "of the local gray-level histogram within a square window, using data quantized "
-                   "into a fixed number of levels beforehand (see 8h methodology). Responds to how "
-                   "rich/unpredictable local tonal structure is — tangled nebulosity, mottled dust, "
-                   "unresolved star fields — but also to noise, even more readily than Local σ. "
-                   "<b>Higher = richer/more unpredictable local tonal distribution</b> (cannot "
-                   "distinguish real structure from noise on its own — see the noise-corrected "
-                   "score).")
-    elif base.startswith("gradient_"):
-        concept = ("Measures <b>Detail</b> as edge sharpness (1st derivative, slope magnitude) "
-                   "at Gaussian scale σ. Responds to how abrupt an intensity transition is at "
-                   "this scale. <b>Higher = crisper, more abrupt boundaries</b> (also amplifies "
-                   "noise at small σ).")
-    else:
-        return ""
-    if nrm:
-        concept += (" <b>Noise-normalised:</b> this map is divided by this image's own "
-                    "empirical noise floor at this scale/operator, putting A and B on a fair "
-                    "shared colour scale. <b>Higher = stronger real signal relative to this "
-                    "image's own noise</b>; values at or below ~1 indicate the response here "
-                    "is no stronger than this image's own noise floor.")
-    return concept
+# Panel display names and descriptions live in core/inspector_catalog.py so the
+# writer (here) and both inspector readers share one definition.  These aliases keep
+# the historical private names importable from this module.
+_panel_display_name = panel_display_name
+_panel_concept      = panel_concept
 
 
 def _power_ratio_db(freq_a, rp_a, freq_b, rp_b) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1247,10 +1178,13 @@ class ReportBuilder:
         sim = self._plot_psf_simulation(result_a, result_b)
         sim_ref_label = ""
         if sim is not None:
-            for skey in ("original", "conv_a", "conv_b", "conv_ref", "diff"):
+            # float32 [0,1] values, not rendered pictures — so the inspector can compute
+            # an exact difference (or log ratio) between any pair of these panels, not
+            # just the one A−B combination a precomputed diff array would cover.
+            for skey in ("original", "conv_a", "conv_b", "conv_ref"):
                 arr = sim.get(skey)
                 if arr is not None:
-                    _add(f"sim_{skey}", arr)
+                    _add(f"sim_{skey}", arr.astype(np.float32))
             sim_ref_label = sim.get("label_ref") or ""
             chart_opts: dict[str, str] = {}
             for lbl, k in [("Original", "sim_original"), ("Image A", "sim_conv_a"),
@@ -1258,8 +1192,6 @@ class ReportBuilder:
                 if k in arrays:
                     chart_opts[lbl] = k
             _add_options_entry("PSF Simulation", "Convolved test chart", chart_opts)
-            _add_options_entry("PSF Simulation", "A−B difference",
-                               {"Diff (A−B)": "sim_diff"})
 
         # ── SNR ───────────────────────────────────────────────────────────────
         sa = result_a.snr_metrics or {}
@@ -2424,9 +2356,16 @@ Higher curve = better contrast preservation at fine scales.</p>
                               rb: AnalysisResult) -> dict | None:
         """Convolve the test chart with each filter's ePSF.
 
-        Returns a dict with uint8 numpy arrays (one per panel) at native pixel
-        resolution, or None if unavailable.  Keys: 'original', 'conv_a', 'conv_b',
-        'diff', 'diff_max', 'label_a', 'label_b'.
+        Returns a dict of float32 numpy arrays in [0, 1] (one per panel) at native
+        pixel resolution, or None if unavailable.  Keys: 'original', 'conv_a',
+        'conv_b', 'conv_ref', 'label_a', 'label_b', 'label_ref', 'xs_data'.
+
+        Panels are returned as *values*, not as rendered pictures: the uint8 cast and
+        the A-B difference's RdBu_r colormapping both live in _psf_simulation_html,
+        where the <img> tag is actually built.  Keeping float here means the Data
+        Inspector can compute an exact difference between any pair of panels — uint8
+        quantises to steps of 1/255, which is coarse relative to a typical A-B range
+        of a few percent and would reduce such a comparison to banding.
         """
         epsf_a = (ra.psf_metrics or {}).get("epsf_data")
         epsf_b = (rb.psf_metrics or {}).get("epsf_data")
@@ -2460,7 +2399,6 @@ Higher curve = better contrast preservation at fine scales.</p>
                       if kern_b is not None else None)
             conv_ref = (np.clip(fftconvolve(test_arr, kern_ref, mode="same"), 0.0, 1.0)
                         if kern_ref is not None else None)
-            diff = conv_a - conv_b if conv_b is not None else None
 
             # Cross-section extraction — must happen before downsampling
             _XS_Y_ROWS = {"high": 105, "medium": 425, "low": 670}
@@ -2488,27 +2426,19 @@ Higher curve = better contrast preservation at fine scales.</p>
                 conv_a   = _ndimage_zoom(conv_a,   zoom_f, order=1)
                 if conv_b is not None:
                     conv_b = _ndimage_zoom(conv_b, zoom_f, order=1)
-                if diff is not None:
-                    diff   = _ndimage_zoom(diff,   zoom_f, order=1)
                 if conv_ref is not None:
                     conv_ref = _ndimage_zoom(conv_ref, zoom_f, order=1)
 
-            diff_rgb = None
-            d_max = None
-            if diff is not None:
-                d_max = max(float(abs(diff).max()), 1e-9)
-                diff_norm = (diff / d_max + 1.0) / 2.0          # [0, 1]
-                diff_rgb = (plt.get_cmap("RdBu_r")(diff_norm)[:, :, :3] * 255).astype(np.uint8)
-
+            # No 'diff' key: callers derive it as conv_a - conv_b.  order=1 zoom is a
+            # linear operator, so zoom(a) - zoom(b) == zoom(a - b) — deriving it after
+            # the downsample above gives the same array as computing it before.
             label_ref = (f"Reference ({self._ref_seeing_arcsec:.1f}″ seeing)"
                          if conv_ref is not None else None)
             return {
-                "original":  (test_arr * 255).astype(np.uint8),
-                "conv_a":    (conv_a   * 255).astype(np.uint8),
-                "conv_b":    (conv_b   * 255).astype(np.uint8) if conv_b is not None else None,
-                "conv_ref":  (conv_ref * 255).astype(np.uint8) if conv_ref is not None else None,
-                "diff":      diff_rgb,
-                "diff_max":  d_max,
+                "original":  test_arr.astype(np.float32),
+                "conv_a":    conv_a.astype(np.float32),
+                "conv_b":    conv_b.astype(np.float32) if conv_b is not None else None,
+                "conv_ref":  conv_ref.astype(np.float32) if conv_ref is not None else None,
                 "label_a":   ra.label,
                 "label_b":   rb.label,
                 "label_ref": label_ref,
@@ -3012,18 +2942,27 @@ Higher curve = better contrast preservation at fine scales.</p>
         has_b = sim.get("conv_b") is not None
 
         def panel(arr, title, caption=""):
+            # _plot_psf_simulation returns float32 [0,1] values; the uint8 cast that
+            # turns them into a picture belongs here, at the point the <img> is built.
+            # Already-uint8 input (the RdBu_r-mapped diff below) passes straight through.
+            if arr.dtype != np.uint8:
+                arr = (np.clip(arr, 0.0, 1.0) * 255).astype(np.uint8)
             tag = _arr_img_tag(arr, title)
             cap = f'<p class="caption">{caption}</p>' if caption else ""
             return f'<div style="margin-bottom:20px;"><p><strong>{title}</strong></p>{tag}{cap}</div>'
 
         diff_panel = ""
-        if has_b and sim.get("diff") is not None:
+        if has_b:
+            diff = sim['conv_a'] - sim['conv_b']
+            d_max = max(float(abs(diff).max()), 1e-9)
+            diff_norm = (diff / d_max + 1.0) / 2.0          # [0, 1]
+            diff_rgb = (plt.get_cmap("RdBu_r")(diff_norm)[:, :, :3] * 255).astype(np.uint8)
             diff_caption = (
-                f"Pixel-level difference A − B (RdBu_r colormap, range ±{sim['diff_max']:.4f}). "
+                f"Pixel-level difference A − B (RdBu_r colormap, range ±{d_max:.4f}). "
                 "Red = A brighter after convolution; blue = B brighter. "
                 "Larger values in fine-detail regions indicate a measurable sharpness difference."
             )
-            diff_panel = panel(sim['diff'], 'Difference (A − B)', diff_caption)
+            diff_panel = panel(diff_rgb, 'Difference (A − B)', diff_caption)
 
         xs_figs          = self._plot_psf_crosssections(sim)
         band_mod_fig     = _img_tag(self._plot_psf_band_modulation(sim),           "Frequency-band contrast retention")

@@ -20,5 +20,6 @@ dependencies:
     - zstandard
     # Application dependencies
     - pyqt6           # pip layout required for PyInstaller and correct Qt DLL layout
+    - pyqtgraph       # interactive figures in the Data Inspector (gui/data_inspector.py)
     - xisf
     - pyinstaller     # build tool only

@@ -14,4 +14,5 @@ xisf
 seaborn
 pandas
 PyQt6
+pyqtgraph
 astroalign

@@ -333,3 +333,68 @@ class TestPanelDisplayName:
     ])
     def test_display_name(self, pkey, expected):
         assert _panel_display_name(pkey) == expected
+
+
+class TestPlotPsfSimulation:
+    """_plot_psf_simulation must return values, not rendered pictures.
+
+    It had no coverage at all, which is how it came to return an RdBu_r-colormapped
+    RGB 'diff' and uint8 panels — lossy enough (1/255 quantum vs. a typical A-B range
+    of a few percent) that any downstream comparison of two panels degenerated into
+    banding.  These tests pin the contract so rendering cannot drift back in.
+    """
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def sim(cls):
+        from report.report_builder import ReportBuilder
+        from core.models import AnalysisResult, REF_SEEING_ARCSEC
+
+        def _epsf(fwhm_px: float) -> np.ndarray:
+            n = 51
+            y, x = np.ogrid[:n, :n]
+            c = n // 2
+            sigma = fwhm_px / 2.355
+            k = np.exp(-((x - c) ** 2 + (y - c) ** 2) / (2 * sigma ** 2))
+            return (k / k.sum()).astype(np.float32)
+
+        ra = AnalysisResult(label="A", psf_metrics={"epsf_data": _epsf(5.0),
+                                                     "epsf_oversampling": 2})
+        rb = AnalysisResult(label="B", psf_metrics={"epsf_data": _epsf(8.0),
+                                                     "epsf_oversampling": 2})
+        builder = ReportBuilder()
+        # build() sets this before any section renders; _plot_psf_simulation reads it
+        # and its bare `except Exception: return None` would otherwise turn the
+        # missing attribute into a silent None.
+        builder._ref_seeing_arcsec = REF_SEEING_ARCSEC
+        return builder._plot_psf_simulation(ra, rb)
+
+    def test_returns_a_result(self, sim):
+        assert sim is not None, "test chart missing or convolution failed"
+
+    @pytest.mark.parametrize("key", ["original", "conv_a", "conv_b"])
+    def test_panels_are_2d_float32_values(self, sim, key):
+        arr = sim[key]
+        assert arr.dtype == np.float32, f"{key} is {arr.dtype}, not float32"
+        assert arr.ndim == 2, f"{key} has {arr.ndim} dims — it is a picture, not data"
+
+    @pytest.mark.parametrize("key", ["original", "conv_a", "conv_b"])
+    def test_panels_are_in_unit_interval(self, sim, key):
+        arr = sim[key]
+        assert arr.min() >= 0.0 and arr.max() <= 1.0
+
+    def test_panels_are_not_uint8_quantised(self, sim):
+        # More than 255 distinct levels proves the float precision actually survived.
+        assert np.unique(sim["conv_a"]).size > 255
+
+    @pytest.mark.parametrize("key", ["diff", "diff_max"])
+    def test_rendered_diff_keys_are_gone(self, sim, key):
+        # The A-B difference is derived by callers from conv_a/conv_b, so a stored
+        # colormapped copy would be both redundant and lossy.
+        assert key not in sim
+
+    def test_difference_is_derivable_and_nontrivial(self, sim):
+        # What _psf_simulation_html and the Data Inspector both now do.
+        diff = sim["conv_a"] - sim["conv_b"]
+        assert diff.shape == sim["conv_a"].shape
+        assert float(abs(diff).max()) > 0.0

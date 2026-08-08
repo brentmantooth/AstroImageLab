@@ -94,3 +94,24 @@ class TestInspectorCatalogDynamicPanels:
         nrm_keys = [k for k in spatial["panels"] if k.startswith("nrm_")]
         assert nrm_keys
         assert any("(noise-normalized)" in n for n in cataloged_names)
+
+    def test_every_spatial_entry_carries_a_description(self, inspector_npz_path):
+        # The inspector's concept box is fed only by this string; an entry without one
+        # shows a blank panel.  Regression for localgrad_*/loclap_*, which produced no
+        # description at all until core/inspector_catalog.py gained their prose.
+        path, _ = inspector_npz_path
+        npz = np.load(str(path), allow_pickle=False)
+        catalog = json.loads(npz["catalog_json"].tobytes().decode("utf-8"))
+        missing = [e["name"] for e in catalog["sections"].get("Spatial Detail", [])
+                   if not e.get("concept", "").strip()]
+        assert not missing, f"Spatial Detail entries without a description: {missing}"
+
+    def test_no_entry_name_is_a_bare_panel_key(self, inspector_npz_path):
+        # "localgrad_1.5" appearing verbatim in the Image-set combo means the key fell
+        # through _panel_display_name's parsing without matching a family.
+        path, spatial = inspector_npz_path
+        npz = np.load(str(path), allow_pickle=False)
+        catalog = json.loads(npz["catalog_json"].tobytes().decode("utf-8"))
+        names = {e["name"] for e in catalog["sections"].get("Spatial Detail", [])}
+        raw_keys = set(spatial["panels"].keys())
+        assert not (names & raw_keys), f"raw panel keys used as names: {names & raw_keys}"

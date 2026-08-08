@@ -99,6 +99,10 @@ class MainWindow(QMainWindow):
         act_open_inspector.triggered.connect(self._open_inspector)
         file_menu.addAction(act_open_inspector)
 
+        act_open_data_inspector = QAction("Open &Data Inspector…", self)
+        act_open_data_inspector.triggered.connect(self._open_data_inspector)
+        file_menu.addAction(act_open_data_inspector)
+
         file_menu.addSeparator()
         act_quit = QAction("&Quit", self)
         act_quit.triggered.connect(self.close)
@@ -425,18 +429,23 @@ class MainWindow(QMainWindow):
                 self._inspector = ReportInspector(npz_path, parent=self)
                 self._inspector.show()
 
-    def _open_inspector(self) -> None:
+    def _pick_inspector_npz(self, title: str):
+        """Prompt for a report .html (or its .npz directly) and resolve the .npz path.
+
+        Shared by both inspectors — either accepts the HTML the user actually
+        recognises and resolves the companion file, or the .npz itself.
+        Returns None if the user cancelled or the companion file is missing.
+        """
         from pathlib import Path as _Path
-        from gui.report_inspector import ReportInspector
         start_dir = self._control.settings().get("output_dir", "")
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open Report Inspector",
+            title,
             start_dir,
             "Astro Image Lab Report (*.html *_inspector.npz);;All files (*)",
         )
         if not path:
-            return
+            return None
         p = _Path(path)
         if p.suffix.lower() == ".html":
             npz_path = p.with_name(p.stem + "_inspector.npz")
@@ -450,9 +459,36 @@ class MainWindow(QMainWindow):
                 f"Expected: {npz_path.name}\n\n"
                 "Run the analysis again to regenerate the inspector file.",
             )
+            return None
+        return npz_path
+
+    def _open_inspector(self) -> None:
+        from gui.report_inspector import ReportInspector
+        npz_path = self._pick_inspector_npz("Open Report Inspector")
+        if npz_path is None:
             return
         self._inspector = ReportInspector(npz_path, parent=self)
         self._inspector.show()
+
+    def _open_data_inspector(self) -> None:
+        try:
+            from gui.data_inspector import DataInspector
+        except ImportError as exc:
+            # pyqtgraph is a hard requirement for this window only; degrade with an
+            # explanation rather than taking down the menu action with a traceback.
+            QMessageBox.warning(
+                self,
+                "Data Inspector unavailable",
+                "The Data Inspector needs the pyqtgraph package, which could not be "
+                f"imported:\n\n{exc}\n\nInstall it with:\n    pip install pyqtgraph",
+            )
+            return
+        npz_path = self._pick_inspector_npz("Open Data Inspector")
+        if npz_path is None:
+            return
+        dark = self._control.settings().get("dark_mode_graphics", False)
+        self._data_inspector = DataInspector(npz_path, dark_mode=dark, parent=self)
+        self._data_inspector.show()
 
     def _extract_images_from_html(self) -> None:
         from pathlib import Path as _Path

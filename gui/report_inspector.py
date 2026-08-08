@@ -5,14 +5,12 @@ file written alongside each HTML report so it works for past runs too.
 """
 from __future__ import annotations
 
-import io
-import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image as _PIL
+
+from core.inspector_catalog import Entry, InspectorData, load_inspector_data
 
 import matplotlib
 matplotlib.rcParams.update({
@@ -118,54 +116,12 @@ def _to_uint8_display(arr: np.ndarray) -> np.ndarray:
 # Data structures
 # ---------------------------------------------------------------------------
 
-@dataclass
-class _Entry:
-    name:    str
-    options: dict[str, str]   # display_label → npz_key; ordered
-    concept: str = ""         # optional explanatory text (Spatial Detail section)
-
-
-@dataclass
-class _InspectorData:
-    label_a: str
-    label_b: str
-    sim_label_ref: str
-    filename_a: str = ""
-    filename_b: str = ""
-    single_image: bool = False
-    sections: dict[str, list[_Entry]] = field(default_factory=dict)
-
-
-def _load_inspector_data(npz: "np.lib.npyio.NpzFile") -> _InspectorData:
-    json_bytes = npz["catalog_json"].tobytes()
-    cat = json.loads(json_bytes.decode("utf-8"))
-    data = _InspectorData(
-        label_a=cat.get("label_a", "Image A"),
-        label_b=cat.get("label_b", "Image B"),
-        sim_label_ref=cat.get("sim_label_ref", ""),
-        filename_a=cat.get("filename_a", ""),
-        filename_b=cat.get("filename_b", ""),
-        single_image=cat.get("single_image", False),
-    )
-    npz_keys = set(npz.files)
-    for section, entries in cat.get("sections", {}).items():
-        parsed = []
-        for e in entries:
-            # Support both new {options: {...}} and legacy {key_a, key_b} formats
-            if "options" in e:
-                opts = {k: v for k, v in e["options"].items() if v in npz_keys}
-            else:
-                opts = {}
-                if e.get("key_a") in npz_keys:
-                    opts["Image A"] = e["key_a"]
-                if e.get("key_b") in npz_keys:
-                    opts["Image B"] = e["key_b"]
-            if opts:
-                parsed.append(_Entry(name=e["name"], options=opts,
-                                      concept=e.get("concept", "")))
-        if parsed:
-            data.sections[section] = parsed
-    return data
+# The catalog format is shared with gui/data_inspector.py and report/report_builder.py;
+# its single definition lives in core/inspector_catalog.py.  These aliases keep the
+# rest of this module reading exactly as before.
+_Entry               = Entry
+_InspectorData       = InspectorData
+_load_inspector_data = load_inspector_data
 
 
 def _get_array(npz: "np.lib.npyio.NpzFile", key: str) -> np.ndarray | None:
