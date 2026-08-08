@@ -3,10 +3,10 @@
 Kept separate from gui/data_inspector.py so the window module stays about layout and
 wiring while the drawing primitives stay independently readable.
 
-Colour scales are deliberately *not* invented here — they are imported from
-SpatialDetailAnalyzer so an image, its histogram, and (in Phase 2) its correlation
-scatter all mean the same thing by the same colour, exactly as the report's Section 8
-figures already do.
+Drawing only: every array formula this module needs — luma reduction, the shared
+display range, the A-vs-B comparison and its colour range — lives in
+analysis/inspector_regions.py, which is headless and therefore testable.  Nothing
+here should recompute one of them; import it.
 """
 from __future__ import annotations
 
@@ -22,7 +22,10 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 
-from analysis.image_filters import SpatialDetailAnalyzer as _SDA
+from analysis.inspector_regions import (
+    COMPARE_DIFFERENCE, COMPARE_LOGRATIO, ROI_ELLIPSE, ROI_POLYGON, ROI_RECT,
+    comparison_map, comparison_range, select_points_in_polygon, to_2d, value_range,
+)
 from core.models import SECTION8_ANALYSIS_CMAP
 
 # arr[row, col] -> (y, x) with no transposes anywhere in this module.
@@ -37,6 +40,12 @@ COLOR_COMPARE = "#ffa500"  # orange — the opt-in right-axis comparison curve
 
 # Default cross-section line in normalised [0,1] coords — a centred diagonal.
 DEFAULT_LINE = (0.25, 0.5, 0.75, 0.5)
+
+# Overlay defaults: magenta marks the pixels feeding the in-mask correlation plot,
+# cyan marks pixels lassoed in a correlation plot.  Both user-changeable.
+OVERLAY_MASK_COLOR = "#ff00ff"
+OVERLAY_SELECTION_COLOR = "#00ffff"
+OVERLAY_DEFAULT_ALPHA = 115          # 0-255; ~45%, matching the report's mask figure
 
 _DARK_BG = "#1e1e1e"
 _DARK_FG = "#dddddd"
@@ -64,66 +73,12 @@ def style_plot_item(plot_item: pg.PlotItem, fg: str) -> None:
     plot_item.titleLabel.setAttr("color", fg)
 
 
-def to_2d(arr: np.ndarray) -> np.ndarray:
-    """Reduce an RGB array to Rec.709 luma; pass 2-D through unchanged.
-
-    Defensive only: since PSF Simulation panels became float32 values, nothing the
-    report writes is RGB.  Kept so an older .npz (which still holds an RGB sim_diff)
-    can be measured rather than rejected.
-    """
-    if arr.ndim == 3:
-        a = arr.astype(np.float32)
-        return (0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2])
-    return arr
-
-
-def value_range(arrays: list[np.ndarray]) -> tuple[float, float]:
-    """Shared percentile-clipped display range across several panels.
-
-    Character-for-character the same formula as _plot_side_by_side's shared A/B
-    scale (analysis/image_filters.py), including the unconditional `max(0.0, ...)`
-    floor, so a panel is shaded identically here and in the report.
-
-    That floor does clip negative values to the bottom colour on signed panels
-    (the background-subtracted Original, wavelet band-pass reconstructions).  It is
-    kept deliberately rather than "improved" for signed data: matching the report
-    is the point, and the colour bar is interactive, so the levels can be dragged
-    to reveal the negative tail when that is what you want to look at.
-    """
-    finite = [to_2d(a) for a in arrays if a is not None and a.size]
-    if not finite:
-        return 0.0, 1.0
-    vmin = max(0.0, min(float(np.percentile(a, 0.5)) for a in finite))
-    vmax = max(float(np.percentile(a, 99.5)) for a in finite)
-    if vmax <= vmin:
-        vmax = vmin + 1e-9
-    return vmin, vmax
-
-
-def comparison_map(arr_a: np.ndarray, arr_b: np.ndarray, mode: str) -> np.ndarray:
-    """A-vs-B comparison in the report's own terms.
-
-    "logratio" delegates to SpatialDetailAnalyzer._log_ratio_map, which handles the
-    common-shape crop and the percentile epsilon floor; "difference" is the plain
-    signed A - B on the same common crop.  There is deliberately no linear A/B mode:
-    Section 8's convention is the log10 ratio throughout.
-    """
-    a, b = to_2d(arr_a), to_2d(arr_b)
-    if mode == "difference":
-        h = min(a.shape[0], b.shape[0])
-        w = min(a.shape[1], b.shape[1])
-        return (a[:h, :w] - b[:h, :w]).astype(np.float32)
-    return _SDA._log_ratio_map(a, b)
-
-
-def comparison_range(diff: np.ndarray) -> tuple[float, float]:
-    """Symmetric-about-zero colour range, shared by the map and its histogram."""
-    return _SDA._log_ratio_color_range(diff)
-
-
+# Human-readable names for the comparison modes.  The modes themselves and all the
+# arithmetic behind them live in analysis/inspector_regions.py, where the headless
+# suite can test them; only the display strings belong to the GUI.
 COMPARE_LABELS = {
-    "logratio":   "Log ratio, log10(|A|/|B|)",
-    "difference": "Difference, A − B",
+    COMPARE_LOGRATIO:   "Log ratio, log10(|A|/|B|)",
+    COMPARE_DIFFERENCE: "Difference, A − B",
 }
 
 
@@ -150,6 +105,8 @@ class LinkedImageView(QWidget):
     line_changed = pyqtSignal(float, float, float, float)
     # divider position, normalised [0,1]
     swipe_changed = pyqtSignal(float)
+    # ROI geometry dict in normalised coords (see analysis.inspector_regions.roi_mask)
+    roi_changed = pyqtSignal(object)
 
     def __init__(self, title: str = "", dark: bool = False, parent=None):
         super().__init__(parent)
@@ -181,6 +138,21 @@ class LinkedImageView(QWidget):
         self._image_swipe.setZValue(5)
         self._image_swipe.setVisible(False)
         self._plot.addItem(self._image_swipe)
+
+        # Mask and selection overlays.  Each holds a uint8 {0,1} label image with a
+        # 2-entry RGBA lookup table, so changing colour or opacity rewrites two LUT
+        # rows instead of rebuilding an H x W x 4 buffer — and the overlay costs
+        # 1 byte/px rather than 4.
+        self._mask_overlay = pg.ImageItem(axisOrder="row-major")
+        self._sel_overlay = pg.ImageItem(axisOrder="row-major")
+        for item, z in ((self._mask_overlay, 8), (self._sel_overlay, 9)):
+            item.setZValue(z)
+            item.setVisible(False)
+            self._plot.addItem(item)
+        self._overlay_style = {
+            "mask": (OVERLAY_MASK_COLOR, OVERLAY_DEFAULT_ALPHA),
+            "selection": (OVERLAY_SELECTION_COLOR, OVERLAY_DEFAULT_ALPHA),
+        }
 
         self._divider = pg.InfiniteLine(
             pos=0, angle=90, movable=True,
@@ -216,6 +188,12 @@ class LinkedImageView(QWidget):
         self._line.setZValue(20)
         self._plot.addItem(self._line)
         self._line.sigRegionChanged.connect(self._on_line_dragged)
+
+        # ROI shape.  Only one exists at a time; changing kind rebuilds it, because
+        # pyqtgraph's rect/ellipse/polygon ROIs are different classes.
+        self._roi_item: pg.ROI | None = None
+        self._roi_kind: str | None = None
+        self._syncing_roi = False
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -363,6 +341,131 @@ class LinkedImageView(QWidget):
 
     def swipe_normalised(self) -> float:
         return self._swipe_pos
+
+    # -- overlays ---------------------------------------------------------
+
+    def _overlay_item(self, which: str) -> pg.ImageItem:
+        return self._mask_overlay if which == "mask" else self._sel_overlay
+
+    def set_overlay(self, which: str, mask: np.ndarray | None) -> None:
+        """Show `mask` (a boolean array) as a translucent layer, or clear it."""
+        item = self._overlay_item(which)
+        if mask is None or not np.any(mask):
+            item.clear()
+            item.setVisible(False)
+            return
+        item.setImage(np.ascontiguousarray(mask, dtype=np.uint8),
+                      autoLevels=False, levels=(0, 1))
+        item.setLookupTable(self._overlay_lut(which))
+        item.setVisible(True)
+
+    def set_overlay_style(self, which: str, color: str | None = None,
+                          alpha: int | None = None) -> None:
+        """Recolour an overlay without touching its mask — a 2-row LUT rewrite."""
+        cur_color, cur_alpha = self._overlay_style[which]
+        self._overlay_style[which] = (color or cur_color,
+                                      cur_alpha if alpha is None else int(alpha))
+        item = self._overlay_item(which)
+        if item.image is not None:
+            item.setLookupTable(self._overlay_lut(which))
+
+    def set_overlay_visible(self, which: str, visible: bool) -> None:
+        item = self._overlay_item(which)
+        item.setVisible(bool(visible) and item.image is not None)
+
+    def _overlay_lut(self, which: str) -> np.ndarray:
+        color, alpha = self._overlay_style[which]
+        c = pg.mkColor(color)
+        return np.array([[0, 0, 0, 0],
+                         [c.red(), c.green(), c.blue(), int(alpha)]], dtype=np.ubyte)
+
+    # -- ROI --------------------------------------------------------------
+
+    def set_roi(self, roi: dict | None) -> None:
+        """Draw the shared ROI, in normalised coords, without re-emitting.
+
+        A rect and an ellipse are different pyqtgraph classes, so switching kind
+        replaces the item; moving the same kind only repositions it, which keeps
+        drag state intact while the user is working.
+        """
+        shape = self.shape
+        if shape is None:
+            return
+        h, w = shape
+        kind = None if roi is None else roi.get("kind")
+
+        if kind != self._roi_kind:
+            if self._roi_item is not None:
+                self._plot.removeItem(self._roi_item)
+                self._roi_item = None
+            self._roi_kind = kind
+            if kind is not None:
+                self._roi_item = self._make_roi_item(kind)
+                self._roi_item.setZValue(15)
+                self._plot.addItem(self._roi_item)
+                self._roi_item.sigRegionChanged.connect(self._on_roi_dragged)
+        if self._roi_item is None:
+            return
+
+        self._syncing_roi = True
+        try:
+            if kind == ROI_POLYGON:
+                pts = [(x * w, y * h) for x, y in (roi.get("points") or [])]
+                if pts:
+                    self._roi_item.setPoints(pts, closed=True)
+            else:
+                x0, x1 = sorted((roi["x0"] * w, roi["x1"] * w))
+                y0, y1 = sorted((roi["y0"] * h, roi["y1"] * h))
+                self._roi_item.setPos((x0, y0), finish=False)
+                self._roi_item.setSize((max(x1 - x0, 1.0), max(y1 - y0, 1.0)),
+                                       finish=False)
+        finally:
+            self._syncing_roi = False
+
+    def _make_roi_item(self, kind: str) -> pg.ROI:
+        pen = pg.mkPen(OVERLAY_MASK_COLOR, width=2)
+        hover = pg.mkPen("#ffffff", width=2)
+        common = dict(pen=pen, hoverPen=hover, removable=False)
+        if kind == ROI_ELLIPSE:
+            return pg.EllipseROI([0, 0], [10, 10], **common)
+        if kind == ROI_POLYGON:
+            return pg.PolyLineROI([[0, 0], [10, 0], [10, 10]], closed=True, **common)
+        return pg.RectROI([0, 0], [10, 10], **common)
+
+    def roi_normalised(self) -> dict | None:
+        """Current ROI geometry in normalised [0,1] coords, or None."""
+        shape = self.shape
+        if shape is None or self._roi_item is None or self._roi_kind is None:
+            return None
+        h, w = shape
+        if self._roi_kind == ROI_POLYGON:
+            pts = [self._roi_item.mapToParent(hd.pos())
+                   for hd in self._roi_item.getHandles()]
+            return {"kind": ROI_POLYGON,
+                    "points": [(p.x() / w, p.y() / h) for p in pts]}
+        pos, size = self._roi_item.pos(), self._roi_item.size()
+        return {"kind": self._roi_kind,
+                "x0": pos.x() / w, "y0": pos.y() / h,
+                "x1": (pos.x() + size.x()) / w, "y1": (pos.y() + size.y()) / h}
+
+    def set_roi_locked(self, locked: bool) -> None:
+        """Same treatment as the cross-section line: visible but un-grabbable when
+        its tool is not the active one, so a click is never ambiguous."""
+        if self._roi_item is None:
+            return
+        self._roi_item.translatable = not locked
+        for handle in self._roi_item.getHandles():
+            handle.setVisible(not locked)
+            handle.setEnabled(not locked)
+        self._roi_item.setAcceptedMouseButtons(
+            Qt.MouseButton.NoButton if locked else Qt.MouseButton.LeftButton)
+
+    def _on_roi_dragged(self) -> None:
+        if self._syncing_roi:
+            return
+        roi = self.roi_normalised()
+        if roi is not None:
+            self.roi_changed.emit(roi)
 
     def _on_divider_dragged(self) -> None:
         if self._syncing_swipe or self._arr_swipe is None:
@@ -659,3 +762,182 @@ class RatioHistogramPlot(QWidget):
             item = pg.PlotDataItem(xs, ys, pen=pen)
             self._box_plot.addItem(item)
             self._box_items.append(item)
+
+
+# ---------------------------------------------------------------------------
+# Correlation scatter with lasso / rectangle brushing
+# ---------------------------------------------------------------------------
+
+BRUSH_OFF = "off"
+BRUSH_RECT = "rect"
+BRUSH_LASSO = "lasso"
+
+
+class _BrushViewBox(pg.ViewBox):
+    """ViewBox that can capture a rectangle or freehand polygon instead of panning.
+
+    While dragging, only the outline is drawn — the point-in-polygon test runs once,
+    on release.  Testing every point on every mouse-move is what makes a lasso feel
+    heavy on a 50 000-point scatter.
+    """
+
+    polygon_drawn = pyqtSignal(object)     # (N, 2) vertices in data coords
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._brush_mode = BRUSH_OFF
+        self._points: list[tuple[float, float]] = []
+        self._outline = pg.PlotDataItem(
+            [], [], pen=pg.mkPen(OVERLAY_SELECTION_COLOR, width=1.5,
+                                 style=Qt.PenStyle.DashLine))
+        self._outline.setZValue(50)
+        self.addItem(self._outline, ignoreBounds=True)
+
+    def set_brush_mode(self, mode: str) -> None:
+        self._brush_mode = mode
+        if mode == BRUSH_OFF:
+            self._clear_outline()
+
+    def _clear_outline(self) -> None:
+        self._points = []
+        self._outline.setData([], [])
+
+    def mouseDragEvent(self, ev, axis=None):
+        if self._brush_mode == BRUSH_OFF or ev.button() != Qt.MouseButton.LeftButton:
+            super().mouseDragEvent(ev, axis=axis)
+            return
+        ev.accept()
+        pos = self.mapToView(ev.pos())
+        if ev.isStart():
+            self._points = [(pos.x(), pos.y())]
+            return
+        if self._brush_mode == BRUSH_RECT:
+            x0, y0 = self._points[0]
+            self._points = [(x0, y0), (pos.x(), y0), (pos.x(), pos.y()), (x0, pos.y())]
+        else:
+            self._points.append((pos.x(), pos.y()))
+        pts = self._points + self._points[:1]        # close the outline visually
+        self._outline.setData([p[0] for p in pts], [p[1] for p in pts])
+        if ev.isFinish():
+            poly = np.asarray(self._points, dtype=float)
+            self._clear_outline()
+            if poly.shape[0] >= 3:
+                self.polygon_drawn.emit(poly)
+
+
+class CorrelationPlot(QWidget):
+    """A-vs-B scatter for one pixel population, with a 1:1 line and brushing.
+
+    Three layers, per the linked-brushing model: an all-points base layer coloured by
+    each pixel's comparison value, a high-contrast selected layer, and the reference
+    line.  Selection never restyles the base layer — it only refills the second one.
+    """
+
+    # np.int64 array of flat pixel ids
+    selection_changed = pyqtSignal(object)
+
+    _N_BRUSH_BINS = 64
+
+    def __init__(self, title: str = "", dark: bool = False, parent=None):
+        super().__init__(parent)
+        bg, fg = theme_colors(dark)
+        self._fg = fg
+        self._sample = None
+        self._brush_cache: list | None = None
+
+        self._vb = _BrushViewBox()
+        self._glw = pg.GraphicsLayoutWidget()
+        self._glw.setBackground(bg)
+        self._plot = self._glw.addPlot(viewBox=self._vb, title=title)
+        self._plot.showGrid(x=True, y=True, alpha=0.3)
+        self._plot.setMenuEnabled(False)
+        self._plot.setAspectLocked(True)
+        style_plot_item(self._plot, fg)
+        for name in ("bottom", "left"):
+            self._plot.getAxis(name).enableAutoSIPrefix(False)
+
+        self._base = pg.ScatterPlotItem(pen=None, size=3, useCache=True)
+        self._selected = pg.ScatterPlotItem(
+            pen=None, size=4, brush=pg.mkBrush(OVERLAY_SELECTION_COLOR))
+        self._selected.setZValue(10)
+        # Slope-1 reference: where A == B. Divergence from it is the whole point.
+        self._unity = pg.InfiniteLine(pos=(0, 0), angle=45,
+                                      pen=pg.mkPen(fg, width=1.2,
+                                                   style=Qt.PenStyle.DashLine))
+        for item in (self._base, self._selected, self._unity):
+            self._plot.addItem(item)
+
+        self._vb.polygon_drawn.connect(self._on_polygon)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self._glw)
+
+    # -- data -------------------------------------------------------------
+
+    def set_sample(self, sample, color_range: tuple[float, float],
+                   label_a: str, label_b: str, region: str) -> None:
+        """Show one CorrelationSample (from analysis.inspector_regions)."""
+        self._sample = sample
+        self._selected.setData([], [])
+        if sample is None or sample.n_total == 0:
+            self._base.setData([], [])
+            self._plot.setTitle(f"{region} (no pixels)", color=self._fg, size="9pt")
+            return
+
+        self._base.setData(sample.b_vals, sample.a_vals,
+                           brush=self._brushes(sample.c_vals, color_range))
+        self._plot.setLabel("bottom", f"{label_b} (x)")
+        self._plot.setLabel("left", f"{label_a} (y)")
+        shown = sample.a_vals.size
+        suffix = f", showing {shown:,}" if shown < sample.n_total else ""
+        self._plot.setTitle(f"{region} (n={sample.n_total:,}{suffix})",
+                            color=self._fg, size="9pt")
+        self._plot.setXRange(sample.axis_lo, sample.axis_hi, padding=0)
+        self._plot.setYRange(sample.axis_lo, sample.axis_hi, padding=0)
+
+    def _brushes(self, c_vals: np.ndarray, color_range: tuple[float, float]) -> list:
+        """One shared QBrush per colour bin, indexed per point.
+
+        Building 50 000 individual QBrush objects dominates the update; quantising the
+        comparison value into a fixed number of bins makes it a lookup instead.  The
+        colormap and range are the map's own, so a dot's colour means what the same
+        colour means in the comparison image.
+        """
+        if self._brush_cache is None:
+            cm = _get_colormap("bwr")
+            self._brush_cache = [
+                pg.mkBrush(cm.map(i / (self._N_BRUSH_BINS - 1), mode="qcolor"))
+                for i in range(self._N_BRUSH_BINS)
+            ]
+        lo, hi = color_range
+        span = (hi - lo) or 1.0
+        idx = np.clip(((c_vals - lo) / span * (self._N_BRUSH_BINS - 1)).astype(int),
+                      0, self._N_BRUSH_BINS - 1)
+        cache = self._brush_cache
+        return [cache[i] for i in idx]
+
+    # -- selection --------------------------------------------------------
+
+    def set_brush_mode(self, mode: str) -> None:
+        self._vb.set_brush_mode(mode)
+
+    def set_selected_ids(self, ids: np.ndarray | None) -> None:
+        """Highlight the points whose flat pixel ids are in `ids`.
+
+        Matching on ids rather than positions is what lets a selection made in one
+        plot survive a resample, and lets the sibling plot show the same pixels.
+        """
+        s = self._sample
+        if s is None or ids is None or len(ids) == 0 or s.n_total == 0:
+            self._selected.setData([], [])
+            return
+        hit = np.isin(s.flat_ids, np.asarray(ids, dtype=np.int64))
+        self._selected.setData(s.b_vals[hit], s.a_vals[hit])
+
+    def _on_polygon(self, poly: np.ndarray) -> None:
+        s = self._sample
+        if s is None or s.n_total == 0:
+            return
+        hit = select_points_in_polygon(s.b_vals, s.a_vals, poly)
+        self.selection_changed.emit(s.flat_ids[hit])

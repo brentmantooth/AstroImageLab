@@ -24,17 +24,23 @@ analysis/              Metric engines — each returns a plain dict
   power_spectrum.py    Signal-normalised 2D FFT power spectrum
   image_filters.py     Local σ maps, Laplacian of Gaussian, wavelet decomposition
   star_catalog.py      DAOStarFinder star detection and isolation filtering
+  inspector_regions.py Headless array maths for the Data Inspector — display ranges,
+                       A/B comparison, ROI/threshold masks, correlation sampling
 core/
   astro_image.py       FITS/XISF loading, background estimation (photutils)
   models.py            40+ constants + AnalysisResult dataclass
   fig_utils.py         fig_to_b64() — embeds matplotlib figure as base64 PNG
   stretch.py           STF stretch + normalize_for_display() for 8-bit display output
   stats_utils.py       mannwhitney_effect() — Mann-Whitney U + Cliff's delta, shared by analysis/ and report/
+  inspector_catalog.py _inspector.npz catalog reader + panel display names/descriptions,
+                       shared by report_builder (writer) and both inspectors (readers)
 gui/
   analysis_thread.py   QThread orchestrator; dark-mode rcParams save/restore lives here
   control_panel.py     Settings UI; settings() returns dict consumed by the thread
   image_panel.py       Image display panel; load_path() / set_starless_path() for programmatic load
-  report_inspector.py  Interactive side-by-side figure viewer
+  report_inspector.py  Interactive side-by-side figure viewer (matplotlib; being replaced)
+  data_inspector.py    Data Inspector (QMainWindow) — pyqtgraph successor to the above
+  inspector_widgets.py pyqtgraph widgets for the Data Inspector (drawing only, no maths)
   synthetic_dialog.py  Synthetic Data Generator dialog (QMainWindow)
   halo_dialog.py       Halo Analyzer interactive tool (QDialog); click-a-star PSF/RDF inspector
 report/
@@ -58,6 +64,11 @@ tools/
 | `fig_to_b64(fig)` | `core/fig_utils.py` | Embeds matplotlib figure as base64 PNG string |
 | `finalize_layout(fig, **kwargs)` | `core/fig_utils.py` | Runs `fig.tight_layout(**kwargs)` under the same process-wide lock as `fig_to_b64()`'s `savefig()`. Call this instead of `fig.tight_layout()` directly in any figure-building code that can execute concurrently with other figure-building code — see the mathtext race pitfall below |
 | `locked_draw_call(fn, *args, **kwargs)` | `core/fig_utils.py` | Runs a matplotlib call that can trigger draw-adjacent text/layout measurement (`fig.colorbar(...)`, `ax.legend(...)` — especially `loc="best"` auto-placement) under the same `_MPL_DRAW_LOCK` as `finalize_layout()`/`fig_to_b64()`. Call this instead of `fig.colorbar(...)`/`ax.legend(...)` directly in any figure-building code that can execute concurrently with other figure-building code — see the mathtext race pitfall below |
+| `panel_display_name(pkey)` / `panel_concept(pkey)` | `core/inspector_catalog.py` | Human-readable name and description for a `SpatialDetailAnalyzer` panels key. **Add a branch here whenever a new metric family is added**, or the family shows in both inspectors as a raw key (`localgrad_1.5`) with a blank description box — exactly the gap 8i/8j sat in. `report_builder.py` re-exports them as `_panel_display_name`/`_panel_concept` |
+| `load_inspector_data(npz)` | `core/inspector_catalog.py` | Parses `catalog_json` into `InspectorData`/`Entry`. Filters options against arrays actually present, supports the legacy `{key_a, key_b}` format, and back-fills a missing description from the npz key so older `.npz` files gain new prose without regeneration |
+| `value_range(arrays)` | `analysis/inspector_regions.py` | Shared percentile display range, character-for-character `_plot_side_by_side`'s formula **including the unconditional `max(0.0, …)` floor**. Never "improve" it for signed data — matching the report is the point |
+| `comparison_map(a, b, mode)` / `comparison_range(diff)` | `analysis/inspector_regions.py` | A-vs-B map (`COMPARE_LOGRATIO` / `COMPARE_DIFFERENCE`) and its symmetric colour range, both delegating to `SpatialDetailAnalyzer`'s own helpers. Raises on an unknown mode rather than silently falling through to log-ratio |
+| `roi_mask` / `threshold_mask` / `refine_mask` / `correlation_sample` / `ids_to_mask` / `select_points_in_polygon` | `analysis/inspector_regions.py` | The Data Inspector's region pipeline. `threshold_mask` returns a `ThresholdResult(mask, warning)`; `correlation_sample` returns flat pixel ids as the stable identity linking scatter points to pixels |
 | `normalize_for_display(arr)` | `core/stretch.py` | STF-stretch float32 array → uint8 [0,255] for QImage display |
 | `stf_stretch(data)` | `core/stretch.py` | STF midtone-balance stretch → float32 [0,1]; maps sky to ~20 % grey |
 | `load_path(path)` | `gui/image_panel.py` | Load image by path with no dialog and no starless prompt |
@@ -417,6 +428,63 @@ per-grouping outer function, concatenate + single collapse) to any other report 
 whose height is a function of "how many things currently exist" rather than a fixed
 count.
 
+### pyqtgraph — keep maths out of `gui/`, and theme per widget
+
+The Data Inspector (`gui/data_inspector.py` + `gui/inspector_widgets.py`) is the only
+pyqtgraph code in the project. Two structural rules make it maintainable:
+
+**Every array formula lives in `analysis/inspector_regions.py`, never in the widget.**
+`gui/` has no test coverage by design (the headless suite has no PyQt6), so anything
+computed there is unverifiable. This is not theoretical: `value_range` was first
+written inside `inspector_widgets.py` with an invented conditional that preserved
+negative values for signed maps, so the inspector shaded the Original panel from
+−9.23 where the report starts at 0. Nothing could catch it until the formula moved
+somewhere a test could reach — it was found by rendering the report figure and
+comparing numbers by hand. When adding a new interactive view, put the maths in
+`analysis/` or `core/` first and have the widget import it.
+
+**Theme per widget, never through `pg.setConfigOption`.** `background`/`foreground`
+are process-global — the same mistake as the Report Inspector's import-time
+matplotlib `rcParams` mutation, which CLAUDE.md already records as a pitfall. Use
+`GraphicsLayoutWidget.setBackground(...)` plus `AxisItem.setPen/setTextPen` (see
+`theme_colors()` / `style_plot_item()`), driven by the `dark_mode_graphics` setting
+passed into the constructor. `imageAxisOrder="row-major"` and `antialias=False` *are*
+set globally at module import — those are correctness/performance defaults with no
+per-widget meaning, unlike colour.
+
+**Pin the Qt binding before importing pyqtgraph:**
+`os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")` at the top of any module that
+imports it. pyqtgraph probes for every binding, and a frozen build that sees another
+one on the path can bind to the wrong Qt. The spec excludes `PySide6`/`PySide2`/`PyQt5`
+for the same reason, and `MainWindow._open_data_inspector` wraps its deferred import
+in `try/except ImportError` so a stale env shows a `QMessageBox` instead of a traceback.
+
+**Only one tool accepts the mouse at a time.** With several draggable items in one
+panel (cross-section line, ROI, swipe divider) a click is ambiguous unless the
+inactive ones are genuinely inert — not merely hidden. Locking takes three steps
+together: `item.translatable = False`, `handle.setVisible(False)` **and**
+`handle.setEnabled(False)`, plus `setAcceptedMouseButtons(Qt.MouseButton.NoButton)`.
+See `LinkedImageView.set_line_locked` / `set_roi_locked`, driven by the window's
+`Tool:` combo, with a hint label stating the current click behaviour.
+
+### Overlays on a pyqtgraph image — indexed label image + LUT, not an RGBA rebuild
+
+Draw a mask as its own `ImageItem` above the base image, holding a **uint8 {0,1}
+array with a 2-entry RGBA lookup table** (`[[0,0,0,0], [r,g,b,alpha]]`), not an
+`H×W×4` RGBA buffer. Changing colour or opacity then rewrites two LUT rows instead
+of rebuilding megabytes, and the overlay costs 1 byte/px rather than 4. See
+`LinkedImageView.set_overlay` / `set_overlay_style` / `_overlay_lut`.
+
+### Registering several ImageItems with one ColorBarItem
+
+`ColorBarItem.setImageItem` **replaces** its `img_list` rather than appending, and it
+accepts a list — so pass every item in one call:
+`setImageItem([base, overlay], insert_in=plot)`. This is what guarantees the two
+halves of an A/B wipe can never drift onto different scales, including when the user
+drags the bar's level handles. Do **not** hand-sync via `sigLevelsChanged`: that
+signal fires only on interactive drags, never on a programmatic `setLevels`, so a
+hand-rolled connection silently does nothing (`_update_items` is what propagates).
+
 ### Toolbar actions that mirror control-panel widgets — share QActions, proxy clicks, sync reactively
 
 `gui/main_window.py::_build_toolbar()` is the app's first `QToolBar`, sitting above the
@@ -502,6 +570,14 @@ The spec post-build step automatically creates a platform-labelled zip:
 PyQt6 **must** be installed via `pip`, not `conda` — the conda-forge PyQt6 package
 uses a different DLL layout that breaks PyInstaller hook discovery on Windows.
 
+`pyqtgraph` backs the Data Inspector. It is declared in `environment.yml`,
+`requirements.txt` and `requirements-build.txt`, and bundled via
+`collect_all("pyqtgraph")` in the spec (it ships `icons/`, `colors/maps/*.csv` and
+`.ui` files and resolves submodules lazily, so static analysis misses them). The
+spec also excludes `PySide6`, `PySide2` and `PyQt5` so pyqtgraph's binding shim
+cannot pull a second Qt into the bundle. It is deliberately **not** in
+`requirements-test.txt` — the suite stays headless.
+
 For CI builds use `requirements-build.txt` (full runtime deps + PyInstaller + PyQt6).
 The Linux runner needs system Qt libraries before pip:
 
@@ -518,14 +594,14 @@ sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 ```bash
 conda activate astrolab
 pip install -r requirements-test.txt          # one-time setup; not in environment.yml
-pytest tests/ -m "not slow" -n auto           # fast suite (438 tests; parallel via pytest-xdist)
+pytest tests/ -m "not slow" -n auto           # fast suite (724 tests; parallel via pytest-xdist)
 pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
 pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 ```
 
 ### Design principles
 
-- **Headless only** — no PyQt6 dependency in tests. Covers `analysis/`, `core/`, `synthetic/`, `report/`.
+- **Headless only** — no PyQt6 dependency in tests. Covers `analysis/`, `core/`, `synthetic/`, `report/`. **`gui/` is therefore untested, which is a design constraint, not an oversight**: any logic a GUI feature needs must be pushed down into `analysis/` or `core/` to be verifiable at all. `analysis/inspector_regions.py` and `core/inspector_catalog.py` exist for exactly that reason — see the pyqtgraph convention above for the bug that motivated the split.
 - **Generated fixtures** — `tests/conftest.py` writes a 512×512 hand-crafted FITS (30 Gaussian stars, ~1 s) as the session fixture for all analysis tests. No binary fixtures committed to git.
 - **Slow marker** — `@pytest.mark.slow` gates tests that call `SyntheticGenerator.generate(preview=False)` (full 1920×1080 FITS, ~30 s). CI runs with `-m "not slow"`.
 - **Smallest camera for generator tests** — `"Player One — Mercury-M"` (1920×1080 full-res; 480×270 in preview mode) is the lightest camera in `synthetic/cameras.py`.
@@ -556,6 +632,14 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Pitfall | Rule |
 | --- | --- |
 | Inspector dark theme bleeds into report figures | Apply dark mode only in `analysis_thread.run()`, never at import time |
+| An aspect-locked pyqtgraph `ViewBox` answers a resize by preserving scale, not refitting | Any layout change leaves the image at the wrong size until the range is re-applied. The Data Inspector opened at **30.9%** of the area it could fill, because `_load_panels()` ran during `__init__` against a placeholder-sized widget (585×410) and Qt then laid out to 409×432. Hiding Image B for swipe mode reproduced it far worse — the range blew up to `[-2228, 3063]` for an 835-px-wide image. Two fixes together: a one-shot `QTimer.singleShot(0, …)` from `showEvent` for the initial fit, and a **debounced handler on the ViewBox's own `sigResized`** for everything after. Reacting to the *window's* `resizeEvent` is not enough — hiding a splitter child resizes the panel without resizing the window — and a refit issued from the handler that triggered the layout change is undone, because Qt finishes the re-layout after that handler returns. The refit itself is `_capture_view()` + `_apply_view()`, which is idempotent only because the capture clamps to the image bounds (see the next row). |
+| Round-tripping an aspect-locked view range makes it drift outward | Capture-then-reapply compounds: aspect lock *expands* whichever axis has spare room, so storing the expanded range and re-applying it lets the other axis expand in turn. Measured drift to `(-0.331, 1.331, -0.69, 1.623)` in normalised coords after a few panel changes. Clamp the captured rectangle to `[0,1]` before storing — "which part of the image am I looking at" is the only part worth carrying to a differently-sized panel, and clamping makes the round trip converge. |
+| `pg.BarGraphItem` ignores `PlotItem.setLogMode` | `setLogMode` only transforms `PlotDataItem`s. With a log y-axis, bars plotted with raw counts render against an axis labelled `10^173`, `10^-227` — nonsense. Pass **log10 heights** in the ViewBox's own (already-log) coordinates instead, drop empty bins (`log10(0) = -inf`), and give the bars a `y0` slightly below zero so single-count bins stay visible. See `RatioHistogramPlot.update_histogram`. |
+| pyqtgraph axes relabel small dimensionless values with an SI prefix | A log ratio spanning ±0.15 gets rendered as "±800" with a `(x0.001)` suffix on the label — which reads as a completely different quantity. Call `axis.enableAutoSIPrefix(False)` on every axis showing a ratio or a count. Easy to fix on one widget and miss on another: it was fixed on the cross-section's axes and missed on the histogram's until a screenshot showed it. |
+| `QWidget.grab()` misrenders a `GraphicsLayoutWidget` | It showed the Data Inspector's swipe panel at roughly **1/5** its real size while `viewRange()`, `mapViewToDevice()`, and `pg.exporters.ImageExporter` all independently agreed the layout was correct — and it did so consistently, through a settled real event loop, in a state where the side-by-side panel grabbed correctly. Nearly caused a "fix" to a non-bug. For pyqtgraph panels use **`pg.exporters.ImageExporter(plot_item).export(path)`** for visuals and `viewRange()` / `mapViewToDevice()` for geometry; treat `grab()` output as untrustworthy. This is a sharper instance of the "OS-level screenshots are unreliable" row below — here even Qt's own in-process grab lies. |
+| `ColorBarItem.setLevels` does not emit `sigLevelsChanged` | That signal fires only on an interactive drag of the bar's handles. A hand-rolled `sigLevelsChanged` connection to keep a second `ImageItem` in step therefore silently never runs. Register every item with the bar instead — `setImageItem([base, overlay], insert_in=plot)` — and let `_update_items` drive them all. Note `setImageItem` *replaces* `img_list` rather than appending, so one call must carry the whole list. |
+| A composable region model needs the no-threshold case spelled out | With ROI-as-domain and threshold-as-split, writing `in = domain & split; out = domain & ~split` unconditionally makes plot 2 **always empty** when no threshold is set, because `split` is all-True. The four cases only work if the no-threshold branch is separate: `in, out = domain, ~domain` — so an ROI alone splits inside-vs-outside, and with no ROI either, `~domain` is empty and plot 2 is correctly blank. |
+| A "top N%" mask built as `A_cut AND B_cut` is much smaller than N% | Per the spec the threshold applies to each image independently and the masks are AND-ed, so the result is the *overlap* of two tails and can only be ≤ N%. On real noise-dominated Local-σ maps, top-10% of each gave 52,271 and 52,272 pixels but only **9,347** in common — 1.8% of the frame, not 10%. Expected behaviour, not a bug; assert against `min(solo_a, solo_b)` rather than against N% when testing it. |
 | `orig_color` UnboundLocalError | Assign dark-mode variables before any loop that references them |
 | CSS characters garbled in HTML output | Use literal Unicode — never CSS hex escapes inside Python strings |
 | Sky electron values display as 0.0 | Use `.3g`; `.1f`/`.2f` silently rounds sub-electron values to zero |
@@ -849,6 +933,80 @@ The frequency axis is always cycles/pixel regardless of ROI size.
 ### QSettings key
 
 `"target_output_dir"` (separate from the synthetic dialog's `"synth_output_dir"`).
+
+---
+
+## Data Inspector — Key Patterns
+
+Four modules: `gui/data_inspector.py` (window), `gui/inspector_widgets.py` (pyqtgraph
+widgets), `analysis/inspector_regions.py` (all array maths), `core/inspector_catalog.py`
+(`.npz` reader). Opened from **File → Open Data Inspector…**; the Report Inspector is
+unchanged and still auto-opens after a run. Both are kept until this one is proven.
+
+### Layout
+
+Three splitter rows: `Image A | Image B | Comparison` on top, `cross-section |
+comparison histogram` in the middle, `correlation in-mask | correlation out-of-mask`
+at the bottom. Three control rows above: data selection (Section → Image set → A/B →
+Compare), view/tool/reset + a hint line, and the region controls.
+
+### Everything positional is normalised `[0,1]`
+
+The cross-section line, the ROI, the swipe divider and the view rectangle are all
+stored as fractions, so they rescale onto a panel of any size and can never fall out
+of bounds — the same convention `gui/image_panel.py` uses. That is why no
+"selection no longer fits, reset it?" prompt is needed anywhere.
+
+### Comparison is log-ratio or difference — never a linear ratio
+
+`Compare:` offers `log10(|A|/|B|)` (default) and `A − B`, both symmetric about zero.
+"Ratio" always means the log₁₀ ratio, following Section 8's convention; a linear
+ratio is neither symmetric about its no-change point nor safe on a diverging
+colormap. `COMPARE_MODES` has no `"ratio"` entry and a test asserts it never gains one.
+
+### Region model — ROI is the domain, threshold is the split
+
+| ROI | Threshold | Correlation plot 1 | Correlation plot 2 |
+| --- | --- | --- | --- |
+| — | — | all pixels | empty |
+| set | — | inside ROI | outside ROI |
+| — | set | mask | ¬mask |
+| set | set | ROI ∧ mask | ROI ∧ ¬mask |
+
+The threshold applies to A and B **independently and is then AND-ed**, so a "top 10%"
+setting yields well under 10% of the frame (see the pitfall row). Percentile mode is
+scale-free across metric families; absolute mode re-seeds its spin box from the
+current panel's own range when you switch to it.
+
+### Stable identity: flat pixel index
+
+`correlation_sample` returns `flat_ids` (`row * W + col` in the common-cropped frame)
+alongside the plotted values. Selections are carried as those ids — never as
+positions within the subsampled arrays, which change on every resample. `ids_to_mask`
+turns a selection back into the cyan pixel overlay, and both correlation plots
+highlight from the same id set. A panel change drops the selection, because the ids
+index a frame that may have resized.
+
+### Threading
+
+`_RegionThread` computes masks, both correlation samples and the histogram off the
+GUI thread. Three mechanisms together, following `gui/halo_dialog.py`'s convention:
+a **120 ms debounce** (an ROI drag emits a continuous stream), a **monotonic token**
+echoed back in the result so a slow run cannot overwrite newer state, and
+**supersede** — disconnect and `quit()` a running thread, never `wait()` on the GUI
+thread. Cheap work (cross-section sampling, LUT swaps, selection→overlay) stays
+inline. The worker catches everything and emits `{"error": …}` so a bad request
+surfaces in the warning label rather than taking the window down.
+
+### Compute functions return data; the presentation layer renders it
+
+`_plot_psf_simulation` used to return an `RdBu_r`-colormapped RGB `diff` plus uint8
+panels — pictures, not data. Storing uint8 quantises to 1/255, and a typical A−B
+range on that chart is a few percent, so the stored panels could not support the
+comparison they existed for (measured on real data: the whole A−B range spanned
+under 3 quantisation steps). It now returns float32 values, and the colormapping
+plus uint8 cast live in `_psf_simulation_html` where the `<img>` is built. Apply the
+same split to any new figure helper whose output something else might want to measure.
 
 ---
 
