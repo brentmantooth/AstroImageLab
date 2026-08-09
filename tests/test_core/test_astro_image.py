@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from astropy.io import fits as ap_fits
 
-from core.astro_image import AstroImage
+from core.astro_image import AstroImage, decimation_step
 from core.models import DEFAULT_PIXEL_SCALE
 
 
@@ -117,6 +117,48 @@ class TestBackground:
         # No estimate_background() call: should return data as-is
         bs = img.background_subtracted()
         np.testing.assert_array_equal(bs, img.data)
+
+    def test_background_display_model_shape_dtype(self, astro_image_a):
+        disp = astro_image_a.background_display(kind="model")
+        # 512x512 fixture is well under the default max_dim=800, so step=1
+        # and the array should be untouched apart from the dtype cast.
+        assert disp.shape == astro_image_a.background.background.shape
+        assert disp.dtype == np.float32
+
+    def test_background_display_rms_matches_attribute(self, astro_image_a):
+        disp = astro_image_a.background_display(kind="rms")
+        np.testing.assert_array_equal(disp, astro_image_a.background_rms.astype(np.float32))
+
+    def test_background_display_downsamples_large_image(self, astro_image_a):
+        max_dim = 100
+        disp = astro_image_a.background_display(kind="model", max_dim=max_dim)
+        h, w = astro_image_a.background.background.shape
+        step = decimation_step(h, w, max_dim)
+        expected = astro_image_a.background.background[::step, ::step].astype(np.float32)
+        assert disp.shape == expected.shape
+        assert disp.shape[0] < astro_image_a.background.background.shape[0]
+        np.testing.assert_array_equal(disp, expected)
+
+    def test_background_display_unknown_kind_raises(self, astro_image_a):
+        with pytest.raises(ValueError):
+            astro_image_a.background_display(kind="bogus")
+
+    def test_background_display_without_background_raises(self, test_fits_path):
+        img = AstroImage(str(test_fits_path), label="NoBkg")
+        img.load()
+        with pytest.raises(RuntimeError):
+            img.background_display()
+
+
+class TestDecimationStep:
+    def test_no_downsample_needed(self):
+        assert decimation_step(512, 512, max_dim=800) == 1
+
+    def test_downsample_ratio(self):
+        assert decimation_step(2000, 1000, max_dim=500) == 4
+
+    def test_never_zero(self):
+        assert decimation_step(10, 10, max_dim=800) == 1
 
 
 class TestSaturation:

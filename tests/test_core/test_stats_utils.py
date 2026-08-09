@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from core.stats_utils import mannwhitney_effect
+from core.stats_utils import combined_se_z_test, mannwhitney_effect
 
 
 class TestMannwhitneyEffect:
@@ -45,3 +46,30 @@ class TestMannwhitneyEffect:
         assert p is not None
         assert delta is not None
         assert abs(delta - ref_delta) < 1e-9
+
+
+class TestCombinedSeZTest:
+    def test_none_propagation(self):
+        assert combined_se_z_test(None, 1.0, 2.0, 1.0) == (None, None)
+        assert combined_se_z_test(1.0, None, 2.0, 1.0) == (None, None)
+        assert combined_se_z_test(1.0, 1.0, None, 1.0) == (None, None)
+        assert combined_se_z_test(1.0, 1.0, 2.0, None) == (None, None)
+
+    def test_zero_combined_se_guard(self):
+        assert combined_se_z_test(1.0, 0.0, 2.0, 0.0) == (None, None)
+
+    def test_known_value_round_trip(self):
+        # z = (10-7)/sqrt(1**2+1**2) = 3/sqrt(2)
+        z, p = combined_se_z_test(10.0, 1.0, 7.0, 1.0)
+        assert z == pytest.approx(3.0 / (2 ** 0.5))
+        assert p is not None and p < 0.05
+
+    def test_symmetry(self):
+        z1, p1 = combined_se_z_test(10.0, 1.5, 7.0, 2.0)
+        z2, p2 = combined_se_z_test(7.0, 2.0, 10.0, 1.5)
+        assert z1 == pytest.approx(-z2)
+        assert p1 == pytest.approx(p2)
+
+    def test_indistinguishable_estimates_not_significant(self):
+        z, p = combined_se_z_test(10.0, 5.0, 10.5, 5.0)
+        assert p is not None and p >= 0.05

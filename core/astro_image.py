@@ -10,7 +10,27 @@ from astropy.stats import SigmaClip
 from astropy.utils.exceptions import AstropyUserWarning
 from photutils.background import Background2D, SExtractorBackground, MADStdBackgroundRMS
 
-from core.models import DEFAULT_PIXEL_SCALE, FILTER_THICKNESS_MM
+from core.models import (BACKGROUND_DISPLAY_MAX_DIM, DEFAULT_PIXEL_SCALE,
+                          FILTER_THICKNESS_MM)
+
+# Background2D's per-cell outlier rejection. Named constants (rather than
+# inline literals in estimate_background()) so analysis/background_mask.py's
+# classify_background_pixels() can reproduce the exact same clip when
+# recovering a pixel-level accept/reject mask that Background2D itself never
+# exposes -- see CLAUDE.md's Background Model diagnostics section.
+BACKGROUND_SIGCLIP_SIGMA = 3.0
+BACKGROUND_SIGCLIP_MAXITERS = 10
+
+
+def decimation_step(h: int, w: int, max_dim: int = BACKGROUND_DISPLAY_MAX_DIM) -> int:
+    """Stride for downsampling an (h, w) array so its longer side is <= max_dim.
+
+    Shared by AstroImage.background_display() and report_builder.py's Section 3f/3g
+    residual/overlay figures so arrays built at different call sites land on the
+    exact same pixel grid -- see CLAUDE.md's background-diagnostics note on why
+    this one formula is factored out instead of duplicated per file.
+    """
+    return max(1, max(h, w) // max_dim)
 
 
 # FITS keywords tried in priority order for pixel scale derivation.
@@ -319,7 +339,8 @@ class AstroImage:
                 self.data,
                 box_size=box_size,
                 filter_size=3,
-                sigma_clip=SigmaClip(sigma=3.0, maxiters=10),
+                sigma_clip=SigmaClip(sigma=BACKGROUND_SIGCLIP_SIGMA,
+                                      maxiters=BACKGROUND_SIGCLIP_MAXITERS),
                 bkg_estimator=SExtractorBackground(),
                 bkg_rms_estimator=MADStdBackgroundRMS(),
             )
@@ -331,6 +352,29 @@ class AstroImage:
         if self.background is None:
             return self.data.copy()
         return (self.data - self.background.background).astype(np.float32)
+
+    def background_display(self, kind: str = "model",
+                            max_dim: int = BACKGROUND_DISPLAY_MAX_DIM) -> np.ndarray:
+        """Stride-decimated float32 copy of a Background2D-derived array, for
+        report figures / Data Inspector display.
+
+        kind="model" -> self.background.background (full-res interpolated sky level)
+        kind="rms"   -> self.background_rms         (full-res noise floor)
+
+        Stride decimation (not the LANCZOS resize used for photographic display
+        images) so the smoothly-varying field keeps its exact computed values.
+        """
+        if self.background is None:
+            raise RuntimeError("Background not estimated; call estimate_background() first")
+        if kind == "model":
+            arr = self.background.background
+        elif kind == "rms":
+            arr = self.background_rms
+        else:
+            raise ValueError(f"unknown kind {kind!r}; expected 'model' or 'rms'")
+        h, w = arr.shape[:2]
+        step = decimation_step(h, w, max_dim)
+        return arr[::step, ::step].astype(np.float32)
 
     def saturation_threshold(self) -> float:
         if self.data is None:

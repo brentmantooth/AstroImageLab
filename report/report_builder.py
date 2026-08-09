@@ -29,9 +29,12 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           SECTION8_LOCALMAX_PRESMOOTH_FRACTION, SECTION8_LOCALMAX_REGION_FRACTION,
                           SECTION8_LOCALMAX_TOP_PERCENT,
                           SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE,
-                          SECTION8_LOCAL_ENERGY_WINDOW_MULT)
-from core.astro_image import AstroImage
+                          SECTION8_LOCAL_ENERGY_WINDOW_MULT,
+                          BACKGROUND_DISPLAY_MAX_DIM)
+from core.astro_image import AstroImage, decimation_step
 from core.inspector_catalog import panel_display_name, panel_concept
+from analysis.background_fit import compare_fits, evaluate_surface, fit_background_surface
+from analysis.background_mask import classify_background_pixels
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
 
@@ -704,6 +707,52 @@ def _nc_ratio_rows(score_a: dict, score_b: dict, ratio: dict, scale_label,
     return rows
 
 
+# (row_key in fit_background_surface's result, table row label, value format)
+_BGFIT_ROWS = [
+    ("gradient", "Gradient magnitude (ADU/px)", ".3g"),
+    ("isotropic_curvature", "Isotropic curvature — vignetting-like (ADU/px²)", ".2e"),
+    ("anisotropic_curvature", "Anisotropic curvature — tilt/asymmetric (ADU/px²)", ".2e"),
+]
+
+
+def _bgfit_value_td(value, se, p_term, css_class: str, fmt: str = ".3g") -> str:
+    """Table cell for one physical fit term: value ± SE, colored by the
+    A-vs-B judgement (css_class, from _better_worse_class), shaded by
+    _sig_td based on whether this term's own magnitude is significantly
+    nonzero (p_term) -- two independent stylings, not merged into one test.
+    "—" (plain, unshaded) when the term wasn't part of the selected model."""
+    if value is None:
+        return _sig_td("—", None)
+    span = f'<span class="{css_class}">{_val_pm(value, se, fmt)}</span>'
+    return _sig_td(span, p_term)
+
+
+def _bgfit_table_html(fit_a: dict, fit_b: dict, label_a: str, label_b: str) -> str:
+    """3-row (Gradient / Isotropic curvature / Anisotropic curvature) x
+    (A, B, A-vs-B) table from two fit_background_surface() results. Lower
+    magnitude = flatter background = "better" (_better_worse_class,
+    higher_is_better=False). The A-vs-B column is an approximate combined-SE
+    comparison (compare_fits) -- the two fits are independent regressions on
+    different images, not a pixel-paired population."""
+    cmp = compare_fits(fit_a, fit_b)
+    rows_html = []
+    for key, row_label, fmt in _BGFIT_ROWS:
+        term_a = fit_a.get(key)
+        term_b = fit_b.get(key)
+        mag_a = term_a["magnitude"] if term_a else None
+        mag_b = term_b["magnitude"] if term_b else None
+        ca, cb = _better_worse_class(mag_a, mag_b, higher_is_better=False)
+        td_a = _bgfit_value_td(mag_a, term_a["se"] if term_a else None,
+                                term_a.get("p_value") if term_a else None, ca, fmt)
+        td_b = _bgfit_value_td(mag_b, term_b["se"] if term_b else None,
+                                term_b.get("p_value") if term_b else None, cb, fmt)
+        z, p = cmp[key]["z"], cmp[key]["p"]
+        cmp_td = "<td>—</td>" if z is None else _sig_td(f"z={z:+.2f}, p={p:.3f} (approx.)", p)
+        rows_html.append(f"<tr><td>{row_label}</td>{td_a}{td_b}{cmp_td}</tr>")
+    return (f"<table><thead><tr><th>Term</th><th>{label_a}</th><th>{label_b}</th>"
+            f"<th>A vs B (approx.)</th></tr></thead><tbody>{''.join(rows_html)}</tbody></table>")
+
+
 def _localmax_rows(localmax: dict, rows: list, val_fmt: str = ".3f") -> str:
     """Build <tr> rows for the Section 8j local-maxima masked-region summary
     table: Scale | Mean A ± SD | Mean B ± SD | log ratio A/B (geo. mean ± SD) |
@@ -997,7 +1046,7 @@ class ReportBuilder:
                                  orig_label_a=_orig_label_a,
                                  orig_label_b=_orig_label_b),
             self._section_observation(result_a, result_b),
-            self._section_snr(result_a, result_b),
+            self._section_snr(result_a, result_b, image_a, image_b),
             self._section_psf(result_a, result_b, image_a, image_b),
             self._section_halo(result_a, result_b, image_a, image_b),
             self._section_edge(result_a, result_b, bw_differ),
@@ -1217,6 +1266,69 @@ class ReportBuilder:
             _add_options_entry("SNR", "Starless SNR map",
                                {"Image A": "snr_display_sl_a",
                                 "Image B": "snr_display_sl_b"})
+
+        # ── Background Model (Section 3e/3f) ────────────────────────────────────
+        bg_opts: dict[str, str] = {}
+        surf_opts: dict[str, str] = {}
+        if image_a.background is not None:
+            _add("bg_model_a", image_a.background_display(kind="model"))
+            _add("bg_rms_a", image_a.background_display(kind="rms"))
+            bg_opts["Background A"] = "bg_model_a"
+            bg_opts["RMS A"] = "bg_rms_a"
+
+            fit_a = fit_background_surface(
+                image_a.background.background_mesh, image_a.background.background_rms_mesh,
+                int(image_a.background.box_size[0]), image_a.data.shape[:2])
+            if not fit_a.get("insufficient_data"):
+                h_a, w_a = image_a.data.shape[:2]
+                step_a = decimation_step(h_a, w_a, BACKGROUND_DISPLAY_MAX_DIM)
+                fitted_a = evaluate_surface(fit_a, (h_a, w_a), step_a)
+                _add("bgfit_surface_a", fitted_a)
+                _add("bgfit_residual_a", (image_a.background_display(kind="model") - fitted_a).astype(np.float32))
+                surf_opts["Fitted surface A"] = "bgfit_surface_a"
+                surf_opts["Residual A"] = "bgfit_residual_a"
+        if image_b is not None and image_b.background is not None:
+            _add("bg_model_b", image_b.background_display(kind="model"))
+            _add("bg_rms_b", image_b.background_display(kind="rms"))
+            bg_opts["Background B"] = "bg_model_b"
+            bg_opts["RMS B"] = "bg_rms_b"
+
+            fit_b = fit_background_surface(
+                image_b.background.background_mesh, image_b.background.background_rms_mesh,
+                int(image_b.background.box_size[0]), image_b.data.shape[:2])
+            if not fit_b.get("insufficient_data"):
+                h_b, w_b = image_b.data.shape[:2]
+                step_b = decimation_step(h_b, w_b, BACKGROUND_DISPLAY_MAX_DIM)
+                fitted_b = evaluate_surface(fit_b, (h_b, w_b), step_b)
+                _add("bgfit_surface_b", fitted_b)
+                _add("bgfit_residual_b", (image_b.background_display(kind="model") - fitted_b).astype(np.float32))
+                surf_opts["Fitted surface B"] = "bgfit_surface_b"
+                surf_opts["Residual B"] = "bgfit_residual_b"
+        if bg_opts:
+            _add_options_entry(
+                "Background Model", "Background / RMS", bg_opts,
+                concept="Background model / RMS from photutils <code>Background2D</code> "
+                        "(64&times;64 px grid, sigma-clipped per cell, then interpolated) "
+                        "&mdash; the same background subtracted throughout this report and "
+                        "the noise floor behind every SNR map. <b>Background</b> = smooth "
+                        "sky level in ADU (gradients indicate light pollution, vignetting, "
+                        "or flat-field residuals). <b>RMS</b> = per-pixel noise floor "
+                        "(elevated at edges/corners typically indicates amp glow or uneven "
+                        "stacking coverage). No source segmentation mask is used, only "
+                        "per-cell 3&sigma; clipping, so extended nebulosity can still bias "
+                        "a cell's estimate &mdash; treat this as diagnostic, not proof of a "
+                        "source-free background.")
+        if surf_opts:
+            _add_options_entry(
+                "Background Model", "Fitted surface / Residual", surf_opts,
+                concept="Low-order polynomial (BIC-selected constant/plane/quadric) fitted "
+                        "to the background mesh, and its residual against the interpolated "
+                        "background model. <b>Fitted surface</b> = the smooth gradient/"
+                        "curvature model in ADU. <b>Residual</b> = background model minus "
+                        "fitted surface &mdash; structure remaining here is not captured by "
+                        "a low-order polynomial (e.g. flat-field residuals or extended "
+                        "nebulosity leaking into the background estimate). See Section 3f "
+                        "for the gradient/curvature magnitude table.")
 
         # ── Edge Detection ────────────────────────────────────────────────────
         ea_m = result_a.edge_metrics or {}
@@ -5004,7 +5116,145 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         fig.tight_layout()
         return fig
 
-    def _section_snr(self, ra: AnalysisResult, rb: AnalysisResult) -> str:
+    def _plot_background_mesh_pair(self, img_a: AstroImage | None, label_a: str,
+                                    img_b: AstroImage | None, label_b: str) -> plt.Figure | None:
+        """Stretched display image with the Background2D mesh-cell grid
+        overlaid, one panel per loaded image with a background estimate."""
+        panels = [(img, lbl) for img, lbl in [(img_a, label_a), (img_b, label_b)]
+                  if img is not None and img.background is not None]
+        if not panels:
+            return None
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        for ax, (img, lbl) in zip(axes, panels):
+            disp = _inspector_display(img, max_dim=800)
+            h, w = img.data.shape[:2]
+            # extent keeps the axes in native full-res pixel coordinates
+            # regardless of disp's own downsampled resolution, so
+            # plot_meshes()'s outlines (computed from the background's own
+            # full-res box_size geometry) land aligned with zero coordinate
+            # math of our own.
+            ax.imshow(disp, origin="upper", cmap="gray", extent=(0, w, h, 0))
+            img.background.plot_meshes(ax=ax, outlines=True, markersize=0, color="cyan", alpha=0.7)
+            ax.set_xlim(0, w)
+            ax.set_ylim(h, 0)
+            ax.set_title(f"Background mesh grid — {lbl}", fontsize=10)
+            ax.set_xlabel("x (px)")
+            ax.set_ylabel("y (px)")
+        fig.tight_layout()
+        return fig
+
+    def _plot_background_map_pair(self, disp_a, label_a, disp_b, label_b,
+                                   vmin: float, vmax: float, cbar_label: str,
+                                   title_prefix: str, cmap: str = "plasma") -> plt.Figure | None:
+        """Shared 1xN renderer for a background-derived heatmap (model, RMS,
+        fitted surface, or residual), one panel per loaded image."""
+        panels = [(d, lbl) for d, lbl in [(disp_a, label_a), (disp_b, label_b)]
+                  if d is not None]
+        if not panels:
+            return None
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        for ax, (disp, lbl) in zip(axes, panels):
+            im = ax.imshow(disp, origin="upper", cmap=cmap, vmin=vmin, vmax=vmax,
+                           interpolation="nearest")
+            fig.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
+            ax.set_title(f"{title_prefix} — {lbl}", fontsize=10)
+            ax.set_xlabel("x (px)")
+            ax.set_ylabel("y (px)")
+        fig.tight_layout()
+        return fig
+
+    def _plot_bg_pixel_histogram(self, bgsub_a, mask_bg_a, label_a,
+                                  bgsub_b, mask_bg_b, label_b) -> plt.Figure | None:
+        """Background-kept vs. excluded pixel value distributions
+        (background-subtracted ADU), one panel per image, overlaid, with a
+        shared bin range across panels for direct comparability."""
+        panels = [(bs, m, lbl) for bs, m, lbl in
+                  [(bgsub_a, mask_bg_a, label_a), (bgsub_b, mask_bg_b, label_b)]
+                  if bs is not None and m is not None]
+        if not panels:
+            return None
+        kept_all = np.concatenate([bs[m][np.isfinite(bs[m])] for bs, m, _ in panels])
+        excluded_all = np.concatenate([bs[~m][np.isfinite(bs[~m])] for bs, m, _ in panels])
+        if kept_all.size == 0 and excluded_all.size == 0:
+            return None
+        # Range from each population's OWN percentiles, not just the pooled
+        # kept+excluded percentile -- excluded pixels are by definition the
+        # outlier tail, so a range computed only from pooled data (dominated
+        # by the much larger kept population) can clip the excluded
+        # distribution's own bulk entirely out of the visible bins.
+        bounds = []
+        if kept_all.size > 0:
+            bounds.append(np.percentile(kept_all, [0.5, 99.5]))
+        if excluded_all.size > 0:
+            bounds.append(np.percentile(excluded_all, [1.0, 99.0]))
+        lo = min(b[0] for b in bounds)
+        hi = max(b[1] for b in bounds)
+        if hi <= lo:
+            hi = lo + 1.0
+        bins = np.linspace(lo, hi, 80)
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        for ax, (bs, m, lbl) in zip(axes, panels):
+            kept_vals = bs[m]
+            excluded_vals = bs[~m]
+            kept_vals = kept_vals[np.isfinite(kept_vals)]
+            excluded_vals = excluded_vals[np.isfinite(excluded_vals)]
+            # density=True divides by (bin_width * n_in_range) -- guard
+            # against an empty-or-entirely-out-of-range population (e.g. a
+            # near-perfectly-clean panel with no excluded outlier pixels at
+            # all) to avoid a spurious "invalid value in divide" warning.
+            if kept_vals.size > 0 and np.any((kept_vals >= lo) & (kept_vals <= hi)):
+                ax.hist(kept_vals, bins=bins, color="steelblue", alpha=0.6,
+                        label="Background (kept)", density=True)
+            if excluded_vals.size > 0 and np.any((excluded_vals >= lo) & (excluded_vals <= hi)):
+                ax.hist(excluded_vals, bins=bins, color="tomato", alpha=0.6,
+                        label="Excluded (outlier)", density=True)
+            ax.set_title(f"Pixel classification — {lbl}", fontsize=10)
+            ax.set_xlabel("Background-subtracted value (ADU)")
+            ax.set_ylabel("Density")
+            ax.legend(fontsize=8)
+        fig.tight_layout()
+        return fig
+
+    def _plot_bg_pixel_overlay(self, disp_a, mask_bg_a, label_a,
+                                disp_b, mask_bg_b, label_b,
+                                alpha: float = 0.45) -> plt.Figure | None:
+        """Translucent steelblue/tomato overlay (Section 8's established
+        nebula/background color convention) showing which pixels were kept
+        as background vs. excluded, on the stride-decimated display image.
+        disp/mask are expected pre-decimated to the same pixel grid."""
+        panels = [(d, m, lbl) for d, m, lbl in
+                  [(disp_a, mask_bg_a, label_a), (disp_b, mask_bg_b, label_b)]
+                  if d is not None and m is not None]
+        if not panels:
+            return None
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        bg_color = np.array(mcolors.to_rgb("steelblue"))
+        ex_color = np.array(mcolors.to_rgb("tomato"))
+        for ax, (disp, mask_bg, lbl) in zip(axes, panels):
+            h = min(disp.shape[0], mask_bg.shape[0])
+            w = min(disp.shape[1], mask_bg.shape[1])
+            gray = disp[:h, :w].astype(np.float32) / 255.0
+            mask_bg = mask_bg[:h, :w]
+            rgb = np.stack([gray, gray, gray], axis=-1)
+            rgb[mask_bg] = (1 - alpha) * rgb[mask_bg] + alpha * bg_color
+            rgb[~mask_bg] = (1 - alpha) * rgb[~mask_bg] + alpha * ex_color
+            ax.imshow(np.clip(rgb, 0, 1), origin="upper", interpolation="nearest")
+            ax.axis("off")
+            ax.set_title(f"Background / excluded pixels — {lbl}", fontsize=10)
+        fig.tight_layout()
+        return fig
+
+    def _section_snr(self, ra: AnalysisResult, rb: AnalysisResult,
+                      img_a: AstroImage, img_b: AstroImage | None) -> str:
         err = _error_box("snr", ra, rb)
         pa = ra.snr_metrics or {}
         pb = rb.snr_metrics or {}
@@ -5206,6 +5456,200 @@ signal in the dark region produce a higher SNR.</p>
 </table>
 <p>{exp_sentence}</p>"""
 
+        # --- Background Model sub-section (3e; folds in the pixel-classification
+        # histogram/overlay from Part C) ---
+        bg_a_ready = img_a is not None and img_a.background is not None
+        bg_b_ready = img_b is not None and img_b.background is not None
+        bg_html = ""
+        if bg_a_ready or bg_b_ready:
+            mesh_fig = self._plot_background_mesh_pair(
+                img_a if bg_a_ready else None, ra.label,
+                img_b if bg_b_ready else None, rb.label)
+
+            model_a = img_a.background_display(kind="model") if bg_a_ready else None
+            model_b = img_b.background_display(kind="model") if bg_b_ready else None
+            m_vals = [v for v in (model_a, model_b) if v is not None]
+            m_vmin = min(float(np.percentile(v, 2)) for v in m_vals)
+            m_vmax = max(float(np.percentile(v, 98)) for v in m_vals)
+            model_fig = self._plot_background_map_pair(
+                model_a, ra.label, model_b, rb.label, m_vmin, m_vmax,
+                "Background level (ADU)", "Background model")
+
+            rms_a = img_a.background_display(kind="rms") if bg_a_ready else None
+            rms_b = img_b.background_display(kind="rms") if bg_b_ready else None
+            r_vals = [v for v in (rms_a, rms_b) if v is not None]
+            r_vmin = min(float(np.percentile(v, 2)) for v in r_vals)
+            r_vmax = max(float(np.percentile(v, 98)) for v in r_vals)
+            rms_fig = self._plot_background_map_pair(
+                rms_a, ra.label, rms_b, rb.label, r_vmin, r_vmax,
+                "Background RMS (ADU)", "Background RMS")
+
+            # Pixel classification: reproduces Background2D's own per-cell
+            # sigma-clip (which photutils never exposes as a mask itself).
+            # Full resolution for the histogram (statistical fidelity matters
+            # more than render size for a value distribution); stride-
+            # decimated to match the figures above for the spatial overlay.
+            mask_full_a = mask_full_b = None
+            bgsub_a_full = bgsub_b_full = None
+            disp_a_dec = disp_b_dec = mask_a_dec = mask_b_dec = None
+            if bg_a_ready:
+                mask_full_a = classify_background_pixels(img_a.data, int(img_a.background.box_size[0]))
+                bgsub_a_full = img_a.background_subtracted()
+                step_a = decimation_step(*img_a.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                disp_a_dec = img_a.display_image(stretch=True)[::step_a, ::step_a]
+                mask_a_dec = mask_full_a[::step_a, ::step_a]
+            if bg_b_ready:
+                mask_full_b = classify_background_pixels(img_b.data, int(img_b.background.box_size[0]))
+                bgsub_b_full = img_b.background_subtracted()
+                step_b = decimation_step(*img_b.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                disp_b_dec = img_b.display_image(stretch=True)[::step_b, ::step_b]
+                mask_b_dec = mask_full_b[::step_b, ::step_b]
+
+            hist_fig = self._plot_bg_pixel_histogram(
+                bgsub_a_full, mask_full_a, ra.label, bgsub_b_full, mask_full_b, rb.label)
+            overlay_fig = self._plot_bg_pixel_overlay(
+                disp_a_dec, mask_a_dec, ra.label, disp_b_dec, mask_b_dec, rb.label)
+
+            bg_info_text = (
+                'The photutils <code>Background2D</code> model already subtracted throughout this '
+                'report, and the RMS map behind every SNR calculation above, shown directly rather '
+                'than only as summary numbers. The image is divided into 64&times;64 px cells; each '
+                'cell is independently 3&sigma; sigma-clipped (<code>SExtractorBackground</code> for '
+                'the level, <code>MADStdBackgroundRMS</code> for the noise), then the per-cell results '
+                'are interpolated into smooth full-resolution surfaces.<br><br>'
+                '<strong>Mesh grid</strong> &mdash; the 64&times;64 px cells overlaid on the actual '
+                'image, showing box placement relative to real structure.<br>'
+                '<strong>Background model</strong> &mdash; the smooth sky level in ADU. A flat, '
+                'uniform surface indicates good sky/flat-field calibration; visible gradients '
+                'indicate light pollution, vignetting, or an imperfect flat.<br>'
+                '<strong>Background RMS</strong> &mdash; the per-pixel noise floor used throughout '
+                'this report&rsquo;s SNR maps. Elevated RMS at the corners/edges typically indicates '
+                'amp glow, vignetting, or uneven multi-session stacking coverage.<br><br>'
+                '<strong>Pixel classification histogram</strong> &mdash; the value distribution '
+                '(background-subtracted ADU) of pixels the sigma-clip kept as background (steelblue) '
+                'versus rejected as outliers (tomato). This reproduces the exact per-cell clip '
+                '<code>Background2D</code> itself runs internally &mdash; photutils never exposes '
+                'this as a pixel-level mask, only the resulting per-cell scalar values, so it is '
+                'recomputed here purely for this diagnostic.<br>'
+                '<strong>Pixel classification overlay</strong> &mdash; the same classification shown '
+                'spatially. A whole region of excluded (tomato) pixels sitting over real extended '
+                'nebulosity, rather than scattered individual pixels, is the visual signature of this '
+                'method&rsquo;s known limitation described below.<br><br>'
+                '<strong>Known limitation:</strong> per-cell sigma-clipping rejects only 3&sigma; '
+                'outliers within each cell &mdash; there is no source segmentation mask. Extended, '
+                'low-contrast nebulosity spanning many cells can still bias the estimate upward in '
+                'those cells rather than being excluded outright. Use these panels to judge whether '
+                'that is happening in your field, not as proof that it is not.'
+            )
+
+            bg_html = f"""
+<h3>3e. Background Model</h3>
+{_info_box(bg_info_text, title="Understanding the background model")}
+{_hires_img_tag(mesh_fig, "Background mesh grid")}
+<p class="caption">The 64&times;64 px background estimation grid (cyan outlines) over
+the actual image. Cells straddling bright extended structure can bias that cell's
+sky estimate upward.</p>
+{_img_tag(model_fig, "Background model")}
+<p class="caption">Interpolated background model in ADU (plasma colourmap, shared scale).
+A flat surface is ideal; gradients indicate light pollution, vignetting, or flat-field
+residuals.</p>
+{_img_tag(rms_fig, "Background RMS")}
+<p class="caption">Per-pixel sky noise floor in ADU (plasma colourmap, shared scale) —
+the same map used to compute every SNR value in this section. Elevated corners/edges
+suggest amp glow or uneven stacking coverage.</p>
+{_img_tag(hist_fig, "Background pixel classification histogram")}
+<p class="caption">Background-subtracted value distribution of pixels kept as background
+(steelblue) versus excluded as outliers (tomato) by the per-cell 3σ sigma-clip.</p>
+{_img_tag(overlay_fig, "Background pixel classification overlay")}
+<p class="caption">Spatial view of the same classification — where the sigma-clip kept
+(steelblue) versus excluded (tomato) pixels.</p>"""
+
+        # --- Background Gradient Analysis sub-section (3f) ---
+        bgfit_html = ""
+        fit_a = fit_b = None
+        if bg_a_ready:
+            fit_a = fit_background_surface(
+                img_a.background.background_mesh, img_a.background.background_rms_mesh,
+                int(img_a.background.box_size[0]), img_a.data.shape[:2])
+        if bg_b_ready:
+            fit_b = fit_background_surface(
+                img_b.background.background_mesh, img_b.background.background_rms_mesh,
+                int(img_b.background.box_size[0]), img_b.data.shape[:2])
+        fit_a_ok = fit_a is not None and not fit_a.get("insufficient_data")
+        fit_b_ok = fit_b is not None and not fit_b.get("insufficient_data")
+        if fit_a_ok or fit_b_ok:
+            surf_a = surf_b = None
+            resid_a = resid_b = None
+            if fit_a_ok:
+                step_a = decimation_step(*img_a.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                surf_a = evaluate_surface(fit_a, img_a.data.shape[:2], step_a)
+                resid_a = img_a.background_display(kind="model") - surf_a
+            if fit_b_ok:
+                step_b = decimation_step(*img_b.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                surf_b = evaluate_surface(fit_b, img_b.data.shape[:2], step_b)
+                resid_b = img_b.background_display(kind="model") - surf_b
+
+            surf_vals = [v for v in (surf_a, surf_b) if v is not None]
+            s_vmin = min(float(np.percentile(v, 2)) for v in surf_vals)
+            s_vmax = max(float(np.percentile(v, 98)) for v in surf_vals)
+            surf_fig = self._plot_background_map_pair(
+                surf_a, ra.label, surf_b, rb.label, s_vmin, s_vmax,
+                "Fitted background (ADU)", "Fitted surface")
+
+            resid_vals = [v for v in (resid_a, resid_b) if v is not None]
+            resid_absmax = max(float(np.percentile(np.abs(v), 98)) for v in resid_vals)
+            resid_fig = self._plot_background_map_pair(
+                resid_a, ra.label, resid_b, rb.label, -resid_absmax, resid_absmax,
+                "Residual (ADU)", "Fit residual", cmap="bwr")
+
+            bgfit_table = _bgfit_table_html(
+                fit_a if fit_a_ok else {}, fit_b if fit_b_ok else {}, ra.label, rb.label)
+
+            _order_label = {0: "constant (no gradient/curvature detected)",
+                            1: "plane (linear gradient)",
+                            2: "full quadric (gradient + curvature)"}
+            order_a_txt = _order_label.get(fit_a["selected_order"], "—") if fit_a_ok else "—"
+            order_b_txt = _order_label.get(fit_b["selected_order"], "—") if fit_b_ok else "—"
+
+            bgfit_info_text = (
+                'Fits a low-order 2D polynomial to the background mesh cells (not the interpolated '
+                'full-resolution image, since the mesh cells are the actual independent measurements) '
+                'via weighted least squares, weighting each cell by its own inverse-variance '
+                '(1/RMS&sup2;). Three nested candidate models &mdash; constant, plane, and full quadric '
+                '&mdash; are compared by Bayesian Information Criterion (BIC); the simplest model that '
+                'the data actually justifies is selected, so a genuinely flat background is reported as '
+                'such rather than over-fit to noise.<br><br>'
+                '<strong>Gradient magnitude</strong> &mdash; the linear term&rsquo;s size (ADU/px), '
+                'with the direction and total corner-to-corner ADU swing across the frame. Candidate '
+                'cause: light pollution or moon glow, typically strongest near the horizon.<br>'
+                '<strong>Isotropic curvature</strong> &mdash; the radially-symmetric part of the '
+                'quadratic term, i.e. a bowl/dome shape centred on the frame. Candidate cause: '
+                'vignetting.<br>'
+                '<strong>Anisotropic curvature</strong> &mdash; the remaining, directional part of the '
+                'quadratic term (tilt, miscollimation, or off-centre/asymmetric vignetting).<br><br>'
+                'Each term&rsquo;s own significance (shaded cell) tests whether that specific quantity '
+                'is distinguishable from zero, separately from the BIC decision of which model order to '
+                'select overall. The A-vs-B column is an approximate combined-uncertainty comparison '
+                '&mdash; the two fits are independent regressions on different images, not a '
+                'pixel-paired population, so this is a Wald-style approximation, not a formal paired '
+                'test.'
+            )
+
+            bgfit_html = f"""
+<h3>3f. Background Gradient Analysis</h3>
+{_info_box(bgfit_info_text, title="Understanding the gradient/curvature fit")}
+<p>Selected model — {ra.label}: <strong>{order_a_txt}</strong>;
+{rb.label}: <strong>{order_b_txt}</strong></p>
+{bgfit_table}
+{_img_tag(surf_fig, "Fitted background surface")}
+<p class="caption">The fitted plane/quadric surface, in ADU (shared scale with the
+Background model panel above).</p>
+{_img_tag(resid_fig, "Fit residual")}
+<p class="caption">Background model minus fitted surface (ADU, diverging colourmap,
+symmetric scale). Structure remaining here is not captured by a low-order polynomial —
+expected for genuinely patchy backgrounds, e.g. flat-field residuals or extended
+nebulosity leaking into the background estimate.</p>"""
+
         _snr_metrics_box = _info_box(
             '<strong>Global SNR (sky-&sigma; units)</strong> &mdash; A single number summarising the '
             'signal strength of the entire image relative to the sky noise floor. Computed as the median '
@@ -5377,7 +5821,9 @@ comparison. Bright regions have high SNR; blank sky clusters near zero.
 A uniformly brighter map indicates deeper, more signal-rich data.</p>
 {starless_html}
 {xs_crosshair_html}
-{xs_snr_html}"""
+{xs_snr_html}
+{bg_html}
+{bgfit_html}"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
 

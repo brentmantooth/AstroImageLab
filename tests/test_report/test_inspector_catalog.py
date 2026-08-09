@@ -115,3 +115,20 @@ class TestInspectorCatalogDynamicPanels:
         names = {e["name"] for e in catalog["sections"].get("Spatial Detail", [])}
         raw_keys = set(spatial["panels"].keys())
         assert not (names & raw_keys), f"raw panel keys used as names: {names & raw_keys}"
+
+
+class TestBackgroundModelCatalogedAlongsideSpatialDetail:
+    # Background Model entries (see tests/test_report/test_background_model_section.py
+    # for full coverage) are written unconditionally whenever image_a/image_b have a
+    # background estimate -- this fixture's images do, since _make_two_image_pair calls
+    # estimate_background(). Regression guard that the two independent catalog sections
+    # (Spatial Detail here, Background Model from the same _write_inspector_file call)
+    # don't collide or crowd each other out.
+    def test_both_sections_present_without_collision(self, inspector_npz_path):
+        path, _ = inspector_npz_path
+        npz = np.load(str(path), allow_pickle=False)
+        catalog = json.loads(npz["catalog_json"].tobytes().decode("utf-8"))
+        assert "Spatial Detail" in catalog["sections"]
+        assert "Background Model" in catalog["sections"]
+        bg_names = {e["name"] for e in catalog["sections"]["Background Model"]}
+        assert "Background / RMS" in bg_names

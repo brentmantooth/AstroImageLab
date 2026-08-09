@@ -515,6 +515,10 @@ def cmap_for_panel(npz_key: str) -> str:
         return "grey"
     if npz_key.startswith("epsf_"):
         return SECTION8_ANALYSIS_CMAP
+    if npz_key.startswith("bgfit_residual"):
+        return "bwr"    # matches _plot_background_map_pair's diverging residual convention
+    if npz_key.startswith("bg_") or npz_key.startswith("bgfit_"):
+        return "plasma"   # matches Section 3e/3f's own plasma convention, not the viridis default
     return SECTION8_ANALYSIS_CMAP
 
 

@@ -21,6 +21,8 @@ from report.report_builder import (
     _power_ratio_db,
     _nc_ratio_rows,
     _panel_display_name,
+    _bgfit_value_td,
+    _bgfit_table_html,
 )
 
 EM_DASH = "—"
@@ -316,6 +318,76 @@ class TestNcRatioRows:
         rows = _nc_ratio_rows({3: 1.0}, {5: 1.0}, {}, self._label)
         assert "3 px" in rows
         assert "5 px" in rows
+
+
+class TestBgfitValueTd:
+    def test_none_value_renders_plain_em_dash_cell(self):
+        td = _bgfit_value_td(None, None, None, "better")
+        assert td == "<td>—</td>"
+
+    def test_value_present_includes_css_class_and_formatted_value(self):
+        td = _bgfit_value_td(0.05, 0.01, 0.5, "better", ".3g")
+        assert 'class="better"' in td
+        assert "0.05" in td
+        assert "0.01" in td   # the +/- SE term
+
+    def test_significant_p_term_shaded_blue(self):
+        td = _bgfit_value_td(0.05, 0.01, 0.001, "better", ".3g")
+        assert "background:#b3e5fc" in td
+
+    def test_nonsignificant_p_term_shaded_grey(self):
+        td = _bgfit_value_td(0.05, 0.01, 0.9, "better", ".3g")
+        assert "background:#e0e0e0" in td
+
+
+class TestBgfitTableHtml:
+    @staticmethod
+    def _term(magnitude, se=0.01, p_value=0.01):
+        return {"magnitude": magnitude, "se": se, "p_value": p_value}
+
+    def test_order0_selected_renders_em_dashes_for_all_terms(self):
+        fit_a = {"gradient": None, "isotropic_curvature": None, "anisotropic_curvature": None}
+        fit_b = {"gradient": None, "isotropic_curvature": None, "anisotropic_curvature": None}
+        html = _bgfit_table_html(fit_a, fit_b, "A", "B")
+        assert html.count(f"<td>{EM_DASH}</td>") >= 6   # 3 rows x 2 (A, B) columns
+
+    def test_gradient_row_present_when_order1_selected(self):
+        fit_a = {"gradient": self._term(0.05), "isotropic_curvature": None,
+                 "anisotropic_curvature": None}
+        fit_b = {"gradient": self._term(0.02), "isotropic_curvature": None,
+                 "anisotropic_curvature": None}
+        html = _bgfit_table_html(fit_a, fit_b, "A", "B")
+        assert "Gradient magnitude" in html
+        assert "0.05" in html and "0.02" in html
+
+    def test_lower_magnitude_classed_better(self):
+        # higher_is_better=False for these terms: the smaller gradient should
+        # get the "better" class. Distinct SEs so no substring collision
+        # between A's SE digits and B's magnitude digits.
+        fit_a = {"gradient": self._term(0.09, se=0.005), "isotropic_curvature": None,
+                 "anisotropic_curvature": None}
+        fit_b = {"gradient": self._term(0.01, se=0.005), "isotropic_curvature": None,
+                 "anisotropic_curvature": None}
+        html = _bgfit_table_html(fit_a, fit_b, "A", "B")
+        rows = html.split("<tr>")
+        gradient_row = next(r for r in rows if "Gradient magnitude" in r)
+        worse_idx = gradient_row.index('class="worse"')
+        better_idx = gradient_row.index('class="better"')
+        assert worse_idx < better_idx
+
+    def test_comparison_column_uses_approx_label(self):
+        fit_a = {"gradient": self._term(0.09, se=0.001), "isotropic_curvature": None,
+                 "anisotropic_curvature": None}
+        fit_b = {"gradient": self._term(0.01, se=0.001), "isotropic_curvature": None,
+                 "anisotropic_curvature": None}
+        html = _bgfit_table_html(fit_a, fit_b, "A", "B")
+        assert "(approx.)" in html
+
+    def test_missing_term_on_both_sides_gives_em_dash_comparison(self):
+        fit_a = {"gradient": None, "isotropic_curvature": None, "anisotropic_curvature": None}
+        fit_b = {"gradient": None, "isotropic_curvature": None, "anisotropic_curvature": None}
+        html = _bgfit_table_html(fit_a, fit_b, "A", "B")
+        assert "A vs B (approx.)" in html   # header present regardless
 
 
 class TestPanelDisplayName:

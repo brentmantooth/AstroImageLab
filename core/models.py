@@ -32,6 +32,7 @@ FILTER_THICKNESS_MM = 1.0   # narrowband filter substrate thickness (mm); defaul
 GLASS_REFRACTIVE_INDEX = 1.9   # dichroic filter substrate refractive index
 RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computation
 POWER_SPECTRUM_NPIX = 2048   # px; size of square power spectrum maps (must be 2^n)
+BACKGROUND_DISPLAY_MAX_DIM = 800   # px; stride-decimation cap shared by AstroImage.background_display()/decimation_step() and the Section 3e/3f/3g background-diagnostic figures, so arrays from different call sites land on the identical pixel grid
 
 STD_KERNEL_SIZES = (3, 5, 10)  #originally (5, 10, 15)   # px; Gaussian kernel sizes for std dev maps
 LOG_SIGMAS = (1.5, 3.0, 6.0)
