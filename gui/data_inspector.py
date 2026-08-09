@@ -27,7 +27,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QCheckBox, QPushButton, QSplitter, QFrame, QSizePolicy, QSpinBox,
-    QDoubleSpinBox, QColorDialog,
+    QDoubleSpinBox, QColorDialog, QGroupBox,
 )
 
 from analysis.image_filters import SpatialDetailAnalyzer as _SDA
@@ -49,11 +49,13 @@ _FULL_VIEW = (0.0, 1.0, 0.0, 1.0)
 
 # What a left-click/drag in an image panel does.  Exactly one is active at a time so
 # a click is never ambiguous — the inactive tools' handles are locked (see
-# LinkedImageView.set_line_locked).  Phase 2 adds ROI and threshold entries here.
+# LinkedImageView.set_line_locked).  This only concerns the three image panels; the
+# correlation plots' own pan/lasso state is a separate combo box (_corr_tool_combo)
+# driving CorrelationPlot.set_brush_mode directly — kept apart from this one because
+# a single shared "Tool:" combo covering both was confusing to operate.
 TOOL_PAN = "pan"
 TOOL_LINE = "line"
 TOOL_ROI = "roi"
-TOOL_BRUSH = "brush"
 
 # Per (view mode, tool) hint shown under the toolbar, so the current click behaviour
 # is always stated rather than something the user has to discover.
@@ -76,12 +78,6 @@ _HINTS = {
     ("swipe", TOOL_ROI): (
         "Drag the magenta ROI to move/resize the region; the white divider still "
         "wipes between A and B. The cross-section line is locked."),
-    ("side", TOOL_BRUSH): (
-        "Drag inside a correlation plot to lasso points — the matching pixels light "
-        "up in cyan on all three images. Image panels are locked to pan/zoom."),
-    ("swipe", TOOL_BRUSH): (
-        "Drag inside a correlation plot to lasso points; the matching pixels light up "
-        "in cyan. The white divider still wipes between A and B."),
 }
 
 
@@ -258,7 +254,6 @@ class DataInspector(QMainWindow):
         self._tool_combo.addItem("Pan / Zoom", TOOL_PAN)
         self._tool_combo.addItem("Cross-section line", TOOL_LINE)
         self._tool_combo.addItem("Move / resize region", TOOL_ROI)
-        self._tool_combo.addItem("Lasso correlation points", TOOL_BRUSH)
         self._tool_combo.setMinimumWidth(190)
 
         bar2.addWidget(QLabel("View:"));  bar2.addWidget(self._view_combo)
@@ -276,8 +271,6 @@ class DataInspector(QMainWindow):
         self._hint_lbl.setStyleSheet("color: #b0b0b0; font-size: 8pt;")
         bar2.addWidget(self._hint_lbl, stretch=1)
         root.addLayout(bar2)
-
-        root.addLayout(self._build_region_bar())
 
         # --- Row 2: filenames -----------------------------------------
         if self._single_image:
@@ -332,9 +325,10 @@ class DataInspector(QMainWindow):
         self._corr_in = CorrelationPlot("In mask", dark=self._dark)
         self._corr_out = CorrelationPlot("Outside mask", dark=self._dark)
         corr_row = QSplitter(Qt.Orientation.Horizontal)
+        corr_row.addWidget(self._build_corr_controls())
         corr_row.addWidget(self._corr_in)
         corr_row.addWidget(self._corr_out)
-        corr_row.setSizes([750, 750])
+        corr_row.setSizes([260, 645, 645])
 
         body = QSplitter(Qt.Orientation.Vertical)
         body.addWidget(images_row)
@@ -348,26 +342,51 @@ class DataInspector(QMainWindow):
 
         self.setCentralWidget(central)
 
-    def _build_region_bar(self) -> QHBoxLayout:
-        """Domain / split / refine / overlay controls.
+    def _build_corr_controls(self) -> QGroupBox:
+        """Everything that decides what the two correlation plots show, in one group
+        next to them: their own pan/lasso tool, plus the domain / split / refine /
+        overlay controls that build the two pixel populations.
+
+        Kept separate from the "Tool:" combo above the image panels — one shared
+        combo covering both the image panels' pan/line/ROI dragging and the
+        correlation plots' lasso selection was confusing to operate, since they are
+        unrelated drag behaviours on unrelated widgets.
 
         Composable by design: the ROI picks the pixel DOMAIN, the threshold SPLITS
         that domain into the two correlation populations.  With neither set, plot 1
         gets every pixel and plot 2 is empty.
         """
-        bar = QHBoxLayout()
-        bar.setSpacing(6)
+        box = QGroupBox("Correlation Plot Controls")
+        col = QVBoxLayout(box)
+        col.setSpacing(6)
+
+        self._corr_tool_combo = QComboBox()
+        self._corr_tool_combo.addItem("Pan / Zoom", BRUSH_OFF)
+        self._corr_tool_combo.addItem("Lasso select", BRUSH_LASSO)
+        self._corr_tool_combo.setCurrentIndex(1)
+        self._corr_tool_combo.setToolTip(
+            "Lasso: drag inside either plot below to select matching pixels — they "
+            "light up in cyan on all three images.")
+        tool_row = QHBoxLayout()
+        tool_row.addWidget(QLabel("Tool:"))
+        tool_row.addWidget(self._corr_tool_combo, stretch=1)
+        col.addLayout(tool_row)
+        col.addWidget(self._hline())
 
         self._roi_combo = QComboBox()
         self._roi_combo.addItem("Whole image", None)
         self._roi_combo.addItem("Rectangle", ROI_RECT)
         self._roi_combo.addItem("Ellipse", ROI_ELLIPSE)
         self._roi_combo.addItem("Lasso", ROI_POLYGON)
-        bar.addWidget(QLabel("Region:"))
-        bar.addWidget(self._roi_combo)
-        bar.addWidget(self._vline())
+        region_row = QHBoxLayout()
+        region_row.addWidget(QLabel("Region:"))
+        region_row.addWidget(self._roi_combo, stretch=1)
+        col.addLayout(region_row)
+        col.addWidget(self._hline())
 
+        col.addWidget(QLabel("Split:"))
         self._thresh_chk = QCheckBox("Threshold")
+        self._thresh_chk.setChecked(True)
         self._thresh_mode = QComboBox()
         self._thresh_mode.addItem("Percentile", THRESH_PERCENTILE)
         self._thresh_mode.addItem("Absolute", THRESH_ABSOLUTE)
@@ -380,46 +399,63 @@ class DataInspector(QMainWindow):
         self._thresh_dir = QComboBox()
         self._thresh_dir.addItem("Upper", DIR_UPPER)
         self._thresh_dir.addItem("Lower", DIR_LOWER)
-        bar.addWidget(QLabel("Split:"))
-        for wdg in (self._thresh_chk, self._thresh_mode, self._thresh_value,
-                    self._thresh_dir):
-            bar.addWidget(wdg)
-        bar.addWidget(self._vline())
+        split_row1 = QHBoxLayout()
+        split_row1.addWidget(self._thresh_chk)
+        split_row1.addWidget(self._thresh_mode, stretch=1)
+        col.addLayout(split_row1)
+        split_row2 = QHBoxLayout()
+        split_row2.addWidget(self._thresh_value)
+        split_row2.addWidget(self._thresh_dir, stretch=1)
+        col.addLayout(split_row2)
+        col.addWidget(self._hline())
 
-        bar.addWidget(QLabel("Refine:"))
+        col.addWidget(QLabel("Refine:"))
         self._open_spin, self._close_spin, self._minsize_spin = (
             self._small_spin("open"), self._small_spin("close"), self._small_spin("min"))
+        refine_row = QHBoxLayout()
         for label, spin in (("open", self._open_spin), ("close", self._close_spin),
-                            ("min size", self._minsize_spin)):
+                            ("min", self._minsize_spin)):
             lbl = QLabel(label)
             lbl.setStyleSheet("font-size: 8pt;")
-            bar.addWidget(lbl)
-            bar.addWidget(spin)
-        bar.addWidget(self._vline())
+            refine_row.addWidget(lbl)
+            refine_row.addWidget(spin)
+        refine_row.addStretch()
+        col.addLayout(refine_row)
+        col.addWidget(self._hline())
 
-        bar.addWidget(QLabel("Overlay:"))
+        col.addWidget(QLabel("Overlay:"))
         self._mask_chk = QCheckBox("Mask")
         self._mask_chk.setChecked(True)
         self._mask_color_btn = self._color_button(OVERLAY_MASK_COLOR)
         self._sel_chk = QCheckBox("Selection")
         self._sel_chk.setChecked(True)
         self._sel_color_btn = self._color_button(OVERLAY_SELECTION_COLOR)
+        mask_row = QHBoxLayout()
+        mask_row.addWidget(self._mask_chk)
+        mask_row.addWidget(self._mask_color_btn)
+        mask_row.addStretch()
+        col.addLayout(mask_row)
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(self._sel_chk)
+        sel_row.addWidget(self._sel_color_btn)
+        sel_row.addStretch()
+        col.addLayout(sel_row)
         self._clear_sel_btn = QPushButton("Clear selection")
-        self._clear_sel_btn.setFixedWidth(110)
-        for wdg in (self._mask_chk, self._mask_color_btn, self._sel_chk,
-                    self._sel_color_btn, self._clear_sel_btn):
-            bar.addWidget(wdg)
+        col.addWidget(self._clear_sel_btn)
 
         self._warn_lbl = QLabel()
+        self._warn_lbl.setWordWrap(True)
         self._warn_lbl.setStyleSheet("color: #e0a030; font-size: 8pt;")
-        bar.addWidget(self._warn_lbl, stretch=1)
-        return bar
+        col.addWidget(self._warn_lbl)
+
+        col.addStretch(1)
+        return box
 
     def _small_spin(self, name: str) -> QSpinBox:
         spin = QSpinBox()
         spin.setRange(0, 50)
         spin.setValue(0)
-        spin.setFixedWidth(52)
+        spin.setFixedWidth(84)
         spin.setToolTip(f"{name} (px); 0 disables")
         return spin
 
@@ -436,6 +472,12 @@ class DataInspector(QMainWindow):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         return line
 
+    def _hline(self) -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        return line
+
     def _connect_signals(self) -> None:
         self._section_combo.currentIndexChanged.connect(self._on_section_changed)
         self._image_set_combo.currentIndexChanged.connect(self._on_image_set_changed)
@@ -445,6 +487,7 @@ class DataInspector(QMainWindow):
         self._compare_on_xsec.toggled.connect(self._on_compare_curve_toggled)
         self._view_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         self._tool_combo.currentIndexChanged.connect(self._on_tool_changed)
+        self._corr_tool_combo.currentIndexChanged.connect(self._on_corr_tool_changed)
         self._reset_line_btn.clicked.connect(self._on_reset_line)
         self._reset_zoom_btn.clicked.connect(self._on_reset_zoom)
         for view in self._views:
@@ -474,6 +517,7 @@ class DataInspector(QMainWindow):
             plot.selection_changed.connect(self._on_scatter_selection)
 
         self._apply_tool()
+        self._on_corr_tool_changed()
 
     # ------------------------------------------------------------------
     # Combo population — mirrors the Report Inspector's selection model
@@ -681,15 +725,19 @@ class DataInspector(QMainWindow):
         """Only the active tool accepts the mouse, and the hint says which one.
 
         Everything else stays visible but un-grabbable, so a click in a panel always
-        means exactly one thing.
+        means exactly one thing.  This only concerns the three image panels — the
+        correlation plots' own pan/lasso tool is independent, see _on_corr_tool_changed.
         """
         for view in self._views:
             view.set_line_locked(self._tool != TOOL_LINE)
             view.set_roi_locked(self._tool != TOOL_ROI)
-        brush = BRUSH_LASSO if self._tool == TOOL_BRUSH else BRUSH_OFF
+        self._hint_lbl.setText(_HINTS.get((self._view_mode, self._tool), ""))
+
+    def _on_corr_tool_changed(self, _idx: int = -1) -> None:
+        """Independent pan/lasso state for the two correlation plots only."""
+        brush = self._corr_tool_combo.currentData() or BRUSH_OFF
         for plot in (self._corr_in, self._corr_out):
             plot.set_brush_mode(brush)
-        self._hint_lbl.setText(_HINTS.get((self._view_mode, self._tool), ""))
 
     # ------------------------------------------------------------------
     # Region selection: ROI (domain) + threshold (split)

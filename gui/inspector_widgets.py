@@ -668,7 +668,10 @@ class CrossSectionPlot(QWidget):
             n = min(len(self._pos), len(self._prof_b))
             val_b = float(np.interp(x, self._pos[:n], self._prof_b[:n]))
             lines.append(f"{self._label_b}: {val_b:.4g}")
-        if self._show_compare and self._prof_c is not None:
+        # Shown regardless of _show_compare -- the right-axis curve is opt-in display,
+        # but the value itself is still useful in the tooltip even when that curve
+        # (and its axis) are hidden.
+        if self._prof_c is not None:
             n = min(len(self._pos), len(self._prof_c))
             val_c = float(np.interp(x, self._pos[:n], self._prof_c[:n]))
             lines.append(f"{self._compare_label}: {val_c:.4g}")
