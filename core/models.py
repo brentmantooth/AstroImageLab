@@ -69,6 +69,9 @@ REF_SEEING_BETA   = 4.77    # Moffat β for Kolmogorov atmospheric turbulence (u
 ABERRATION_MIN_STARS = 15          # minimum stars with orientation data required for aberration analysis
 ABERRATION_OUTER_RADIUS_FRAC = 0.30   # fractional radius threshold separating inner/outer field zones
 
+REPORT_OUTPUT_SUBFOLDER = "folder"    # HTML references PNGs in a sibling <stem>/ folder (portable, LLM-friendly)
+REPORT_OUTPUT_SINGLE_FILE = "single"  # all images embedded as base64 data URIs (self-contained)
+
 
 # === DATA CLASSES ===
 

@@ -55,7 +55,9 @@ class MainWindow(QMainWindow):
         self._control.setMaximumHeight(300)   # 2-col Parameters (General/PSF | Nebula & Local-Maxima)
                                                # is tallest at ~278px natural height (measured via
                                                # QGroupBox.sizeHint()); Metrics ~234px, Region & Run
-                                               # ~232px. Re-measure and adjust if a column gains rows.
+                                               # ~264px (grew from ~232px after adding the report-
+                                               # format combo row). Re-measure and adjust if a column
+                                               # gains rows.
         main_layout.addWidget(self._control)
 
         # Wire signals

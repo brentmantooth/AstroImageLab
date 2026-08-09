@@ -18,6 +18,7 @@ from core.models import (
     SECTION8_NEBULA_MASK_MAX_HOLE_PX,
     SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
     SECTION8_LOCALMAX_TOP_PERCENT,
+    REPORT_OUTPUT_SUBFOLDER, REPORT_OUTPUT_SINGLE_FILE,
 )
 
 
@@ -38,10 +39,14 @@ class AnalysisControlPanel(QWidget):
         self._run_timer.timeout.connect(self._on_timer_tick)
         self._build_ui()
         # Restore last used output directory
-        saved = QSettings("FilterImageComparator", "FilterImageComparator").value(
-            "last_output_dir", "")
+        settings = QSettings("FilterImageComparator", "FilterImageComparator")
+        saved = settings.value("last_output_dir", "")
         if saved:
             self._out_dir.setText(saved)
+        saved_format = settings.value("report_format", REPORT_OUTPUT_SUBFOLDER)
+        idx = self._report_format_combo.findData(saved_format)
+        if idx >= 0:
+            self._report_format_combo.setCurrentIndex(idx)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -277,6 +282,20 @@ class AnalysisControlPanel(QWidget):
         out_row.addWidget(btn_browse)
         left_col.addLayout(out_row)
 
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Report format:"))
+        self._report_format_combo = QComboBox()
+        self._report_format_combo.addItem("HTML + image folder", REPORT_OUTPUT_SUBFOLDER)
+        self._report_format_combo.addItem("Single HTML file", REPORT_OUTPUT_SINGLE_FILE)
+        self._report_format_combo.setToolTip(
+            "HTML + image folder: images saved as separate PNG files next to the\n"
+            "report (smaller HTML, easier to hand off to other tools/AI models).\n"
+            "Single HTML file: all images embedded in one file (self-contained)."
+        )
+        fmt_row.addWidget(self._report_format_combo)
+        fmt_row.addStretch()
+        left_col.addLayout(fmt_row)
+
         # Cross-section line row — above ROI
         line_row = QHBoxLayout()
         self._line_btn = QPushButton("Select Line…")
@@ -461,6 +480,7 @@ class AnalysisControlPanel(QWidget):
             "roi": self._roi,
             "crosshair": self._line,
             "output_dir": self._out_dir.text().strip() or str(Path.home() / "filter_reports"),
+            "report_format": self._report_format_combo.currentData(),
             "parallel": self._parallel_cb.isChecked(),
             "dark_mode_graphics": self._dark_mode_cb.isChecked(),
         }
@@ -493,9 +513,10 @@ class AnalysisControlPanel(QWidget):
         self._status_label.setText("Running…")
         self.reset_metric_timers()
         out = self._out_dir.text().strip()
+        settings = QSettings("FilterImageComparator", "FilterImageComparator")
         if out:
-            QSettings("FilterImageComparator", "FilterImageComparator").setValue(
-                "last_output_dir", out)
+            settings.setValue("last_output_dir", out)
+        settings.setValue("report_format", self._report_format_combo.currentData())
         self.run_requested.emit(self.settings())
 
     def _on_timer_tick(self) -> None:

@@ -14,7 +14,7 @@ from core.astro_image import AstroImage
 from core.models import (AnalysisResult, LABEL_MAX_LEN, SECTION8_NEBULA_MASK_SIGMA,
                          SECTION8_NEBULA_MASK_DILATION_PX, SECTION8_NEBULA_MASK_MAX_HOLE_PX,
                          SECTION8_LOCALMAX_FOOTPRINT_MULT, SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
-                         SECTION8_LOCALMAX_TOP_PERCENT)
+                         SECTION8_LOCALMAX_TOP_PERCENT, REPORT_OUTPUT_SUBFOLDER)
 from analysis.psf_analyzer import PSFAnalyzer
 from analysis.halo_analyzer import HaloAnalyzer
 from analysis.edge_analyzer import EdgeAnalyzer
@@ -306,6 +306,7 @@ class AnalysisThread(QThread):
                 output_dir=s.get("output_dir", "."),
                 open_browser=True,
                 ref_seeing_arcsec=s.get("ref_seeing_arcsec", 2.0),
+                report_format=s.get("report_format", REPORT_OUTPUT_SUBFOLDER),
             )
             report_path = str(out)
         except Exception as e:

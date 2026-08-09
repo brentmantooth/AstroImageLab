@@ -3,6 +3,7 @@
 import base64
 import io
 import math
+import re
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ from scipy.ndimage import zoom as _ndimage_zoom, gaussian_filter as _gaussian_fi
 from scipy.interpolate import griddata as _griddata
 from PIL import Image as _PILImage
 
-from core.fig_utils import fig_to_b64 as _fig_to_b64
+from core.fig_utils import fig_to_b64 as _fig_to_b64, fig_to_png_bytes as _fig_to_png_bytes
 from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLASS_REFRACTIVE_INDEX,
                           PSF_SPATIAL_MAP_SIZE, PSF_SPATIAL_MAP_SMOOTH_SIGMA, EDGE_ROI_MAP_INDICATOR_PX,
                           EDGE_N_TOP_EDGES,
@@ -30,7 +31,8 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           SECTION8_LOCALMAX_TOP_PERCENT,
                           SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE,
                           SECTION8_LOCAL_ENERGY_WINDOW_MULT,
-                          BACKGROUND_DISPLAY_MAX_DIM)
+                          BACKGROUND_DISPLAY_MAX_DIM,
+                          REPORT_OUTPUT_SUBFOLDER, REPORT_OUTPUT_SINGLE_FILE)
 from core.astro_image import AstroImage, decimation_step
 from core.inspector_catalog import panel_display_name, panel_concept
 from analysis.background_fit import compare_fits, evaluate_surface, fit_background_surface
@@ -167,9 +169,68 @@ img { max-width: 100%; height: auto; border: 1px solid #ccc;
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Lowercase, filesystem-safe slug for a report image filename.
+
+    Collapses any run of non-alphanumeric characters to a single underscore
+    and caps length so a long alt string can't produce an absurd path.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", text.strip().lower()).strip("_")
+    return (slug or "img")[:max_len].rstrip("_") or "img"
+
+
+class _ImageExportContext:
+    """Set by ReportBuilder.generate() for the duration of one report build;
+    read by _img_tag/_hires_img_tag/_arr_img_tag to decide whether to embed a
+    figure as base64 or write it to a PNG file in the report's image folder.
+
+    Report generation is strictly serial — one ReportBuilder instance builds
+    one report at a time, with no concurrent generate() calls — so a single
+    mutable module-level instance is safe. generate() must reset this in a
+    try/finally so a mid-render exception can never leak "enabled" state into
+    a later call in the same process.
+    """
+    __slots__ = ("enabled", "images_dir", "html_stem", "counter")
+
+    def __init__(self):
+        self.enabled = False
+        self.images_dir: Path | None = None
+        self.html_stem: str | None = None
+        self.counter = 0
+
+    def next_paths(self, alt: str) -> tuple[Path, str]:
+        self.counter += 1
+        fname = f"fig{self.counter:03d}_{_slugify(alt)}.png"
+        return self.images_dir / fname, f"{self.html_stem}/{fname}"
+
+
+_export_ctx = _ImageExportContext()
+
+
+def _write_export_image(png_bytes: bytes, alt: str) -> str | None:
+    """Write png_bytes to the next numbered file in the export folder.
+
+    Returns the relative src path on success, None on failure (caller falls
+    back to inline base64 for that one image rather than breaking the report).
+    """
+    path, rel = _export_ctx.next_paths(alt)
+    try:
+        path.write_bytes(png_bytes)
+    except OSError:
+        return None
+    return rel
+
+
 def _img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     if fig is None:
         return ""
+    if _export_ctx.enabled:
+        png_bytes = base64.b64decode(fig) if isinstance(fig, str) else _fig_to_png_bytes(fig)
+        rel = _write_export_image(png_bytes, alt)
+        if rel is not None:
+            return f'<img src="{rel}" alt="{alt}">'
+        b64 = fig if isinstance(fig, str) else base64.b64encode(png_bytes).decode()
+        return f'<img src="data:image/png;base64,{b64}" alt="{alt}">'
     if isinstance(fig, str):
         return f'<img src="data:image/png;base64,{fig}" alt="{alt}">'
     return f'<img src="data:image/png;base64,{_fig_to_b64(fig)}" alt="{alt}">'
@@ -179,6 +240,13 @@ def _hires_img_tag(fig: "plt.Figure | str | None", alt: str = "") -> str:
     """Like _img_tag but saved at 150 dpi for detail-heavy maps."""
     if fig is None:
         return ""
+    if _export_ctx.enabled:
+        png_bytes = base64.b64decode(fig) if isinstance(fig, str) else _fig_to_png_bytes(fig, dpi=150)
+        rel = _write_export_image(png_bytes, alt)
+        if rel is not None:
+            return f'<img src="{rel}" alt="{alt}">'
+        b64 = fig if isinstance(fig, str) else base64.b64encode(png_bytes).decode()
+        return f'<img src="data:image/png;base64,{b64}" alt="{alt}">'
     if isinstance(fig, str):
         return f'<img src="data:image/png;base64,{fig}" alt="{alt}">'
     return f'<img src="data:image/png;base64,{_fig_to_b64(fig, dpi=150)}" alt="{alt}">'
@@ -206,6 +274,13 @@ def _info_box(body: str, title: str = "More information",
 
 def _arr_img_tag(arr: np.ndarray, alt: str = "") -> str:
     """Inline <img> at native (1:1) pixel resolution from a uint8 numpy array."""
+    if _export_ctx.enabled:
+        buf = io.BytesIO()
+        (_PILImage.fromarray(arr, mode="L") if arr.ndim == 2
+         else _PILImage.fromarray(arr, mode="RGB")).save(buf, format="PNG")
+        rel = _write_export_image(buf.getvalue(), alt)
+        if rel is not None:
+            return f'<img src="{rel}" alt="{alt}" style="max-width:100%;display:block;">'
     return f'<img src="data:image/png;base64,{_arr_to_b64_png(arr)}" alt="{alt}" style="max-width:100%;display:block;">'
 
 
@@ -1001,7 +1076,8 @@ class ReportBuilder:
                   result_a: AnalysisResult | None = None, result_b: AnalysisResult | None = None,
                   output_dir: str | Path = ".",
                   open_browser: bool = True,
-                  ref_seeing_arcsec: float = REF_SEEING_ARCSEC) -> Path:
+                  ref_seeing_arcsec: float = REF_SEEING_ARCSEC,
+                  report_format: str = REPORT_OUTPUT_SUBFOLDER) -> Path:
 
         self._ref_seeing_arcsec = ref_seeing_arcsec
         self._single_image = image_b is None
@@ -1019,6 +1095,29 @@ class ReportBuilder:
             stem = f"report_{result_a.label}_{result_b.label}_{ts}".replace(" ", "_")
         filename = stem + ".html"
 
+        if report_format == REPORT_OUTPUT_SUBFOLDER:
+            images_dir = output_dir / stem
+            images_dir.mkdir(parents=True, exist_ok=True)
+            _export_ctx.enabled = True
+            _export_ctx.images_dir = images_dir
+            _export_ctx.html_stem = stem
+            _export_ctx.counter = 0
+        else:
+            _export_ctx.enabled = False
+
+        try:
+            return self._generate_body(image_a, image_b, result_a, result_b,
+                                        output_dir, stem, filename, open_browser)
+        finally:
+            _export_ctx.enabled = False
+            _export_ctx.images_dir = None
+            _export_ctx.html_stem = None
+            _export_ctx.counter = 0
+
+    def _generate_body(self, image_a: AstroImage, image_b: AstroImage | None,
+                        result_a: AnalysisResult, result_b: AnalysisResult,
+                        output_dir: Path, stem: str, filename: str,
+                        open_browser: bool) -> Path:
         bw_a = image_a.bandwidth_nm
         bw_b = image_b.bandwidth_nm if image_b is not None else None
         bw_differ = (bw_a is not None and bw_b is not None and

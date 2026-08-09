@@ -58,8 +58,8 @@ def locked_draw_call(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
 
-def fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
-    """Render a matplotlib figure to a base64 PNG string and immediately close it.
+def fig_to_png_bytes(fig: plt.Figure, dpi: int = 120) -> bytes:
+    """Render a matplotlib figure to raw PNG bytes and immediately close it.
 
     Call this in analyzer code instead of storing live Figure objects, so figures
     are released as soon as their pixels are captured.
@@ -67,10 +67,14 @@ def fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
     buf = io.BytesIO()
     with _MPL_DRAW_LOCK:
         fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-    buf.seek(0)
-    data = base64.b64encode(buf.read()).decode()
+    data = buf.getvalue()
     plt.close(fig)
     return data
+
+
+def fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
+    """Render a matplotlib figure to a base64 PNG string and immediately close it."""
+    return base64.b64encode(fig_to_png_bytes(fig, dpi=dpi)).decode()
 
 
 def figs_to_b64(figures: dict, dpi: int = 120) -> dict:
