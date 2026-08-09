@@ -6,8 +6,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import matplotlib.figure
 
-
-APP_VERSION = "0.0.11"       # semver string; bump on each GitHub release tag
+# PR → merge to main (CI runs tests + build to verify everything works)
+# Tag the merge commit on main → triggers the release workflow
+# git tag v0.0.12
+# git push origin v0.0.12
+APP_VERSION = "0.0.12"       # semver string; bump on each GitHub release tag
 
 # === CONSTANTS ===
 
@@ -42,7 +45,7 @@ EPSF_MAX_STARS = 600   # maximum candidate stars passed to EPSFBuilder; limits c
 SECTION8_BORDER_CROP_FRACTION = 0.05   # fraction of each image dimension cropped from perimeter in Section 8 display maps
 SECTION8_ANALYSIS_CMAP = "viridis"     # colormap for Section 8 A/B analysis map panels (std, LoG, wavelet)
 SECTION8_LOGRATIO_EPS_PERCENTILE = 1.0   # percentile of pooled positive |A|,|B| values used as the epsilon floor in log10(|A|/|B|)
-SECTION8_SCATTER_MAX_SAMPLES = 50000     # per masked population, per scale — caps render cost of Section 8g correlation scatter plots
+SECTION8_SCATTER_MAX_SAMPLES = 100000     # per masked population, per scale — caps render cost of Section 8g correlation scatter plots
 SECTION8_ENTROPY_N_BINS = 32   # gray-level bins for local entropy histograms; max possible entropy = log2(32) = 5 bits
 SECTION8_ENTROPY_CLIP_PERCENTILE = 0.5   # symmetric percentile clip (0.5-99.5) applied to each image's own normalised data before binning, so a few outlier pixels don't blow out the bin range
 SECTION8_NEBULA_MASK_SIGMA = 1.7   # ×RMS above background = "Nebula" pixel classification (Section 8 masks); background cut stays fixed at 0.5×RMS

@@ -2,10 +2,7 @@
 #
 # build the local environment: conda env create -f d:\GitHub\AstroImageLab\environment.yml
 #
-# PR → merge to main (CI runs tests + build to verify everything works)
-# Tag the merge commit on main → triggers the release workflow
-# git tag v0.0.11
-# git push origin v0.0.11
+
 
 import sys
 import os
