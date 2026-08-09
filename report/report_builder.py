@@ -1042,6 +1042,34 @@ def _mtf_ratio_db(freq_a, mtf_a, freq_b, mtf_b) -> tuple[np.ndarray, np.ndarray]
     return freq_common, ratio_db
 
 
+def _symlog_bin_edges(lo: float, hi: float, linthresh: float, n_bins: int = 80) -> np.ndarray:
+    """Histogram bin edges evenly spaced in symlog-transformed x (matplotlib's
+    own default-linscale=1 symlog transform), not in raw linear ADU. Linear
+    bins plotted on a symlog x-axis bunch almost all 80 bins into the narrow
+    on-screen linear region near zero, leaving the log-compressed tails
+    covered by only a handful of very wide bars -- transforming the edges
+    themselves keeps bin width visually uniform across the whole axis,
+    log-spaced beyond +/-linthresh and linear inside it, matching
+    ax.set_xscale("symlog", linthresh=linthresh) exactly."""
+    linthresh = max(float(linthresh), 1e-12)
+
+    def _forward(x):
+        sign = np.sign(x)
+        ax = np.abs(x)
+        return np.where(ax <= linthresh, x,
+                         sign * (linthresh + linthresh * np.log10(ax / linthresh)))
+
+    def _inverse(y):
+        sign = np.sign(y)
+        ay = np.abs(y)
+        return np.where(ay <= linthresh, y,
+                         sign * linthresh * 10.0 ** ((ay - linthresh) / linthresh))
+
+    y_edges = np.linspace(_forward(np.asarray(lo, dtype=float)),
+                           _forward(np.asarray(hi, dtype=float)), n_bins + 1)
+    return _inverse(y_edges)
+
+
 def _focal_ratio(img: AstroImage) -> float | None:
     hdr = img.header
     if hdr is None:
@@ -5297,11 +5325,6 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         hi = max(b[1] for b in bounds)
         if hi <= lo:
             hi = lo + 1.0
-        bins = np.linspace(lo, hi, 80)
-
-        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
-        if len(panels) == 1:
-            axes = [axes]
         # Symlog, not log -- background-subtracted values straddle zero, and
         # log(<=0) is undefined. linthresh separates the near-zero linear
         # region (sky noise, roughly symmetric) from the log-compressed
@@ -5309,6 +5332,13 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         # this image's own ADU noise floor rather than a fixed constant.
         scale_vals = np.concatenate([a for a in (kept_all, excluded_all) if a.size > 0])
         linthresh = max(float(np.std(scale_vals)), 1e-6)
+        # Bin edges log-spaced to match the symlog x-axis these bars are
+        # drawn on -- see _symlog_bin_edges.
+        bins = _symlog_bin_edges(lo, hi, linthresh)
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
         for ax, (bs, m, lbl) in zip(axes, panels):
             kept_vals = bs[m]
             excluded_vals = bs[~m]
