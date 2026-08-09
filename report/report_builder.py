@@ -729,11 +729,13 @@ def _bgfit_value_td(value, se, p_term, css_class: str, fmt: str = ".3g") -> str:
 
 def _bgfit_table_html(fit_a: dict, fit_b: dict, label_a: str, label_b: str) -> str:
     """3-row (Gradient / Isotropic curvature / Anisotropic curvature) x
-    (A, B, A-vs-B) table from two fit_background_surface() results. Lower
-    magnitude = flatter background = "better" (_better_worse_class,
-    higher_is_better=False). The A-vs-B column is an approximate combined-SE
-    comparison (compare_fits) -- the two fits are independent regressions on
-    different images, not a pixel-paired population."""
+    (A, B, Ratio A/B, A-vs-B) table from two fit_background_surface() results.
+    Lower magnitude = flatter background = "better" (_better_worse_class,
+    higher_is_better=False). Ratio A/B is a plain dimensionless magnitude
+    ratio (same convention as the rest of Section 3), distinct from the
+    A-vs-B column, which is an approximate combined-SE comparison
+    (compare_fits) -- the two fits are independent regressions on different
+    images, not a pixel-paired population."""
     cmp = compare_fits(fit_a, fit_b)
     rows_html = []
     for key, row_label, fmt in _BGFIT_ROWS:
@@ -746,11 +748,12 @@ def _bgfit_table_html(fit_a: dict, fit_b: dict, label_a: str, label_b: str) -> s
                                 term_a.get("p_value") if term_a else None, ca, fmt)
         td_b = _bgfit_value_td(mag_b, term_b["se"] if term_b else None,
                                 term_b.get("p_value") if term_b else None, cb, fmt)
+        ratio_td = f"<td>{_ratio_str(mag_a, mag_b)}</td>"
         z, p = cmp[key]["z"], cmp[key]["p"]
         cmp_td = "<td>—</td>" if z is None else _sig_td(f"z={z:+.2f}, p={p:.3f} (approx.)", p)
-        rows_html.append(f"<tr><td>{row_label}</td>{td_a}{td_b}{cmp_td}</tr>")
+        rows_html.append(f"<tr><td>{row_label}</td>{td_a}{td_b}{ratio_td}{cmp_td}</tr>")
     return (f"<table><thead><tr><th>Term</th><th>{label_a}</th><th>{label_b}</th>"
-            f"<th>A vs B (approx.)</th></tr></thead><tbody>{''.join(rows_html)}</tbody></table>")
+            f"<th>Ratio (A/B)</th><th>A vs B (approx.)</th></tr></thead><tbody>{''.join(rows_html)}</tbody></table>")
 
 
 def _localmax_rows(localmax: dict, rows: list, val_fmt: str = ".3f") -> str:
@@ -5200,6 +5203,13 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
         if len(panels) == 1:
             axes = [axes]
+        # Symlog, not log -- background-subtracted values straddle zero, and
+        # log(<=0) is undefined. linthresh separates the near-zero linear
+        # region (sky noise, roughly symmetric) from the log-compressed
+        # outlier tails; derived from the pooled spread so it scales with
+        # this image's own ADU noise floor rather than a fixed constant.
+        scale_vals = np.concatenate([a for a in (kept_all, excluded_all) if a.size > 0])
+        linthresh = max(float(np.std(scale_vals)), 1e-6)
         for ax, (bs, m, lbl) in zip(axes, panels):
             kept_vals = bs[m]
             excluded_vals = bs[~m]
@@ -5218,6 +5228,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
             ax.set_title(f"Pixel classification — {lbl}", fontsize=10)
             ax.set_xlabel("Background-subtracted value (ADU)")
             ax.set_ylabel("Density")
+            ax.set_xscale("symlog", linthresh=linthresh)
             ax.legend(fontsize=8)
         fig.tight_layout()
         return fig
@@ -5336,7 +5347,8 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 cpa, cpb = _better_worse_class(va, vb, higher_is_better=True)
                 return (f"<tr><td>{label}</td>"
                         f"<td class='{cpa}'>{_val(va, '.4f')} %</td>"
-                        f"<td class='{cpb}'>{_val(vb, '.4f')} %</td></tr>")
+                        f"<td class='{cpb}'>{_val(vb, '.4f')} %</td>"
+                        f"<td>{_ratio_str(va, vb, '.3f')}</td></tr>")
             sl_pct_rows = "".join([
                 sl_pct_row("Pixels &gt; 3 σ <small style='color:#555'>(detected signal)</small>",  "pct_above_3"),
                 sl_pct_row("Pixels &gt; 5 σ",  "pct_above_5"),
@@ -5344,6 +5356,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 sl_pct_row("Pixels &gt; 20 σ <small style='color:#555'>(bright structure)</small>", "pct_above_20"),
             ])
             sl_pair_html = _img_tag(sl_pair_fig, "Starless SNR map comparison")
+            sl_ratio_snr_global = _ratio_str(sl_a.get("snr_global"), sl_b.get("snr_global"), ".4f")
             starless_html = f"""
 <h3>3b. SNR — Starless Images</h3>
 {_info_box('★ SNR analysis repeated on the starless image(s). Stars inflate the '
@@ -5352,13 +5365,14 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
            'pure nebula depth and are recommended for comparing image quality.',
            title="Starless SNR analysis", open=True)}
 <table>
-  <tr><th>Metric</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th></tr>
+  <tr><th>Metric</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th><th>Ratio (A/B)</th></tr>
   <tr><td>Global SNR (σ)</td>
       <td class="{sl_ca}">{_val(sl_a.get("snr_global"), ".4f")}</td>
-      <td class="{sl_cb}">{_val(sl_b.get("snr_global"), ".4f")}</td></tr>
+      <td class="{sl_cb}">{_val(sl_b.get("snr_global"), ".4f")}</td>
+      <td>{sl_ratio_snr_global}</td></tr>
 </table>
 <table>
-  <tr><th>Threshold</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th></tr>
+  <tr><th>Threshold</th><th>{ra.label} (starless)</th><th>{rb.label} (starless)</th><th>Ratio (A/B)</th></tr>
   {sl_pct_rows}
 </table>
 {sl_pair_html}
