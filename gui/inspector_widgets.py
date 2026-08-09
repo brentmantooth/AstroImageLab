@@ -19,8 +19,9 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
 import numpy as np
 import pyqtgraph as pg
 
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
+from PyQt6.QtCore import Qt, QPoint, QRectF, QThread, pyqtSignal
+from PyQt6.QtGui import QCursor
+from PyQt6.QtWidgets import QToolTip, QWidget, QVBoxLayout
 
 from analysis.inspector_regions import (
     COMPARE_DIFFERENCE, COMPARE_LOGRATIO, ROI_ELLIPSE, ROI_POLYGON, ROI_RECT,
@@ -256,9 +257,17 @@ class LinkedImageView(QWidget):
         self._line.blockSignals(True)
         try:
             handles = self._line.getHandles()
-            self._line.setPos((0, 0))
-            handles[0].setPos(x0n * w, y0n * h)
-            handles[1].setPos(x1n * w, y1n * h)
+            # Move handles through ROI.movePoint() -- the same call path a real
+            # drag uses -- rather than Handle.setPos() directly, which moves the
+            # item on screen but never updates pyqtgraph's own per-handle
+            # bookkeeping (ROI.handles[i]['pos']). Leaving that stale caused
+            # ROI.stateChanged()'s handle resync to snap whichever endpoint the
+            # user hadn't yet manually dragged back to its construction-time
+            # default position.
+            self._line.movePoint(handles[0], (x0n * w, y0n * h),
+                                 coords="parent", finish=False)
+            self._line.movePoint(handles[1], (x1n * w, y1n * h),
+                                 coords="parent", finish=False)
         finally:
             self._line.blockSignals(False)
 
@@ -529,6 +538,15 @@ class CrossSectionPlot(QWidget):
         self._show_compare = False
         self._compare_label = COMPARE_LABELS["logratio"]
 
+        # Cached profile data for hover lookups -- set by update_profiles()/
+        # set_labels(), read by _on_mouse_moved().
+        self._pos: np.ndarray | None = None
+        self._prof_a: np.ndarray | None = None
+        self._prof_b: np.ndarray | None = None
+        self._prof_c: np.ndarray | None = None
+        self._label_a: str = "A"
+        self._label_b: str = "B"
+
         self._pw = pg.PlotWidget(background=bg)
         self._plot: pg.PlotItem = self._pw.getPlotItem()
         self._plot.showGrid(x=True, y=True, alpha=0.3)
@@ -563,6 +581,16 @@ class CrossSectionPlot(QWidget):
         self._vb2.addItem(self._curve_c)
         self._vb2.addItem(self._zero_line)
 
+        # Hover crosshair -- ported from gui/report_inspector.py's _ProfileCanvas,
+        # which shows a QToolTip + dashed vertical line on hover over the profile.
+        self._hover_line = pg.InfiniteLine(pos=0, angle=90, movable=False,
+                                           pen=pg.mkPen(fg, width=1,
+                                                        style=Qt.PenStyle.DotLine))
+        self._hover_line.setVisible(False)
+        self._hover_line.setZValue(30)
+        self._plot.addItem(self._hover_line)
+        self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
         self._plot.getViewBox().sigResized.connect(self._sync_vb2_geometry)
         self.set_comparison_visible(False)
 
@@ -586,6 +614,7 @@ class CrossSectionPlot(QWidget):
         self._plot.getAxis("right").setLabel(label, color=COLOR_COMPARE)
 
     def set_labels(self, label_a: str, label_b: str) -> None:
+        self._label_a, self._label_b = label_a, label_b
         legend = self._plot.legend
         if legend is not None:
             legend.clear()
@@ -596,10 +625,12 @@ class CrossSectionPlot(QWidget):
                         prof_a: np.ndarray | None,
                         prof_b: np.ndarray | None,
                         prof_c: np.ndarray | None) -> None:
+        self._pos, self._prof_a, self._prof_b, self._prof_c = pos, prof_a, prof_b, prof_c
         if pos is None or prof_a is None:
             self._curve_a.setData([], [])
             self._curve_b.setData([], [])
             self._curve_c.setData([], [])
+            self._hide_hover()
             return
         self._curve_a.setData(pos, prof_a)
         if prof_b is None:
@@ -618,6 +649,45 @@ class CrossSectionPlot(QWidget):
         m = float(np.nanmax(np.abs(prof_c[:n]))) if n else 0.0
         m = m if m > 0 else 1.0
         self._vb2.setYRange(-m * 1.1, m * 1.1, padding=0)
+
+    # -- hover tooltip ------------------------------------------------------
+
+    def _on_mouse_moved(self, scene_pos) -> None:
+        vb = self._plot.getViewBox()
+        if self._pos is None or not vb.sceneBoundingRect().contains(scene_pos):
+            self._hide_hover()
+            return
+        x = float(vb.mapSceneToView(scene_pos).x())
+        if x < self._pos[0] or x > self._pos[-1]:
+            self._hide_hover()
+            return
+
+        val_a = float(np.interp(x, self._pos, self._prof_a))
+        lines = [f"x = {x:.4g} px", f"{self._label_a}: {val_a:.4g}"]
+        if self._prof_b is not None:
+            n = min(len(self._pos), len(self._prof_b))
+            val_b = float(np.interp(x, self._pos[:n], self._prof_b[:n]))
+            lines.append(f"{self._label_b}: {val_b:.4g}")
+        if self._show_compare and self._prof_c is not None:
+            n = min(len(self._pos), len(self._prof_c))
+            val_c = float(np.interp(x, self._pos[:n], self._prof_c[:n]))
+            lines.append(f"{self._compare_label}: {val_c:.4g}")
+
+        self._hover_line.setPos(x)
+        self._hover_line.setVisible(True)
+        # Native Qt cursor position, not the scene position -- avoids a HiDPI
+        # device/logical-pixel mismatch (same reasoning as report_inspector.py's
+        # own hover tooltip). The +16,-16 offset keeps the tip off the crosshair.
+        QToolTip.showText(QCursor.pos() + QPoint(16, -16), "\n".join(lines), self._pw)
+
+    def _hide_hover(self) -> None:
+        if self._hover_line.isVisible():
+            self._hover_line.setVisible(False)
+        QToolTip.hideText()
+
+    def leaveEvent(self, event) -> None:
+        self._hide_hover()
+        super().leaveEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -825,6 +895,34 @@ class _BrushViewBox(pg.ViewBox):
                 self.polygon_drawn.emit(poly)
 
 
+class _SelectionThread(QThread):
+    """Tests a lasso polygon against a sample's FULL (un-subsampled) population.
+
+    Off the GUI thread because the full population can be tens of millions of
+    pixels on a large sensor (this app supports up to 61MP — synthetic/cameras.py),
+    and a slow lasso drag can also accumulate many polygon vertices — both multiply
+    into the cost of the point-in-polygon test.  Mirrors gui/data_inspector.py's own
+    _RegionThread: the request is copied into plain attributes at construction time,
+    so a control changing mid-run cannot alter what this run is computing.
+    """
+
+    done = pyqtSignal(object)   # {"token": int, "ids": np.ndarray}
+
+    def __init__(self, full_b: np.ndarray, full_a: np.ndarray,
+                 full_flat_ids: np.ndarray, poly: np.ndarray, token: int,
+                 parent=None):
+        super().__init__(parent)
+        self._full_b = full_b
+        self._full_a = full_a
+        self._full_flat_ids = full_flat_ids
+        self._poly = poly
+        self._token = token
+
+    def run(self) -> None:
+        hit = select_points_in_polygon(self._full_b, self._full_a, self._poly)
+        self.done.emit({"token": self._token, "ids": self._full_flat_ids[hit]})
+
+
 class CorrelationPlot(QWidget):
     """A-vs-B scatter for one pixel population, with a 1:1 line and brushing.
 
@@ -844,6 +942,8 @@ class CorrelationPlot(QWidget):
         self._fg = fg
         self._sample = None
         self._brush_cache: list | None = None
+        self._sel_token = 0
+        self._sel_thread: _SelectionThread | None = None
 
         self._vb = _BrushViewBox()
         self._glw = pg.GraphicsLayoutWidget()
@@ -878,6 +978,10 @@ class CorrelationPlot(QWidget):
     def set_sample(self, sample, color_range: tuple[float, float],
                    label_a: str, label_b: str, region: str) -> None:
         """Show one CorrelationSample (from analysis.inspector_regions)."""
+        # A still-running selection thread is testing the OLD sample's full
+        # population; if it lands after this one takes over, it must not emit a
+        # selection for a region that no longer exists.
+        self._supersede_selection_thread()
         self._sample = sample
         self._selected.setData([], [])
         if sample is None or sample.n_total == 0:
@@ -939,5 +1043,42 @@ class CorrelationPlot(QWidget):
         s = self._sample
         if s is None or s.n_total == 0:
             return
-        hit = select_points_in_polygon(s.b_vals, s.a_vals, poly)
-        self.selection_changed.emit(s.flat_ids[hit])
+        # Test against the FULL population (s.full_*), not the rendered/capped
+        # a_vals/b_vals/flat_ids — otherwise a "select everything" lasso could only
+        # ever select the random max_samples subset that happened to be plotted,
+        # producing a sparse (salt-and-pepper) mask instead of a solid one. Off the
+        # GUI thread since the full population can be tens of millions of pixels.
+        self._supersede_selection_thread()
+        self._sel_thread = _SelectionThread(s.full_b, s.full_a, s.full_flat_ids,
+                                            poly, self._sel_token, parent=self)
+        self._sel_thread.done.connect(self._on_selection_done)
+        self._sel_thread.start()
+
+    def _on_selection_done(self, result: dict) -> None:
+        if result["token"] != self._sel_token:
+            return   # superseded by a newer sample or a newer lasso
+        self.selection_changed.emit(result["ids"])
+
+    def _supersede_selection_thread(self) -> None:
+        """Invalidate and stop any in-flight selection thread, never wait()ing on
+        the GUI thread — mirrors DataInspector._request_regions's own supersede."""
+        self._sel_token += 1
+        old = self._sel_thread
+        if old is not None and old.isRunning():
+            try:
+                old.done.disconnect()
+            except TypeError:
+                pass
+            old.quit()
+
+    def shutdown(self) -> None:
+        """Block until any in-flight selection thread has stopped.
+
+        Call from the owning window's closeEvent — a child QWidget never receives
+        its own closeEvent when the parent QMainWindow closes, so without this a
+        still-running thread risks "QThread: Destroyed while thread is still
+        running" on window close. Mirrors _RegionThread's own teardown.
+        """
+        if self._sel_thread is not None and self._sel_thread.isRunning():
+            self._sel_thread.quit()
+            self._sel_thread.wait(2000)

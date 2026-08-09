@@ -576,6 +576,33 @@ class TestCorrelationSample:
         assert np.allclose(s.b_vals, b[rows, cols])
         assert np.allclose(s.c_vals, c[rows, cols])
 
+    def test_full_population_is_not_capped(self, data):
+        a, b, c = data
+        s = correlation_sample(a, b, c, np.ones(a.shape, dtype=bool), max_samples=100)
+        assert s.full_a.size == s.full_b.size == s.full_flat_ids.size == s.n_total == 30 * 40
+
+    def test_full_population_reuses_rendered_arrays_when_not_subsampled(self, data):
+        # No extra memory should be paid when the whole population already fits.
+        a, b, c = data
+        s = correlation_sample(a, b, c, np.ones(a.shape, dtype=bool), max_samples=10 ** 9)
+        assert s.full_a is s.a_vals
+        assert s.full_b is s.b_vals
+        assert s.full_flat_ids is s.flat_ids
+
+    def test_lasso_over_full_population_recovers_every_pixel(self, data):
+        # The concrete regression this guards against: a lasso enclosing the whole
+        # plot must select ALL masked pixels, not just the rendered max_samples
+        # subset -- otherwise the resulting image overlay is sparse ("salt and
+        # pepper") instead of solid.
+        a, b, c = data
+        s = correlation_sample(a, b, c, np.ones(a.shape, dtype=bool),
+                                rng=np.random.default_rng(3), max_samples=50)
+        huge_square = [(-10, -10), (10, -10), (10, 10), (-10, 10)]
+        hit_capped = select_points_in_polygon(s.b_vals, s.a_vals, huge_square)
+        hit_full = select_points_in_polygon(s.full_b, s.full_a, huge_square)
+        assert hit_capped.sum() == 50
+        assert hit_full.sum() == s.n_total == 30 * 40
+
     def test_empty_mask_returns_empty_arrays(self, data):
         a, b, c = data
         s = correlation_sample(a, b, c, np.zeros(a.shape, dtype=bool))

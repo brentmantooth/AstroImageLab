@@ -959,6 +959,8 @@ class DataInspector(QMainWindow):
         if self._region_thread is not None and self._region_thread.isRunning():
             self._region_thread.quit()
             self._region_thread.wait(2000)
+        self._corr_in.shutdown()
+        self._corr_out.shutdown()
         try:
             self._npz.close()
         except Exception:

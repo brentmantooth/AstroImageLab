@@ -293,14 +293,19 @@ def refine_mask(mask: np.ndarray,
 # ---------------------------------------------------------------------------
 
 class CorrelationSample(NamedTuple):
-    a_vals: np.ndarray       # y axis of the scatter
-    b_vals: np.ndarray       # x axis
-    c_vals: np.ndarray       # comparison value, drives dot colour
-    flat_ids: np.ndarray     # int64 row*W + col in the common-cropped frame
-    n_total: int             # population size BEFORE subsampling
+    a_vals: np.ndarray       # y axis of the scatter (rendered, capped at max_samples)
+    b_vals: np.ndarray       # x axis (rendered, capped)
+    c_vals: np.ndarray       # comparison value, drives dot colour (rendered, capped)
+    flat_ids: np.ndarray     # int64 row*W + col in the common-cropped frame; matches
+                             # a_vals/b_vals/c_vals
+    full_a: np.ndarray       # a values for the FULL masked population, uncapped —
+    full_b: np.ndarray       # for selection accuracy, never for rendering.  Equal to
+    full_flat_ids: np.ndarray  # a_vals/b_vals/flat_ids (same objects) when n_total
+                             # <= max_samples, i.e. no extra memory in the common case.
+    n_total: int             # population size BEFORE subsampling == full_a.size
     axis_lo: float
     axis_hi: float
-    shape: tuple[int, int]   # the frame flat_ids index into
+    shape: tuple[int, int]   # the frame flat_ids/full_flat_ids index into
 
 
 def correlation_sample(map_a: np.ndarray, map_b: np.ndarray,
@@ -317,6 +322,11 @@ def correlation_sample(map_a: np.ndarray, map_b: np.ndarray,
     Axis limits come from the FULL population, not the subsample — the subsample
     exists only to bound render cost, and upper-tail divergence from the 1:1 line is
     the signal the plot exists to show (same rule as _plot_metric_correlation).
+
+    `full_a`/`full_b`/`full_flat_ids` carry the FULL masked population — a lasso
+    selection must be tested against these, not the rendered `a_vals`/`b_vals`, or a
+    "select everything" gesture can only ever select the random `max_samples` subset
+    that happened to be plotted, producing a sparse mask instead of a solid one.
     """
     a, b = common_crop(to_2d(map_a), to_2d(map_b))
     c, _ = common_crop(to_2d(comparison), a)
@@ -330,8 +340,9 @@ def correlation_sample(map_a: np.ndarray, map_b: np.ndarray,
     n_total = int(a_all.size)
     if n_total == 0:
         empty = np.empty(0, dtype=np.float32)
-        return CorrelationSample(empty, empty, empty,
-                                  np.empty(0, dtype=np.int64), 0, 0.0, 1.0, (h, w))
+        empty_i = np.empty(0, dtype=np.int64)
+        return CorrelationSample(empty, empty, empty, empty_i,
+                                  empty, empty, empty_i, 0, 0.0, 1.0, (h, w))
 
     lo = float(min(a_all.min(), b_all.min()))
     hi = float(max(a_all.max(), b_all.max()))
@@ -341,9 +352,13 @@ def correlation_sample(map_a: np.ndarray, map_b: np.ndarray,
     if n_total > max_samples:
         rng = rng if rng is not None else np.random.default_rng(42)
         idx = rng.choice(n_total, max_samples, replace=False)
-        a_all, b_all, c_all, flat_all = a_all[idx], b_all[idx], c_all[idx], flat_all[idx]
+        a_plot, b_plot, c_plot, flat_plot = a_all[idx], b_all[idx], c_all[idx], flat_all[idx]
+    else:
+        a_plot, b_plot, c_plot, flat_plot = a_all, b_all, c_all, flat_all
 
-    return CorrelationSample(a_all, b_all, c_all, flat_all, n_total, lo, hi, (h, w))
+    return CorrelationSample(a_plot, b_plot, c_plot, flat_plot,
+                             a_all, b_all, flat_all,
+                             n_total, lo, hi, (h, w))
 
 
 def select_points_in_polygon(xs: np.ndarray, ys: np.ndarray,
