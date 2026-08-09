@@ -253,7 +253,7 @@ class DataInspector(QMainWindow):
         self._tool_combo = QComboBox()
         self._tool_combo.addItem("Pan / Zoom", TOOL_PAN)
         self._tool_combo.addItem("Cross-section line", TOOL_LINE)
-        self._tool_combo.addItem("Move / resize region", TOOL_ROI)
+        self._tool_combo.addItem("Adjust ROI", TOOL_ROI)
         self._tool_combo.setMinimumWidth(190)
 
         bar2.addWidget(QLabel("View:"));  bar2.addWidget(self._view_combo)
@@ -919,7 +919,7 @@ class DataInspector(QMainWindow):
         prof_c = None
         if self._compare is not None:
             _, prof_c = _SDA._sample_line(self._compare, x0n, y0n, x1n, y1n)
-        self._xsec.set_labels(self._data.label_a, self._data.label_b)
+        self._xsec.set_labels(self._left_combo.currentText(), self._right_combo.currentText())
         self._xsec.update_profiles(pos, prof_a, prof_b, prof_c)
 
     def _on_compare_curve_toggled(self, checked: bool) -> None:
