@@ -262,3 +262,135 @@ class TestWriteInspectorFileBackgroundEntries:
         opts = entries["Background / RMS"]["options"]
         assert "Background A" in opts
         assert "Background B" not in opts
+
+
+class TestSectionSnrSourceMaskBlock:
+    """Section 3g — the source-masked background diagnostic."""
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def section_html(cls, image_pair):
+        img_a, img_b = image_pair
+        return ReportBuilder()._section_snr(
+            AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+
+    def test_heading_present(self, section_html):
+        assert "<h3>3g. Source-Masked Background Check</h3>" in section_html
+
+    def test_appended_after_3f_so_no_reletter_was_needed(self, section_html):
+        """3g must follow 3e/3f, never displace them."""
+        assert (section_html.index("3e. Background Model")
+                < section_html.index("3f. Background Gradient Analysis")
+                < section_html.index("3g. Source-Masked Background Check"))
+
+    def test_comparison_table_columns_present(self, section_html):
+        for token in ("Current", "Source-masked", "Background median (ADU)",
+                      "Background RMS median (ADU)", "Mesh cells used",
+                      "Source mask coverage"):
+            assert token in section_html, token
+
+    def test_detection_thresholds_are_reported(self, section_html):
+        """The auditability requirement: thresholds visible, not hidden in a mask."""
+        assert "Detection thresholds" in section_html
+        assert "Threshold (ADU, smoothed)" in section_html
+
+    def test_states_it_is_diagnostic_only(self, section_html):
+        """The section must not imply it changed any reported SNR."""
+        assert "diagnostic only" in section_html.lower()
+
+    def test_methodology_box_present(self, section_html):
+        assert "Understanding the source-masked check" in section_html
+
+    def test_captions_present(self, section_html):
+        # Caption text is literal HTML; matplotlib-drawn titles are pixels only
+        # and can never be asserted against the document (CLAUDE.md pitfall).
+        assert "Which pixels were excluded" in section_html
+        assert "Fraction of each mesh cell left unmasked" in section_html
+
+    def test_no_background_omits_heading(self, no_background_image):
+        html = ReportBuilder()._section_snr(
+            AnalysisResult(label="A"), AnalysisResult(label="B"),
+            no_background_image, None)
+        assert "3g. Source-Masked Background Check" not in html
+
+    def test_single_image_mode(self, image_pair):
+        img_a, _ = image_pair
+        html = ReportBuilder()._section_snr(
+            AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, None)
+        assert "<h3>3g. Source-Masked Background Check</h3>" in html
+
+    def test_3e_limitation_text_points_at_3g(self, section_html):
+        """Removing a documented limitation must update the text describing it."""
+        assert "see <strong>3g</strong> below" in section_html
+
+
+class TestSourceMaskFallbackReporting:
+    def test_fallback_reason_renders_as_a_warning(self, image_pair, monkeypatch):
+        """An aborted estimate must surface visibly, not vanish silently."""
+        import report.report_builder as rb
+        from analysis.source_mask import MaskedBackgroundResult
+
+        def _fake(*_args, **_kwargs):
+            return MaskedBackgroundResult(
+                surface=None, rms_median=None, background_median=None, fit=None,
+                n_cells=0, n_cells_total=64, order_cap=None, coverage=0.99,
+                fallback_reason="source mask covers 99.0% of the frame",
+                source_mask=None, scaffold=None)
+
+        monkeypatch.setattr(rb, "source_masked_background", _fake)
+        img_a, img_b = image_pair
+        html = ReportBuilder()._section_snr(
+            AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+        assert "<h3>3g. Source-Masked Background Check</h3>" in html
+        assert "source mask covers 99.0% of the frame" in html
+        assert "warn-box" in html
+
+
+class TestWriteInspectorFileSourceMaskEntries:
+    @pytest.fixture(scope="class")
+    @classmethod
+    def npz_and_catalog(cls, image_pair, tmp_path_factory):
+        img_a, img_b = image_pair
+        out_path = tmp_path_factory.mktemp("bgmask_npz") / "report_inspector.npz"
+        ReportBuilder()._write_inspector_file(
+            out_path, img_a, img_b, AnalysisResult(label="A"), AnalysisResult(label="B"))
+        npz = np.load(str(out_path), allow_pickle=False)
+        catalog = json.loads(npz["catalog_json"].tobytes().decode("utf-8"))
+        return npz, catalog
+
+    @pytest.mark.parametrize("key,dtype", [
+        ("bgmask_surface_a", np.float32), ("bgmask_surface_b", np.float32),
+        ("bgmask_delta_a", np.float32), ("bgmask_delta_b", np.float32),
+        ("bgmask_mask_a", np.uint8), ("bgmask_mask_b", np.uint8),
+    ])
+    def test_array_present_with_expected_dtype(self, npz_and_catalog, key, dtype):
+        npz, _ = npz_and_catalog
+        assert key in npz.files
+        assert npz[key].dtype == dtype
+
+    def test_masked_surface_aligned_with_background_model(self, npz_and_catalog):
+        """The delta is an element-wise subtraction, so the grids must match."""
+        npz, _ = npz_and_catalog
+        assert npz["bgmask_surface_a"].shape == npz["bg_model_a"].shape
+        assert npz["bgmask_delta_a"].shape == npz["bg_model_a"].shape
+        assert npz["bgmask_mask_a"].shape == npz["bg_model_a"].shape
+
+    def test_delta_equals_masked_minus_current(self, npz_and_catalog):
+        npz, _ = npz_and_catalog
+        assert np.allclose(npz["bgmask_delta_a"],
+                           npz["bgmask_surface_a"] - npz["bg_model_a"], atol=1e-4)
+
+    def test_catalog_entry_present_with_concept(self, npz_and_catalog):
+        _, catalog = npz_and_catalog
+        entries = {e["name"]: e for e in catalog["sections"]["Background Model"]}
+        assert "Source-masked background" in entries
+        entry = entries["Source-masked background"]
+        assert entry.get("concept")
+        assert "diagnostic only" in entry["concept"].lower()
+        assert set(entry["options"]) == {
+            "Masked background A", "Change vs current A", "Source mask A",
+            "Masked background B", "Change vs current B", "Source mask B"}
+
+    def test_mask_is_binary(self, npz_and_catalog):
+        npz, _ = npz_and_catalog
+        assert set(np.unique(npz["bgmask_mask_a"]).tolist()) <= {0, 1}

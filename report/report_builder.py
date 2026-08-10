@@ -32,13 +32,69 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           SECTION8_ENTROPY_N_BINS, SECTION8_ENTROPY_CLIP_PERCENTILE,
                           SECTION8_LOCAL_ENERGY_WINDOW_MULT,
                           BACKGROUND_DISPLAY_MAX_DIM,
+                          SOURCEMASK_MIN_CELL_UNMASKED_FRAC,
                           REPORT_OUTPUT_SUBFOLDER, REPORT_OUTPUT_SINGLE_FILE)
 from core.astro_image import AstroImage, decimation_step
 from core.inspector_catalog import panel_display_name, panel_concept
 from analysis.background_fit import compare_fits, evaluate_surface, fit_background_surface
 from analysis.background_mask import classify_background_pixels
+from analysis.source_mask import source_masked_background
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
+
+# Shared between Section 3f's own "Selected model" line and Section 3g's table.
+_SOURCEMASK_ORDER_LABEL = {
+    0: "constant (no gradient/curvature)",
+    1: "plane (linear gradient)",
+    2: "full quadric (gradient + curvature)",
+}
+
+
+def _sourcemask_fwhm(result: AnalysisResult, fallback: float = 4.0) -> float:
+    """Star FWHM in pixels for Section 3g's point-source detection tier.
+
+    Taken from the PSF analysis when that metric was run, since the point tier's
+    kernel and its dilation margin are both expressed relative to the real PSF.
+    Falls back to a typical value when PSF was not selected — Section 3g is
+    gated on the background alone, so it must not require Section 4 to have run.
+    """
+    metrics = getattr(result, "psf_metrics", None) or {}
+    for key in ("fwhm_median_px", "fwhm_px", "fwhm_median"):
+        value = metrics.get(key)
+        if isinstance(value, (int, float)) and np.isfinite(value) and value > 0:
+            return float(value)
+    return fallback
+
+
+def _sourcemask_for(cache: dict, img: AstroImage, fwhm_px: float = 4.0):
+    """Section 3g's estimate for one image, computed at most once per report.
+
+    Section 3g's HTML block and _write_inspector_file both need the same result,
+    and the four-scale detection is the most expensive thing in either. Threading
+    the computed value through a per-build cache rather than calling twice —
+    the same reasoning that removed the duplicated _psf_retention_table call.
+    Keyed by id() because AstroImage is not hashable and one build only ever
+    holds a handful of live image objects.
+    """
+    if img is None or img.background is None:
+        return None
+    key = id(img)
+    if key not in cache:
+        cache[key] = source_masked_background(
+            img.data, box_size=int(img.background.box_size[0]), fwhm_px=fwhm_px,
+            mesh=img.background.background_mesh,
+            rms_mesh=img.background.background_rms_mesh)
+    return cache[key]
+
+
+def _sourcemask_cell_fraction(img: AstroImage, res) -> np.ndarray | None:
+    """Per-mesh-cell unmasked fraction for the Section 3g audit figure."""
+    if res is None or not res.ok or res.source_mask is None:
+        return None
+    from analysis.source_mask import _cell_unmasked_fraction
+    return _cell_unmasked_fraction(res.source_mask.mask,
+                                   img.background.background_mesh.shape,
+                                   int(img.background.box_size[0]))
 
 
 def _inspector_display(img: AstroImage, max_dim: int = 2048) -> np.ndarray:
@@ -143,6 +199,10 @@ td { padding: 7px 12px; border-bottom: 1px solid #dde; }
 tr:nth-child(even) { background: #f0f4fa; }
 .better { background: #d4edda !important; font-weight: bold; }
 .worse  { background: #f8d7da !important; }
+/* A measured change that carries no better/worse verdict — Section 3g's delta
+   column, where a background dropping is the expected result of masking
+   nebulosity rather than a quality judgement about the image. */
+.neutral { background: #eceff4 !important; }
 .warn-box { background: #fff3cd; border: 1px solid #ffc107;
             border-radius: 4px; padding: 10px 14px; margin: 10px 0; }
 details.info-box, .info-box { background: #d1ecf1; border: 1px solid #bee5eb;
@@ -1100,6 +1160,13 @@ def _pixel_size_mm(img: AstroImage) -> float | None:
 class ReportBuilder:
     """Generate a self-contained HTML comparison report."""
 
+    def __init__(self) -> None:
+        # Section 3g estimates, shared between _section_snr and
+        # _write_inspector_file within one build. Declared here (not only reset
+        # in generate) so a builder used directly by tests, which call
+        # _section_snr without going through generate(), still has it.
+        self._sourcemask_cache: dict[int, object] = {}
+
     def generate(self, image_a: AstroImage, image_b: AstroImage | None = None,
                   result_a: AnalysisResult | None = None, result_b: AnalysisResult | None = None,
                   output_dir: str | Path = ".",
@@ -1109,6 +1176,9 @@ class ReportBuilder:
 
         self._ref_seeing_arcsec = ref_seeing_arcsec
         self._single_image = image_b is None
+        # Build-scoped: one report's estimates must never leak into the next
+        # call on the same instance, the same rule _export_ctx follows.
+        self._sourcemask_cache = {}
         if result_a is None:
             result_a = AnalysisResult(label="Image A")
         if result_b is None:
@@ -1434,6 +1504,26 @@ class ReportBuilder:
                 _add("bgfit_residual_b", (image_b.background_display(kind="model") - fitted_b).astype(np.float32))
                 surf_opts["Fitted surface B"] = "bgfit_surface_b"
                 surf_opts["Residual B"] = "bgfit_residual_b"
+
+        # ── Source-masked background (Section 3g) ───────────────────────────────
+        # Same stride-decimated grid as bg_model_*, so the inspector's A/B wipe
+        # can put the masked surface directly against the current model.
+        smask_opts: dict[str, str] = {}
+        for img, suffix, label in ((image_a, "a", "A"), (image_b, "b", "B")):
+            if img is None or img.background is None:
+                continue
+            sm = _sourcemask_for(self._sourcemask_cache, img)
+            if sm is None or not sm.ok:
+                continue
+            step = decimation_step(*img.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+            _add(f"bgmask_surface_{suffix}", sm.surface[::step, ::step])
+            _add(f"bgmask_delta_{suffix}",
+                 (sm.surface[::step, ::step] - img.background_display(kind="model")).astype(np.float32))
+            _add(f"bgmask_mask_{suffix}", sm.source_mask.mask[::step, ::step].astype(np.uint8))
+            smask_opts[f"Masked background {label}"] = f"bgmask_surface_{suffix}"
+            smask_opts[f"Change vs current {label}"] = f"bgmask_delta_{suffix}"
+            smask_opts[f"Source mask {label}"] = f"bgmask_mask_{suffix}"
+
         if bg_opts:
             _add_options_entry(
                 "Background Model", "Background / RMS", bg_opts,
@@ -1444,10 +1534,11 @@ class ReportBuilder:
                         "sky level in ADU (gradients indicate light pollution, vignetting, "
                         "or flat-field residuals). <b>RMS</b> = per-pixel noise floor "
                         "(elevated at edges/corners typically indicates amp glow or uneven "
-                        "stacking coverage). No source segmentation mask is used, only "
+                        "stacking coverage). No source segmentation mask is used here, only "
                         "per-cell 3&sigma; clipping, so extended nebulosity can still bias "
-                        "a cell's estimate &mdash; treat this as diagnostic, not proof of a "
-                        "source-free background.")
+                        "a cell's estimate &mdash; report section 3g re-estimates the same "
+                        "background with the sources masked out and quantifies how much "
+                        "that bias is worth in this field.")
         if surf_opts:
             _add_options_entry(
                 "Background Model", "Fitted surface / Residual", surf_opts,
@@ -1459,6 +1550,19 @@ class ReportBuilder:
                         "a low-order polynomial (e.g. flat-field residuals or extended "
                         "nebulosity leaking into the background estimate). See Section 3f "
                         "for the gradient/curvature magnitude table.")
+        if smask_opts:
+            _add_options_entry(
+                "Background Model", "Source-masked background", smask_opts,
+                concept="The Section 3g re-estimate: stars and extended nebulosity are "
+                        "detected at four scales, masked out, and a low-order surface is "
+                        "fitted to the mesh cells that remain genuinely measured. "
+                        "<b>Masked background</b> = the re-estimated sky level in ADU. "
+                        "<b>Change vs current</b> = that estimate minus the 3e model; "
+                        "negative values are where nebulosity was inflating the sky "
+                        "estimate and therefore suppressing every reported SNR. "
+                        "<b>Source mask</b> = 1 where a pixel was excluded. This is "
+                        "<b>diagnostic only</b> &mdash; the background actually subtracted "
+                        "everywhere else in this report is still the unmasked 3e model.")
 
         # ── Edge Detection ────────────────────────────────────────────────────
         ea_m = result_a.edge_metrics or {}
@@ -5393,6 +5497,180 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         fig.tight_layout()
         return fig
 
+    def _plot_source_mask_overlay(self, disp_a, sm_a, label_a,
+                                   disp_b, sm_b, label_b,
+                                   alpha: float = 0.45) -> plt.Figure | None:
+        """Three-class translucent overlay of the Section 3g source mask.
+
+        Extends _plot_bg_pixel_overlay's two-class steelblue/tomato scheme with
+        a third colour for point sources, so the reader can see at a glance
+        whether the extended-structure class landed on real nebulosity or is
+        merely a halo of over-grown stars. disp/mask arrive pre-decimated onto
+        the same pixel grid as every other Section 3e/3f/3g figure.
+        """
+        from matplotlib.patches import Patch
+        panels = [(d, m, lbl) for d, m, lbl in
+                  [(disp_a, sm_a, label_a), (disp_b, sm_b, label_b)]
+                  if d is not None and m is not None]
+        if not panels:
+            return None
+        fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        sky_color = np.array(mcolors.to_rgb("steelblue"))    # kept as background
+        ext_color = np.array(mcolors.to_rgb("tomato"))       # extended structure
+        pt_color = np.array(mcolors.to_rgb("gold"))          # point sources
+        for ax, (disp, masks, lbl) in zip(axes, panels):
+            point, extended = masks
+            h = min(disp.shape[0], point.shape[0])
+            w = min(disp.shape[1], point.shape[1])
+            gray = disp[:h, :w].astype(np.float32) / 255.0
+            point = point[:h, :w]
+            extended = extended[:h, :w]
+            sky = ~(point | extended)
+            rgb = np.stack([gray, gray, gray], axis=-1)
+            for sel, color in ((sky, sky_color), (extended, ext_color), (point, pt_color)):
+                if sel.any():
+                    rgb[sel] = (1 - alpha) * rgb[sel] + alpha * color
+            ax.imshow(np.clip(rgb, 0, 1), origin="upper", interpolation="nearest")
+            ax.axis("off")
+            ax.set_title(f"Source mask — {lbl}", fontsize=10)
+        handles = [Patch(facecolor=c, label=t) for c, t in
+                   ((sky_color, "Sky (used for background)"),
+                    (ext_color, "Extended structure (masked)"),
+                    (pt_color, "Point sources (masked)"))]
+        fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8,
+                   frameon=False, bbox_to_anchor=(0.5, -0.02))
+        fig.tight_layout()
+        return fig
+
+    def _plot_bgmask_cell_audit(self, frac_a, label_a, frac_b, label_b,
+                                 min_frac: float) -> plt.Figure | None:
+        """Per-mesh-cell unmasked fraction, with the cells the fit actually used
+        outlined.
+
+        This is the audit view for "which measurements is the reported
+        background actually built from" — the single most important thing to be
+        able to check by eye, since a cell photutils excluded still carries a
+        plausible-looking interpolated value that is indistinguishable from a
+        measurement in every other figure.
+        """
+        from matplotlib.patches import Rectangle
+        panels = [(f, lbl) for f, lbl in [(frac_a, label_a), (frac_b, label_b)]
+                  if f is not None]
+        if not panels:
+            return None
+        fig, axes = plt.subplots(1, len(panels), figsize=(6 * len(panels), 5))
+        if len(panels) == 1:
+            axes = [axes]
+        for ax, (frac, lbl) in zip(axes, panels):
+            im = ax.imshow(frac, origin="upper", cmap="viridis", vmin=0.0, vmax=1.0,
+                           interpolation="nearest")
+            fig.colorbar(im, ax=ax, label="Unmasked fraction of cell",
+                         fraction=0.046, pad=0.04)
+            used = frac >= min_frac
+            n_rows, n_cols = frac.shape
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    if used[r, c]:
+                        ax.add_patch(Rectangle((c - 0.5, r - 0.5), 1, 1, fill=False,
+                                               edgecolor="white", linewidth=1.4))
+            ax.set_title(f"Mesh cells used — {lbl}\n"
+                         f"{int(used.sum())} of {frac.size} cells "
+                         f"(white outline: ≥ {min_frac:.0%} unmasked)", fontsize=9)
+            ax.set_xlabel("mesh column")
+            ax.set_ylabel("mesh row")
+        fig.tight_layout()
+        return fig
+
+    def _sourcemask_table_html(self, res_a, label_a, res_b, label_b,
+                                base_a, base_b) -> str:
+        """Current-vs-source-masked comparison table.
+
+        `base_*` are (background_median, rms_median) from the unmasked estimate
+        already in use everywhere else in the report. Deltas are shaded neutral,
+        not green/red: a background that drops is the *expected* result of
+        removing nebulosity, not a quality verdict on the image (the same
+        reasoning that keeps Section 8l's log-ratio column unshaded).
+        """
+        cols = [(res, lbl, base) for res, lbl, base in
+                [(res_a, label_a, base_a), (res_b, label_b, base_b)]
+                if res is not None and base is not None]
+        if not cols:
+            return ""
+
+        def _row(name, unmasked_fn, masked_fn, fmt=".6g", note=""):
+            cells = []
+            for res, _lbl, base in cols:
+                u = unmasked_fn(base)
+                m = masked_fn(res) if res.ok else None
+                d = (m - u) if (isinstance(u, (int, float)) and isinstance(m, (int, float))) else None
+                cells.append(f"<td>{_val(u, fmt)}</td><td>{_val(m, fmt)}</td>"
+                             f"<td class='neutral'>{_val(d, fmt)}</td>")
+            return (f"<tr><td>{name}{note}</td>" + "".join(cells) + "</tr>")
+
+        header_groups = "".join(
+            f'<th colspan="3">{lbl}</th>' for _res, lbl, _b in cols)
+        header_sub = "".join(
+            "<th>Current</th><th>Source-masked</th><th>Δ</th>" for _ in cols)
+
+        rows = [
+            _row("Background median (ADU)", lambda b: b[0],
+                 lambda r: r.background_median),
+            _row("Background RMS median (ADU)", lambda b: b[1],
+                 lambda r: r.rms_median),
+        ]
+        # Non-delta rows: the "current" estimate has no equivalent quantity.
+        extra = []
+        for label, fn, fmt in (
+                ("Mesh cells used", lambda r: f"{r.n_cells} / {r.n_cells_total}", None),
+                ("Source mask coverage", lambda r: r.coverage, ".1%"),
+                ("Point / extended segments",
+                 lambda r: (f"{r.source_mask.n_point} / {r.source_mask.n_extended}"
+                            if r.source_mask else "—"), None),
+                ("Selected model", lambda r: _SOURCEMASK_ORDER_LABEL.get(
+                    r.fit.get("selected_order"), "—") if r.fit else "—", None)):
+            cells = []
+            for res, _lbl, base in cols:
+                if not res.ok:
+                    cells.append("<td>—</td><td>—</td><td>—</td>")
+                    continue
+                value = fn(res)
+                shown = _val(value, fmt) if fmt else value
+                cells.append(f"<td>—</td><td colspan='2'>{shown}</td>")
+            extra.append(f"<tr><td>{label}</td>" + "".join(cells) + "</tr>")
+
+        return f"""
+<table>
+  <thead>
+    <tr><th rowspan="2">Metric</th>{header_groups}</tr>
+    <tr>{header_sub}</tr>
+  </thead>
+  <tbody>
+    {"".join(rows)}
+    {"".join(extra)}
+  </tbody>
+</table>"""
+
+    def _sourcemask_tier_table_html(self, res, label) -> str:
+        """Per-tier detection thresholds — the auditable core of the mask."""
+        if res is None or res.source_mask is None or not res.source_mask.tiers:
+            return ""
+        rows = "".join(
+            f"<tr><td>{t['tier']}</td><td>{_val(t['kernel_sigma'], '.3g')}</td>"
+            f"<td>{_val(t['n_sigma'], '.2f')}</td>"
+            f"<td>{_val(t['threshold_adu'], '.4g')}</td>"
+            f"<td>{t['npixels']}</td><td>{t['n_segments']}</td></tr>"
+            for t in res.source_mask.tiers)
+        return f"""
+<p class="caption">Detection thresholds — {label}
+(sky &sigma; = {_val(res.source_mask.sky_sigma, '.4g')} ADU)</p>
+<table>
+  <thead><tr><th>Tier</th><th>Kernel &sigma; (px)</th><th>n&sigma;</th>
+  <th>Threshold (ADU, smoothed)</th><th>Min. pixels</th><th>Segments</th></tr></thead>
+  <tbody>{rows}</tbody>
+</table>"""
+
     def _section_snr(self, ra: AnalysisResult, rb: AnalysisResult,
                       img_a: AstroImage, img_b: AstroImage | None) -> str:
         err = _error_box("snr", ra, rb)
@@ -5681,8 +5959,11 @@ signal in the dark region produce a higher SNR.</p>
                 '<strong>Known limitation:</strong> per-cell sigma-clipping rejects only 3&sigma; '
                 'outliers within each cell &mdash; there is no source segmentation mask. Extended, '
                 'low-contrast nebulosity spanning many cells can still bias the estimate upward in '
-                'those cells rather than being excluded outright. Use these panels to judge whether '
-                'that is happening in your field, not as proof that it is not.'
+                'those cells rather than being excluded outright, which in turn '
+                '<em>under</em>-states every SNR figure in this section. Use these panels to judge '
+                'whether that is happening in your field, not as proof that it is not &mdash; and '
+                'see <strong>3g</strong> below, which re-estimates this same background with the '
+                'sources masked out and reports how much the difference is worth here.'
             )
 
             bg_html = f"""
@@ -5792,6 +6073,155 @@ Background model panel above).</p>
 symmetric scale). Structure remaining here is not captured by a low-order polynomial —
 expected for genuinely patchy backgrounds, e.g. flat-field residuals or extended
 nebulosity leaking into the background estimate.</p>"""
+
+        # --- Source-Masked Background Check sub-section (3g) ---
+        # Diagnostic only: nothing here feeds AstroImage.background, so every
+        # SNR number above is unchanged by this block's presence.
+        smres_a = _sourcemask_for(self._sourcemask_cache, img_a if bg_a_ready else None,
+                                  _sourcemask_fwhm(ra))
+        smres_b = _sourcemask_for(self._sourcemask_cache, img_b if bg_b_ready else None,
+                                  _sourcemask_fwhm(rb))
+
+        smask_html = ""
+        if smres_a is not None or smres_b is not None:
+            base_a = ((float(np.median(img_a.background.background)),
+                       float(np.median(img_a.background_rms))) if bg_a_ready else None)
+            base_b = ((float(np.median(img_b.background.background)),
+                       float(np.median(img_b.background_rms))) if bg_b_ready else None)
+
+            # Overlay + surface panels, decimated onto the same grid every other
+            # Section 3e/3f figure uses so they can be compared side by side.
+            ov_a = ov_b = None
+            disp_a_sm = disp_b_sm = None
+            surf_sm_a = surf_sm_b = None
+            diff_sm_a = diff_sm_b = None
+            frac_a = frac_b = None
+            for img, res, ready in ((img_a, smres_a, bg_a_ready),
+                                    (img_b, smres_b, bg_b_ready)):
+                if not ready or res is None or not res.ok:
+                    continue
+                step = decimation_step(*img.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                disp = img.display_image(stretch=True)[::step, ::step]
+                masks = (res.source_mask.point_mask[::step, ::step],
+                         res.source_mask.extended_mask[::step, ::step])
+                surf = res.surface[::step, ::step]
+                diff = surf - img.background_display(kind="model")
+                if img is img_a:
+                    disp_a_sm, ov_a, surf_sm_a, diff_sm_a = disp, masks, surf, diff
+                    frac_a = _sourcemask_cell_fraction(img, res)
+                else:
+                    disp_b_sm, ov_b, surf_sm_b, diff_sm_b = disp, masks, surf, diff
+                    frac_b = _sourcemask_cell_fraction(img, res)
+
+            overlay_sm_fig = self._plot_source_mask_overlay(
+                disp_a_sm, ov_a, ra.label, disp_b_sm, ov_b, rb.label)
+
+            surf_sm_fig = diff_sm_fig = None
+            surf_vals_sm = [v for v in (surf_sm_a, surf_sm_b) if v is not None]
+            if surf_vals_sm:
+                sm_vmin = min(float(np.percentile(v, 2)) for v in surf_vals_sm)
+                sm_vmax = max(float(np.percentile(v, 98)) for v in surf_vals_sm)
+                surf_sm_fig = self._plot_background_map_pair(
+                    surf_sm_a, ra.label, surf_sm_b, rb.label, sm_vmin, sm_vmax,
+                    "Source-masked background (ADU)", "Source-masked background")
+            diff_vals_sm = [v for v in (diff_sm_a, diff_sm_b) if v is not None]
+            if diff_vals_sm:
+                dmax = max(float(np.percentile(np.abs(v), 98)) for v in diff_vals_sm)
+                dmax = dmax if dmax > 0 else 1.0
+                diff_sm_fig = self._plot_background_map_pair(
+                    diff_sm_a, ra.label, diff_sm_b, rb.label, -dmax, dmax,
+                    "Masked − current (ADU)", "Change vs. current model", cmap="bwr")
+
+            audit_fig = self._plot_bgmask_cell_audit(
+                frac_a, ra.label, frac_b, rb.label, SOURCEMASK_MIN_CELL_UNMASKED_FRAC)
+
+            smask_table = self._sourcemask_table_html(
+                smres_a, ra.label, smres_b, rb.label, base_a, base_b)
+            tier_tables = (self._sourcemask_tier_table_html(smres_a, ra.label)
+                           + self._sourcemask_tier_table_html(smres_b, rb.label))
+
+            warnings_html = ""
+            for res, lbl in ((smres_a, ra.label), (smres_b, rb.label)):
+                if res is not None and res.fallback_reason:
+                    warnings_html += (
+                        f'<p class="warn-box"><strong>{lbl}:</strong> source-masked estimate '
+                        f'unavailable — {res.fallback_reason}. The current estimate is '
+                        f'shown unchanged for this image.</p>')
+
+            smask_info_text = (
+                '<strong>This section is diagnostic only.</strong> Every SNR value, star '
+                'measurement and comparison elsewhere in this report still uses the '
+                'unmasked <code>Background2D</code> estimate shown in 3e. Nothing here '
+                'changes those numbers &mdash; it exists so you can judge how much they '
+                'are affected before the masked estimate is adopted.<br><br>'
+                'The 3e model sigma-clips each 64&times;64 cell independently, which '
+                'assumes every cell is mostly sky. Over extended nebulosity that '
+                'assumption fails: the clip settles on the nebula level instead of the '
+                'sky level and the background is over-estimated, which then '
+                '<em>under</em>-states every SNR in this report. This section rebuilds '
+                'the estimate with the sources excluded, in four auditable steps.<br><br>'
+                '<strong>1. Sky scaffold</strong> &mdash; a robust plane is fitted to the '
+                'existing mesh, rejecting only cells that sit <em>above</em> it. The '
+                'one-sidedness is the point: nebulosity only ever adds flux, so a '
+                'symmetric clip cannot remove a bias carried by most of the cells, and '
+                'would additionally discard genuine dark-sky cells. Its scale is measured '
+                'from the lowest quartile of the residuals, which stays uncontaminated '
+                'even when three quarters of the frame carries signal.<br>'
+                '<strong>2. Detection</strong> &mdash; the scaffold is subtracted, which '
+                'flattens any large-scale gradient so one global threshold is valid '
+                'everywhere. Sources are then detected at four scales: one matched to the '
+                'stars, and three progressively broader ones matched to low-surface-'
+                'brightness structure. Point sources are removed before the broad scales '
+                'run, because a bright star smoothed over 16 px still towers over a '
+                'faint-nebulosity threshold and would otherwise be masked as a large '
+                'extended blob. Every threshold is listed below.<br>'
+                '<strong>3. Classification</strong> &mdash; segments are split into point '
+                'sources and extended structure by <em>extent</em> (equivalent radius '
+                'against the PSF, plus the scale that detected them), then grown by an '
+                'amount matched to their own class. Shape/eccentricity is reported but '
+                'deliberately not used to classify: it separates round from elongated, '
+                'not compact from extended, and filamentary nebulosity sits at the same '
+                'end of it as trailed or blended stars.<br>'
+                '<strong>4. Re-estimate</strong> &mdash; the mesh is recomputed with the '
+                'mask applied, and a low-order surface is fitted to the cells that remain '
+                'genuinely measured. A fitted surface is used rather than the interpolated '
+                'mesh because at high mask coverage most cells hold no data, and '
+                'interpolating across them is less accurate than the bias being removed. '
+                'The polynomial order is capped by how many cells survived, so a handful '
+                'of cells can never produce a curved surface that swings wildly across '
+                'the masked region.<br><br>'
+                '<strong>How to read it:</strong> if the &Delta; column is near zero your '
+                'field is sky-dominated and the 3e numbers are sound. A large negative '
+                '&Delta; on the background median means nebulosity was inflating the sky '
+                'estimate, and the true SNR of this image is <em>higher</em> than reported '
+                'above. Check the mask overlay before trusting a large &Delta;: the '
+                'masked region should follow visible structure, and the cells outlined in '
+                'the audit map are the only measurements the new surface rests on.'
+            )
+
+            smask_html = f"""
+<h3>3g. Source-Masked Background Check</h3>
+{_info_box(smask_info_text, title="Understanding the source-masked check")}
+{warnings_html}
+{smask_table}
+{_img_tag(overlay_sm_fig, "Source mask overlay")}
+<p class="caption">Which pixels were excluded from the re-estimated background:
+point sources (gold), extended structure (tomato), and the sky actually used
+(steelblue). Extended structure should follow visible nebulosity — a tomato wash
+over blank sky means the detection ran too deep for this field.</p>
+{_img_tag(surf_sm_fig, "Source-masked background surface")}
+<p class="caption">The re-estimated background in ADU (plasma colourmap, shared
+scale), fitted only to mesh cells that survived the mask.</p>
+{_img_tag(diff_sm_fig, "Change versus current background model")}
+<p class="caption">Source-masked estimate minus the current 3e model (ADU, diverging
+colourmap, symmetric scale). Blue regions are where the current model reads high —
+i.e. where nebulosity is inflating the sky estimate and suppressing reported SNR.</p>
+{_img_tag(audit_fig, "Mesh cell audit")}
+<p class="caption">Fraction of each mesh cell left unmasked. Only the outlined cells
+were treated as measurements; the rest hold too little sky to be trusted, and a cell
+photutils excludes still reports a plausible interpolated value, so this outline is
+the only way to see what the fit actually rests on.</p>
+{tier_tables}"""
 
         _snr_metrics_box = _info_box(
             '<strong>Global SNR (sky-&sigma; units)</strong> &mdash; A single number summarising the '
@@ -5966,7 +6396,8 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 {xs_crosshair_html}
 {xs_snr_html}
 {bg_html}
-{bgfit_html}"""
+{bgfit_html}
+{smask_html}"""
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
 

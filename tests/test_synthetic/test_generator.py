@@ -4,7 +4,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from synthetic.generator import SyntheticGenerator
+from astropy.stats import SigmaClip
+from photutils.background import (Background2D, MADStdBackgroundRMS,
+                                  SExtractorBackground)
+
+from analysis.background_fit import fit_background_surface
+from synthetic.generator import SyntheticGenerator, _sky_gradient_map
 from synthetic.cameras import CAMERAS
 
 
@@ -102,3 +107,67 @@ class TestFitsOutput:
         from pathlib import Path
         _, starless = synth_fits_path
         assert "_starless" in Path(starless).stem
+
+
+class TestSkyGradient:
+    """The additive light-pollution / moon-glow ramp added for Section 3g testing."""
+
+    def test_zero_gradient_is_exactly_uniform(self):
+        """The default must reproduce the pre-gradient uniform sky bit-for-bit."""
+        m = _sky_gradient_map(500.0, 100, 200, 0.0, 0.0)
+        assert m.shape == (100, 200)
+        assert np.ptp(m) == 0.0
+        assert m[0, 0] == pytest.approx(500.0)
+
+    @pytest.mark.parametrize("angle", [0.0, 45.0, 90.0, 215.0])
+    def test_swing_and_mean_hold_at_every_angle(self, angle):
+        """A 'fraction of sky' swing must mean the same thing in any direction.
+
+        Without the span renormalisation a diagonal ramp would span sqrt(2)
+        times more than an axis-aligned one for the same setting.
+        """
+        sky = 500.0
+        m = _sky_gradient_map(sky, 400, 600, 0.30, angle)
+        assert float(np.ptp(m)) / sky == pytest.approx(0.30, rel=1e-6)
+        assert float(m.mean()) == pytest.approx(sky, rel=1e-6)
+
+    def test_gradient_is_never_negative(self):
+        """The Poisson expectation must stay positive at the full slider range."""
+        m = _sky_gradient_map(10.0, 64, 64, 0.5, 137.0)
+        assert float(m.min()) > 0.0
+
+    def test_direction_points_where_the_sky_brightens(self):
+        m = _sky_gradient_map(500.0, 200, 200, 0.3, 0.0)     # 0 deg = +x
+        assert m[:, -1].mean() > m[:, 0].mean()
+        m90 = _sky_gradient_map(500.0, 200, 200, 0.3, 90.0)  # 90 deg = +y
+        assert m90[-1, :].mean() > m90[0, :].mean()
+
+    def test_injected_gradient_is_recovered_from_a_generated_frame(self):
+        """Round-trip: the ramp must be measurable by the Section 3f fit."""
+        rng = np.random.default_rng(0)
+        h = w = 512
+        sky_e = _sky_gradient_map(1000.0, h, w, 0.30, 20.0)
+        data = rng.poisson(sky_e).astype(np.float32)
+        bkg = Background2D(
+            data, box_size=64, filter_size=3,
+            sigma_clip=SigmaClip(sigma=3.0, maxiters=10),
+            bkg_estimator=SExtractorBackground(),
+            bkg_rms_estimator=MADStdBackgroundRMS())
+        fit = fit_background_surface(bkg.background_mesh, bkg.background_rms_mesh,
+                                     64, (h, w))
+        assert fit["gradient"] is not None
+        assert fit["gradient"]["adu_range"] == pytest.approx(0.30 * 1000.0, rel=0.15)
+        assert fit["gradient"]["direction_deg"] == pytest.approx(20.0, abs=5.0)
+
+    def test_shot_noise_scales_with_local_sky(self):
+        """Applied to the Poisson expectation, not added afterwards.
+
+        A gradient added post-hoc would leave a flat noise level under a
+        sloping sky, which no real light-pollution gradient does.
+        """
+        rng = np.random.default_rng(1)
+        sky_e = _sky_gradient_map(1000.0, 512, 512, 0.5, 0.0)
+        data = rng.poisson(sky_e).astype(np.float64)
+        dark = float(data[:, :64].std())
+        bright = float(data[:, -64:].std())
+        assert bright > dark

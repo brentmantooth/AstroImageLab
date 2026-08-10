@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from analysis.background_fit import (
+    evaluate_surface_at,
     compare_fits,
     evaluate_surface,
     fit_background_surface,
@@ -270,3 +271,84 @@ class TestCompareFits:
         assert cmp["gradient"] == {"z": None, "p": None}
         assert cmp["isotropic_curvature"] == {"z": None, "p": None}
         assert cmp["anisotropic_curvature"] == {"z": None, "p": None}
+
+
+class TestMaxOrderCap:
+    """`max_order` gates which candidate orders BIC may choose from at all.
+
+    Added for analysis/source_mask.py's stage 4: on a sparse, source-masked
+    mesh BIC will happily select the quadric from a handful of surviving cells
+    and then extrapolate wildly across the masked region.
+    """
+
+    @staticmethod
+    def _quadric_mesh():
+        # Curvature strong enough that unrestricted BIC prefers order 2.
+        return _synthetic_mesh(
+            8, 8, 64, (512, 512),
+            lambda dx, dy: 1000.0 + 0.05 * dx + 4e-4 * dx ** 2 + 4e-4 * dy ** 2,
+            noise_std=0.5, rms_value=1.0, seed=7)
+
+    def test_default_is_unrestricted(self):
+        mesh, rms = self._quadric_mesh()
+        fit = fit_background_surface(mesh, rms, 64, (512, 512))
+        assert fit["selected_order"] == 2, "fixture no longer prefers the quadric"
+
+    @pytest.mark.parametrize("cap", [0, 1, 2])
+    def test_selected_order_never_exceeds_cap(self, cap):
+        mesh, rms = self._quadric_mesh()
+        fit = fit_background_surface(mesh, rms, 64, (512, 512), max_order=cap)
+        assert fit["selected_order"] <= cap
+        assert all(order <= cap for order in fit["bic"])
+
+    def test_capped_fit_drops_the_curvature_terms(self):
+        mesh, rms = self._quadric_mesh()
+        fit = fit_background_surface(mesh, rms, 64, (512, 512), max_order=1)
+        assert fit["isotropic_curvature"] is None
+        assert fit["anisotropic_curvature"] is None
+        assert fit["gradient"] is not None
+
+    def test_cap_zero_still_produces_a_usable_fit(self):
+        mesh, rms = self._quadric_mesh()
+        fit = fit_background_surface(mesh, rms, 64, (512, 512), max_order=0)
+        assert not fit["insufficient_data"]
+        assert fit["selected_order"] == 0
+        assert fit["gradient"] is None
+        surface = evaluate_surface(fit, (512, 512), 64)
+        assert np.all(np.isfinite(surface))
+        assert np.ptp(surface) == pytest.approx(0.0, abs=1e-6)
+
+
+class TestDesignMatrixBroadcasting:
+    """evaluate_surface_at must accept separable coordinate grids.
+
+    analysis/source_mask.py evaluates the scaffold fit on mesh-cell centres
+    built as a row vector of x's against a column vector of y's; before the
+    broadcast, np.stack raised because the constant column alone was dx-shaped.
+    """
+
+    @staticmethod
+    def _plane_fit():
+        mesh, rms = _synthetic_mesh(8, 8, 64, (512, 512),
+                                    lambda dx, dy: 1000.0 + 0.3 * dx + 0.1 * dy)
+        return fit_background_surface(mesh, rms, 64, (512, 512))
+
+    def test_separable_grids_broadcast(self):
+        fit = self._plane_fit()
+        xs = np.arange(0.0, 512.0, 64.0)[None, :]
+        ys = np.arange(0.0, 512.0, 64.0)[:, None]
+        out = evaluate_surface_at(fit, xs, ys)
+        assert out.shape == (8, 8)
+
+    def test_broadcast_matches_explicit_meshgrid(self):
+        fit = self._plane_fit()
+        xs = np.arange(0.0, 512.0, 64.0)
+        ys = np.arange(0.0, 512.0, 64.0)
+        separable = evaluate_surface_at(fit, xs[None, :], ys[:, None])
+        xx, yy = np.meshgrid(xs, ys, indexing="xy")
+        explicit = evaluate_surface_at(fit, xx, yy)
+        assert np.allclose(separable, explicit)
+
+    def test_scalar_inputs_still_work(self):
+        fit = self._plane_fit()
+        assert np.isfinite(float(evaluate_surface_at(fit, 100.0, 200.0)))

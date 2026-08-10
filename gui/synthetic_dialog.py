@@ -604,6 +604,23 @@ class SyntheticDialog(QMainWindow):
         self._bortle_sl.valueChanged.connect(self._schedule_preview)
         form.addRow("Bortle class (1–9)", self._bortle_sl)
 
+        self._sky_gradient_sl = _SliderRow(0.0, 0.5, 0.0, 2)
+        self._sky_gradient_sl.setToolTip(
+            "Linear sky gradient — total corner-to-corner swing as a fraction of\n"
+            "the base sky level (0.30 = brightest corner 30 % above the darkest).\n"
+            "Candidate real causes: light pollution, moon glow, or vignetting.\n"
+            "Model: applied to the Poisson expectation, so shot noise scales as\n"
+            "sqrt(local sky) exactly as a real gradient does.")
+        self._sky_gradient_sl.valueChanged.connect(self._schedule_preview)
+        form.addRow("Sky gradient", self._sky_gradient_sl)
+
+        self._sky_gradient_angle_sl = _SliderRow(0, 360, 0, 0)
+        self._sky_gradient_angle_sl.setToolTip(
+            "Direction the sky gets brighter, in degrees counter-clockwise from +x.\n"
+            "No effect while Sky gradient is 0.")
+        self._sky_gradient_angle_sl.valueChanged.connect(self._schedule_preview)
+        form.addRow("Gradient angle (°)", self._sky_gradient_angle_sl)
+
         return box
 
     def _build_nebula(self) -> QGroupBox:
@@ -858,6 +875,8 @@ class SyntheticDialog(QMainWindow):
             "exposure_s":      self._exp_spin.value(),
             "gain_e_per_adu":  self._gain_spin.value(),
             "bortle":          int(round(self._bortle_sl.value())),
+            "sky_gradient":           self._sky_gradient_sl.value(),
+            "sky_gradient_angle_deg": self._sky_gradient_angle_sl.value(),
             "moffat_beta":     self._beta_spin.value(),
             "poor_focus":      self._focus_sl.value(),
             "backfocus":       self._backfocus_sl.value(),

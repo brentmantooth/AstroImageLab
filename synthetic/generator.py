@@ -264,6 +264,36 @@ def _bortle_to_sky_adu(bortle: int, plate_scale: float,
     return electrons / gain_e_per_adu
 
 
+def _sky_gradient_map(sky_e: float, height: int, width: int,
+                      gradient: float, angle_deg: float) -> np.ndarray:
+    """Per-pixel sky expectation (electrons) carrying a linear gradient.
+
+    `gradient` is the total corner-to-corner swing as a fraction of the base
+    sky level, so 0.3 means the brightest corner sits 30 % above the darkest
+    and the frame mean stays at `sky_e` regardless of the angle. `angle_deg`
+    is measured counter-clockwise from +x, i.e. the direction the sky gets
+    brighter.
+
+    Returns a scalar-valued full array when `gradient` is 0, so the uniform
+    case stays numerically identical to the pre-gradient behaviour.
+    """
+    if not np.isfinite(gradient) or gradient <= 0.0:
+        return np.full((height, width), float(sky_e), dtype=np.float64)
+    theta = np.radians(float(angle_deg))
+    # Normalised coordinates in [-0.5, +0.5], so the projection below spans
+    # exactly [-0.5, +0.5] along the gradient direction and the ramp amplitude
+    # is the requested corner-to-corner fraction.
+    ny = (np.arange(height, dtype=np.float64) / max(1, height - 1)) - 0.5
+    nx = (np.arange(width, dtype=np.float64) / max(1, width - 1)) - 0.5
+    proj = np.cos(theta) * nx[None, :] + np.sin(theta) * ny[:, None]
+    # Rescale so the swing is the requested fraction along any angle: a
+    # diagonal direction spans sqrt(2)/2 more than an axis-aligned one.
+    span = float(np.ptp(proj))
+    if span > 0:
+        proj = proj / span
+    return float(sky_e) * (1.0 + float(gradient) * proj)
+
+
 # ---------------------------------------------------------------------------
 # Main generator class
 # ---------------------------------------------------------------------------
@@ -417,8 +447,17 @@ class SyntheticGenerator:
         # ── Sky + read noise — added independently to each image ────────────
         read_noise_adu = cam["read_noise_e"] / gain_e_per_adu
         sky_e          = sky_adu * gain_e_per_adu
+        # Light-pollution / moon-glow ramp. Applied to the Poisson *expectation*
+        # rather than added afterwards, so shot noise scales as sqrt(local sky)
+        # the way a real gradient does — a flat noise level under a sloping sky
+        # would be unphysical, and Section 3g's whole job is telling a gradient
+        # apart from nebulosity. It is deterministic, so it is drawn from
+        # neither RNG and the two-RNG convention is untouched.
+        sky_e_map = _sky_gradient_map(sky_e, height, width,
+                                      float(params.get("sky_gradient", 0.0)),
+                                      float(params.get("sky_gradient_angle_deg", 0.0)))
         for arr in (full_image, starless_arr):
-            sky_noise = noise_rng.poisson(max(0.1, sky_e), size=arr.shape).astype(float)
+            sky_noise = noise_rng.poisson(np.maximum(0.1, sky_e_map)).astype(float)
             arr += sky_noise / gain_e_per_adu
             arr += noise_rng.normal(0.0, read_noise_adu, size=arr.shape)
 
@@ -480,6 +519,10 @@ class SyntheticGenerator:
         hdr["SYN_FOC"]  = (float(params["poor_focus"]),      "poor focus slider 0-1")
         hdr["SYN_HALO"] = (float(params["halo"]),            "halo slider 0-1")
         hdr["SYN_SKYA"] = (round(sky_adu, 4),               "sky background ADU/px")
+        hdr["SYN_SGRD"] = (float(params.get("sky_gradient", 0.0)),
+                           "sky gradient, corner-corner frac of sky")
+        hdr["SYN_SGAN"] = (float(params.get("sky_gradient_angle_deg", 0.0)),
+                           "sky gradient direction, deg CCW from +x")
         hdr["SYN_MAGN"] = (f"{mags.min():.1f}-{mags.max():.1f}", "mag range")
         hdr["SYN_SSED"] = (int(params["n_stars"]),           "star position seed (= n_stars)")
         hdr["SYN_NSED"] = (int(params.get("seed", 42)),      "noise seed")

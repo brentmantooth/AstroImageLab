@@ -31,6 +31,11 @@ _TERM_SCALE_POWER = {"const": 0, "x": 1, "y": 1, "x2": 2, "y2": 2, "xy": 2}
 
 def _design_matrix(dx: np.ndarray, dy: np.ndarray, order: int) -> np.ndarray:
     """Design matrix for `order` (0/1/2) at native-unit offsets (dx, dy)."""
+    # Broadcast first: callers legitimately pass separable grids (e.g. a row
+    # vector of cell-centre x's against a column vector of y's), and np.stack
+    # below requires every column to already share one shape -- without this
+    # the constant column alone would be dx-shaped and stack() would raise.
+    dx, dy = np.broadcast_arrays(dx, dy)
     cols = [np.ones_like(dx)]
     if order >= 1:
         cols += [dx, dy]
@@ -62,8 +67,16 @@ def _bic_evidence_label(delta_bic: float) -> str:
 
 
 def fit_background_surface(mesh: np.ndarray, rms_mesh: np.ndarray,
-                            box_size: int, image_shape: tuple[int, int]) -> dict:
+                            box_size: int, image_shape: tuple[int, int],
+                            max_order: int = 2) -> dict:
     """Fit nested constant/plane/quadric models to a Background2D mesh.
+
+    `max_order` caps which candidate orders are considered at all (BIC still
+    selects freely below the cap). The default 2 preserves the original
+    unrestricted behaviour; callers fitting a sparse, source-masked mesh pass
+    a lower cap, because BIC alone will happily choose the quadric on a
+    handful of surviving cells and then extrapolate wildly across the masked
+    region -- see analysis/source_mask.py's order ladder.
 
     Fits weighted least squares (inverse-variance weights from rms_mesh) for
     each of 3 nested polynomial orders that have enough valid cells to
@@ -120,6 +133,8 @@ def fit_background_surface(mesh: np.ndarray, rms_mesh: np.ndarray,
 
     fits_by_order: dict[int, dict] = {}
     for order, terms in _ORDER_TERMS.items():
+        if order > max_order:
+            continue
         k = len(terms)
         if n_valid <= k:
             continue

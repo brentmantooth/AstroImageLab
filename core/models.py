@@ -34,6 +34,32 @@ RDF_BIN_WIDTH = 1.0            # px; annular bin width for RDF mean/std computat
 POWER_SPECTRUM_NPIX = 2048   # px; size of square power spectrum maps (must be 2^n)
 BACKGROUND_DISPLAY_MAX_DIM = 800   # px; stride-decimation cap shared by AstroImage.background_display()/decimation_step() and the Section 3e/3f/3g background-diagnostic figures, so arrays from different call sites land on the identical pixel grid
 
+# === Section 3g — source-masked background estimate (analysis/source_mask.py) ===
+# Background2D's per-cell sigma-clip assumes each cell is sky-dominated; that fails
+# when extended nebulosity covers a large fraction of the frame. These drive the
+# 4-stage source-masking diagnostic. Kernel/dilation sizes are expressed relative to
+# each stage's own characteristic scale (kernel sigma, FWHM) rather than as fixed
+# pixel counts, matching the SECTION8_LOCALMAX_* convention.
+SOURCEMASK_SCAFFOLD_REJECT_NSIGMA = 1.5   # cut for the stage-1 sky scaffold, in units of a LOWER-HALF MAD sigma. Doubly one-sided: only cells ABOVE the fit are rejected (nebula contamination is strictly positive), and the scale is measured from the below-median residuals only (a two-sided MAD is inflated by the very contamination it must detect — at >50% coverage it grew until 62 of 64 cells survived and the scaffold stayed biased +1.26σ; the lower-half estimate cut that to +0.62σ)
+SOURCEMASK_SCAFFOLD_MAX_ITERS = 6         # iterations of the stage-1 reject/refit loop; converges in ~4 on real data, this is the safety bound
+SOURCEMASK_POINT_NSIGMA = 3.0             # detection threshold (× sky sigma) for the full-resolution point-source tier
+SOURCEMASK_POINT_NPIXELS = 5              # min connected pixels above threshold for a point-source detection
+SOURCEMASK_EXT_KERNEL_SIGMAS = (4.0, 8.0, 16.0)   # px; Gaussian smoothing sigmas for the extended-structure detection tiers, matched to low-surface-brightness nebulosity rather than to the PSF
+SOURCEMASK_EXT_NSIGMA = (2.5, 2.0, 2.0)   # per-tier detection threshold (× sky sigma of the SMOOTHED image); looser than the point tier since extended structure is low-contrast by definition
+SOURCEMASK_EXT_NPIX_MULT = 2.0            # npixels per extended tier = max(5, round(mult × sigma_k²)) — scale-relative, so a 16 px kernel demands a proportionally larger connected region than a 4 px one
+SOURCEMASK_EXTENDED_RADIUS_MULT = 3.0     # a segment is classified "extended" when equivalent_radius > mult × fwhm_px (at FWHM 4 px: r_eq > 12 px, vs. 2-4 px for a star — wide, unambiguous separation). Deliberately NOT eccentricity-based: eccentricity separates round from elongated, not compact from extended, and puts filamentary nebulosity and trailed/blended stars at the same end
+SOURCEMASK_STAR_DILATION_FWHM_MULT = 2.0  # point-source mask dilation = mult × fwhm_px, to cover PSF wings that fall below the detection threshold
+SOURCEMASK_EXT_DILATION_SIGMA_MULT = 1.0  # extended mask dilation = mult × the detecting tier's kernel sigma, so the grown margin tracks the structure's own scale
+SOURCEMASK_MAX_HOLE_PX = 5                # px; enclosed gaps / isolated specks up to N² area are filled / stripped before dilation (mirrors SECTION8_NEBULA_MASK_MAX_HOLE_PX; skipping the speck strip lets each noise-driven false positive balloon into a (2d+1)² blob)
+SOURCEMASK_EXCLUDE_PERCENTILE = 99.0      # Background2D exclude_percentile for the masked pass, kept deliberately PERMISSIVE. A cell photutils excludes does not vanish from background_mesh — it is back-filled by interpolation, indistinguishable from a real measurement, and fitting those fills wrecked the surface (mesh RMS error 55.5 ADU vs 5.1 for genuinely-measured cells). Letting photutils report every cell it can measure, then selecting cells ourselves via SOURCEMASK_MIN_CELL_UNMASKED_FRAC, keeps the fit on measurements only and makes the selection auditable rather than hidden inside photutils
+SOURCEMASK_MIN_CELL_UNMASKED_FRAC = 0.5   # a mesh cell counts as a real measurement only if at least this fraction of its pixels survived the source mask. Note the bias here is NOT truncation — the surviving pixels are genuine sky, so a half-masked cell is still unbiased; the cut exists because a cell with few surviving pixels is noisy and, at the extreme, is photutils' interpolated fill rather than a measurement at all. 0.5 balances cell count against per-cell error (measured on a 63%-masked gradient frame: 19 cells at 12 ADU RMS, vs 4 cells at 5 ADU for 0.9 — too few to constrain a plane)
+SOURCEMASK_MASKED_FILTER_SIZE = 1         # filter_size for the masked Background2D pass. The default 3x3 median filter mixes neighbouring cells together, which on a sparse masked mesh means mixing in interpolated fills; the parametric fit in stage 4 does its own outlier handling via BIC and inverse-variance weights, so the pre-smoothing is not needed
+SOURCEMASK_MAX_COVERAGE = 0.98            # fraction; above this the mask leaves too little sky to estimate anything — abort and report the fallback rather than returning a fabricated surface
+SOURCEMASK_MIN_CELLS_QUADRIC = 20         # surviving masked mesh cells required before the order-2 quadric is allowed (BIC alone picked the quadric on 11 cells and extrapolated to a 153 ADU worst-case error)
+SOURCEMASK_MIN_CELLS_PLANE = 8            # surviving cells required for the order-1 plane
+SOURCEMASK_MIN_CELLS_CONSTANT = 4         # surviving cells required for the order-0 constant; below this the masked estimate aborts entirely
+SOURCEMASK_N_PASSES = 1                   # detect→mask→estimate repeats. Deliberately 1: iterating DIVERGES rather than converging. Each pass re-detects against the previous pass's (lower) surface, so the mask can only grow — measured coverage ran away 54%→84%→95% on a heavy-nebula frame, and the surviving cells became too few and too spatially clustered to constrain a fit across a gradient (bias +0.10σ at 1 pass vs −2.17σ at 2). Kept as a parameter because the loop is exercised by tests, but raise it only with ground-truth measurement in hand
+
 STD_KERNEL_SIZES = (3, 5, 10)  #originally (5, 10, 15)   # px; Gaussian kernel sizes for std dev maps
 LOG_SIGMAS = (1.5, 3.0, 6.0)
 ENTROPY_KERNEL_SIZES = (5, 9, 17)   # px; local window for Shannon entropy — deliberately larger than STD_KERNEL_SIZES since small windows (<25 samples) give unstable histogram estimates
