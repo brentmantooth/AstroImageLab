@@ -317,6 +317,12 @@ class AnalysisControlPanel(QWidget):
         self._roi_label = QLabel("No ROI — auto-detect")
         self._roi_label.setStyleSheet("color: #666;")
         roi_row.addWidget(self._roi_label)
+
+        # Status only — the Background Regions dialog owns the drawing mode, so
+        # there is no second checkable button whose state would need syncing.
+        self._bg_excl_label = QLabel("No background exclusion regions")
+        self._bg_excl_label.setStyleSheet("color: #666;")
+        roi_row.addWidget(self._bg_excl_label)
         roi_row.addStretch()
         left_col.addLayout(roi_row)
 
@@ -406,6 +412,18 @@ class AnalysisControlPanel(QWidget):
             self._roi_label.setText("No ROI — auto-detect")
             self._roi_label.setStyleSheet("color: #666;")
 
+    def set_bg_exclusions(self, regions) -> None:
+        """Reflect the count drawn in the Background Regions dialog."""
+        self._bg_exclusions = list(regions or [])
+        n = len(self._bg_exclusions)
+        if n:
+            self._bg_excl_label.setText(
+                f"{n} background exclusion region{'s' if n != 1 else ''}")
+            self._bg_excl_label.setStyleSheet("color: #155724;")
+        else:
+            self._bg_excl_label.setText("No background exclusion regions")
+            self._bg_excl_label.setStyleSheet("color: #666;")
+
     def set_line(self, line: dict | None) -> None:
         self._line = line
         if line:
@@ -478,6 +496,7 @@ class AnalysisControlPanel(QWidget):
             "ref_seeing_arcsec": self._ref_seeing_arcsec.value(),
             "epsf_max_stars": self._epsf_max_stars.value(),
             "roi": self._roi,
+            "bg_exclusion_regions": list(getattr(self, "_bg_exclusions", [])),
             "crosshair": self._line,
             "output_dir": self._out_dir.text().strip() or str(Path.home() / "filter_reports"),
             "report_format": self._report_format_combo.currentData(),

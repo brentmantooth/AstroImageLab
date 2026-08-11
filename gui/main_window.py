@@ -24,6 +24,8 @@ class MainWindow(QMainWindow):
         self._thread: AnalysisThread | None = None
         self._roi: tuple | None = None
         self._crosshair: dict | None = None
+        # Normalised polygon dicts; see analysis.inspector_regions.exclusion_mask.
+        self._bg_exclusions: list[dict] = []
 
         self._build_ui()
         self._build_menu()
@@ -161,6 +163,12 @@ class MainWindow(QMainWindow):
         self._act_toolbar_line = QAction("Select Line…", self)
         self._act_toolbar_line.triggered.connect(lambda: self._control._line_btn.click())
         tb.addAction(self._act_toolbar_line)
+
+        self._act_bg_regions = QAction("Background Regions…", self)
+        self._act_bg_regions.setToolTip(
+            "Draw regions to keep out of the background estimate (Section 3g)")
+        self._act_bg_regions.triggered.connect(self._open_bg_region_dialog)
+        tb.addAction(self._act_bg_regions)
         tb.addSeparator()
 
         tb.addAction(self._act_run)
@@ -224,8 +232,13 @@ class MainWindow(QMainWindow):
         # "Stale ROI crashes Section 8..." pitfall).
         self._roi = None
         self._crosshair = None
+        # Exclusion regions are normalised so they can never fall out of bounds,
+        # but they were drawn against different sky — keep them no more than the
+        # ROI, and clear at the source rather than reactively at Run time.
+        self._bg_exclusions = []
         self._control.set_roi(None)
         self._control.set_line(None)
+        self._control.set_bg_exclusions([])
         self._panel_a.clear_roi_overlay()
         self._panel_b.clear_roi_overlay()
         self._panel_a.clear_line_overlay()
@@ -387,6 +400,7 @@ class MainWindow(QMainWindow):
         # Merge ROI and crosshair from window state into settings
         settings["roi"] = self._roi
         settings["crosshair"] = self._crosshair
+        settings["bg_exclusion_regions"] = list(self._bg_exclusions)
 
         # Determine starless sources: when single-image, use whichever panel has the image
         _sl_a = (self._panel_a.starless_image if self._panel_a.image is img_a
@@ -471,6 +485,50 @@ class MainWindow(QMainWindow):
             return
         self._inspector = ReportInspector(npz_path, parent=self)
         self._inspector.show()
+
+    def _open_bg_region_dialog(self) -> None:
+        """Draw regions to keep out of the background estimate (Section 3g)."""
+        try:
+            from gui.bg_region_dialog import BackgroundRegionDialog
+        except ImportError as exc:
+            # Same degradation as the Data Inspector: pyqtgraph is a hard
+            # requirement for this window only.
+            QMessageBox.warning(
+                self,
+                "Background Regions unavailable",
+                "Drawing background regions needs the pyqtgraph package, which "
+                f"could not be imported:\n\n{exc}\n\nInstall it with:\n"
+                "    pip install pyqtgraph",
+            )
+            return
+
+        img_a = self._panel_a.image
+        img_b = self._panel_b.image
+        if img_a is None and img_b is None:
+            QMessageBox.information(self, "No image loaded",
+                                    "Load an image before drawing background regions.")
+            return
+        if img_a is None:
+            img_a, img_b = img_b, None
+
+        # The preview needs a background estimate; computing it here also makes
+        # the later analysis run's own call a no-op (estimate_background is
+        # idempotent), so nothing is wasted.
+        for img in (img_a, img_b):
+            if img is not None and img.background is None:
+                img.estimate_background()
+
+        settings = self._control.settings()
+        self._bg_region_dialog = BackgroundRegionDialog(
+            img_a, img_b, regions=self._bg_exclusions,
+            dark_mode=settings.get("dark_mode_graphics", False),
+            parent=self)
+        self._bg_region_dialog.regions_changed.connect(self._on_bg_regions_changed)
+        self._bg_region_dialog.show()
+
+    def _on_bg_regions_changed(self, regions) -> None:
+        self._bg_exclusions = list(regions or [])
+        self._control.set_bg_exclusions(self._bg_exclusions)
 
     def _open_data_inspector(self) -> None:
         try:

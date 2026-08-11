@@ -296,6 +296,16 @@ class AnalysisThread(QThread):
         else:
             self._run_serial(tasks, result_a, result_b)
 
+        # Hand the user's drawn background-exclusion regions to the images so
+        # Section 3g's diagnostic can pick them up. Attached here rather than
+        # passed to generate(): the settings dict never reaches ReportBuilder,
+        # and the images do. Nothing else reads this — the background actually
+        # subtracted everywhere else in the report is unaffected.
+        _bg_regions = list(s.get("bg_exclusion_regions") or [])
+        for _im in (img_a, img_b):
+            if _im is not None:
+                _im.bg_exclusion_regions = _bg_regions
+
         # Report generation (always serial — needs all results)
         self.progress.emit(96, "Generating HTML report…")
         report_path = ""

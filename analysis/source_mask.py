@@ -57,7 +57,9 @@ from core.models import (SOURCEMASK_EXCLUDE_PERCENTILE,
                          SOURCEMASK_MASKED_FILTER_SIZE, SOURCEMASK_MAX_COVERAGE,
                          SOURCEMASK_MAX_HOLE_PX, SOURCEMASK_MIN_CELL_UNMASKED_FRAC,
                          SOURCEMASK_MIN_CELLS_CONSTANT, SOURCEMASK_MIN_CELLS_PLANE,
-                         SOURCEMASK_MIN_CELLS_QUADRIC, SOURCEMASK_N_PASSES,
+                         SOURCEMASK_MIN_CELLS_QUADRIC,
+                         SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA,
+                         SOURCEMASK_N_PASSES,
                          SOURCEMASK_POINT_NPIXELS, SOURCEMASK_POINT_NSIGMA,
                          SOURCEMASK_SCAFFOLD_MAX_ITERS,
                          SOURCEMASK_SCAFFOLD_REJECT_NSIGMA,
@@ -85,6 +87,10 @@ class SourceMaskResult:
     sky_sigma: float            # per-pixel sky noise the thresholds were built from
     tiers: list[dict] = field(default_factory=list)      # per-tier threshold record
     segments: list[dict] = field(default_factory=list)   # per-segment classification record
+    # Pixels the user excluded by hand. Kept as its own class rather than folded
+    # into extended_mask so the report can say "you excluded this" instead of
+    # crediting the detector with the user's judgement.
+    user_mask: np.ndarray | None = None
 
     @property
     def n_point(self) -> int:
@@ -93,6 +99,11 @@ class SourceMaskResult:
     @property
     def n_extended(self) -> int:
         return sum(1 for s in self.segments if s["classification"] == "extended")
+
+    @property
+    def user_coverage(self) -> float:
+        """Fraction of the frame the user excluded by hand."""
+        return 0.0 if self.user_mask is None else float(self.user_mask.mean())
 
 
 @dataclass
@@ -134,24 +145,55 @@ def fit_sky_scaffold(mesh: np.ndarray, rms_mesh: np.ndarray, box_size: int,
                      image_shape: tuple[int, int], *,
                      reject_nsigma: float = SOURCEMASK_SCAFFOLD_REJECT_NSIGMA,
                      max_iters: int = SOURCEMASK_SCAFFOLD_MAX_ITERS,
-                     max_order: int = 1) -> dict:
+                     reject_order: int = 1, final_max_order: int = 2,
+                     excluded_cells: np.ndarray | None = None) -> dict:
     """One-sided robust polynomial fit to an *unmasked* Background2D mesh.
 
     Returns a fit_background_surface() dict with two extra keys: `kept_cells`
     (bool array over the mesh) and `n_iters`.
 
     The rejection is deliberately asymmetric -- a cell is dropped only when it
-    sits `reject_nsigma` MAD-sigmas ABOVE the running fit, never when it sits
+    sits `reject_nsigma` scale units ABOVE the running fit, never when it sits
     below. Cells below the fit are genuine sky (or downward noise) and carry
     the information the fit exists to recover; only upward excursions can be
     source contamination, since nebulosity strictly adds flux.
 
-    max_order defaults to 1 (plane): the scaffold's job is to remove the
-    large-scale gradient so detection can use one global threshold, not to
-    model every real curvature. A quadric here can start absorbing broad
-    nebulosity, which is exactly what stages 2-4 need left in place.
+    **Two-stage by design.** The rejection loop runs at `reject_order` (a
+    plane), then the surviving cells are re-fitted with BIC free to choose up
+    to `final_max_order` (a quadric). Neither order works alone:
+
+      * iterating with a quadric lets the scaffold absorb broad nebulosity --
+        the residual flattens, less is detected, and the pedestal ends up
+        biased (heavy-nebula frame: median error 0.299 -> 1.053 sigma);
+      * but a plane cannot represent vignetting, so on a vignetted frame the
+        residual keeps a large bowl, the detector masks it as if it were
+        source, and the estimate came out *worse than doing nothing* (0.267
+        sigma against an unmasked baseline of 0.023, masking 53% of a frame
+        with no nebula in it at all).
+
+    Rejecting with a plane keeps the quadric from eating the nebula; fitting
+    the survivors with BIC lets real curvature back in. Measured best-or-
+    near-best on every ground-truth frame, where each single order was
+    catastrophic on some frame.
+
+    Note vignetting and a centred nebula are *genuinely degenerate* here -- both
+    are radially symmetric with the same curvature sign -- so no threshold can
+    separate them. That case is what the user-drawn exclusion regions exist for.
+
+    `excluded_cells` is a boolean mesh-shaped array of cells the user excluded
+    by hand; they are dropped before the first fit. This is the strongest place
+    to apply that knowledge: a scaffold no longer bent by the nebula produces a
+    flatter residual, which improves detection across the *whole* frame rather
+    than only inside the region that was drawn.
     """
     finite = np.isfinite(mesh) & np.isfinite(rms_mesh) & (rms_mesh > 0)
+    if excluded_cells is not None:
+        finite = finite & ~np.asarray(excluded_cells, dtype=bool)
+        if int(finite.sum()) < SOURCEMASK_MIN_CELLS_CONSTANT:
+            # The drawn regions would starve the fit. Better to ignore them here
+            # and let the one-sided rejection do what it can than to return a
+            # surface fitted through two cells.
+            finite = np.isfinite(mesh) & np.isfinite(rms_mesh) & (rms_mesh > 0)
     keep = finite.copy()
     cx, cy = _mesh_cell_centres(mesh.shape, box_size)
 
@@ -161,7 +203,7 @@ def fit_sky_scaffold(mesh: np.ndarray, rms_mesh: np.ndarray, box_size: int,
         masked_mesh = np.where(keep, mesh, np.nan)
         masked_rms = np.where(keep, rms_mesh, np.nan)
         fit = fit_background_surface(masked_mesh, masked_rms, box_size,
-                                     image_shape, max_order=max_order)
+                                     image_shape, max_order=reject_order)
         if fit.get("insufficient_data"):
             break
         resid = mesh - evaluate_surface_at(fit, cx, cy)
@@ -200,6 +242,18 @@ def fit_sky_scaffold(mesh: np.ndarray, rms_mesh: np.ndarray, box_size: int,
         if np.array_equal(new_keep, keep):
             break
         keep = new_keep
+
+    # Second stage: refit the survivors with BIC free to add curvature. The
+    # rejection above has already removed the contaminated cells, so a quadric
+    # chosen here is responding to real structure (vignetting) rather than to
+    # nebulosity it was allowed to swallow.
+    if final_max_order > reject_order and not fit.get("insufficient_data"):
+        refit = fit_background_surface(np.where(keep, mesh, np.nan),
+                                       np.where(keep, rms_mesh, np.nan),
+                                       box_size, image_shape,
+                                       max_order=final_max_order)
+        if not refit.get("insufficient_data"):
+            fit = refit
 
     fit = dict(fit)
     fit["kept_cells"] = keep
@@ -270,36 +324,56 @@ def _upsample_mask(mask: np.ndarray, step: int, shape: tuple[int, int]) -> np.nd
 
 
 def _detect_tier(residual: np.ndarray, kernel_sigma: float, n_sigma: float,
-                 npixels: int, sky_sigma: float) -> tuple[np.ndarray, dict]:
+                 npixels: int, sky_sigma: float,
+                 min_surface_brightness: float = SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA
+                 ) -> tuple[np.ndarray, dict]:
     """Convolve, threshold, and label one detection tier.
 
     Returns (bool detection mask, audit record). The kernel is sum-normalised
     so the convolved image stays in ADU and the threshold is directly
     interpretable; see _smoothed_sigma for why the threshold is not n*sky_sigma.
+
+    The threshold is the LARGER of two bounds, and the audit record says which
+    one won:
+
+      * statistical -- n_sigma above the smoothed noise, i.e. "is this real?"
+      * surface brightness -- min_surface_brightness x sky_sigma, i.e. "is this
+        worth masking?"
+
+    Statistical significance alone runs away at large kernels: integrating over
+    a 16 px kernel drops the noise ~57x, so that tier triggered on structure at
+    3.5% of sky noise -- real, but it biases the background by nothing while
+    costing mesh cells the fit needs. Masking is not free, so the threshold has
+    to answer the second question too.
     """
-    threshold = n_sigma * _smoothed_sigma(sky_sigma, kernel_sigma)
+    statistical = n_sigma * _smoothed_sigma(sky_sigma, kernel_sigma)
+    floor = max(0.0, float(min_surface_brightness)) * sky_sigma
+    threshold = max(statistical, floor)
+
+    def _record(n_segments: int, skipped: bool) -> dict:
+        return {
+            "kernel_sigma": float(kernel_sigma), "n_sigma": float(n_sigma),
+            "threshold_adu": float(threshold), "npixels": int(npixels),
+            "n_segments": int(n_segments), "skipped": bool(skipped),
+            "threshold_statistical_adu": float(statistical),
+            "threshold_floor_adu": float(floor),
+            # Which bound is binding. Without this the report cannot explain
+            # why a deep tier stopped detecting.
+            "threshold_source": "surface brightness" if floor > statistical else "statistical",
+        }
+
     kernel = _gaussian_kernel(kernel_sigma)
     if min(residual.shape) <= 1 or kernel.shape[0] > min(residual.shape):
         # Kernel larger than the frame: nothing meaningful to detect at this scale.
-        return np.zeros(residual.shape, dtype=bool), {
-            "kernel_sigma": float(kernel_sigma), "n_sigma": float(n_sigma),
-            "threshold_adu": float(threshold), "npixels": int(npixels),
-            "n_segments": 0, "skipped": True,
-        }
+        return np.zeros(residual.shape, dtype=bool), _record(0, True)
     convolved = fftconvolve(residual.astype(np.float64), kernel, mode="same")
     segm = detect_sources(convolved, threshold, n_pixels=npixels)
     if segm is None:
-        return np.zeros(residual.shape, dtype=bool), {
-            "kernel_sigma": float(kernel_sigma), "n_sigma": float(n_sigma),
-            "threshold_adu": float(threshold), "npixels": int(npixels),
-            "n_segments": 0, "skipped": False,
-        }
-    return segm.data > 0, {
-        "kernel_sigma": float(kernel_sigma), "n_sigma": float(n_sigma),
-        "threshold_adu": float(threshold), "npixels": int(npixels),
-        "n_segments": int(segm.n_labels), "skipped": False,
-        "_segm": segm, "_convolved": convolved,
-    }
+        return np.zeros(residual.shape, dtype=bool), _record(0, False)
+    rec = _record(segm.n_labels, False)
+    rec["_segm"] = segm
+    rec["_convolved"] = convolved
+    return segm.data > 0, rec
 
 
 # ----------------------------------------------------------------------
@@ -395,6 +469,7 @@ def build_source_mask(data: np.ndarray, pedestal_surface: np.ndarray,
                       step: int = 1,
                       ext_kernel_sigmas: tuple[float, ...] = SOURCEMASK_EXT_KERNEL_SIGMAS,
                       ext_nsigma: tuple[float, ...] = SOURCEMASK_EXT_NSIGMA,
+                      user_exclusion: np.ndarray | None = None,
                       ) -> SourceMaskResult:
     """Stages 2+3: multi-scale detection on `data - pedestal_surface`.
 
@@ -407,6 +482,13 @@ def build_source_mask(data: np.ndarray, pedestal_surface: np.ndarray,
     buys a step**2 cost reduction on the expensive large-kernel convolutions
     without changing what they can resolve. The point-source tier always runs
     at full resolution -- a star is exactly what decimation destroys.
+
+    `user_exclusion` is a hand-drawn mask that is always excluded, whatever the
+    detector concludes. It exists for structure no threshold can identify: a
+    smooth nebula is genuinely degenerate with a sky gradient, and a centred
+    nebula with vignetting, so those cases are unresolvable from pixel values
+    alone. It is kept as its own class in the result rather than merged into
+    `extended_mask`.
     """
     h, w = data.shape[:2]
     residual = (data.astype(np.float64) - pedestal_surface.astype(np.float64))
@@ -415,11 +497,24 @@ def build_source_mask(data: np.ndarray, pedestal_surface: np.ndarray,
     point_mask = np.zeros((h, w), dtype=bool)
     extended_mask = np.zeros((h, w), dtype=bool)
 
+    user_mask = None
+    if user_exclusion is not None:
+        user_mask = np.asarray(user_exclusion, dtype=bool)
+        if user_mask.shape[:2] != (h, w):
+            raise ValueError(
+                f"user_exclusion shape {user_mask.shape[:2]} does not match "
+                f"data shape {(h, w)}")
+
     if not np.isfinite(sky_sigma) or sky_sigma <= 0:
-        return SourceMaskResult(mask=np.zeros((h, w), dtype=bool),
+        # Degenerate noise estimate: detect nothing, but still honour the user's
+        # own regions — those do not depend on any threshold.
+        combined = (user_mask.copy() if user_mask is not None
+                    else np.zeros((h, w), dtype=bool))
+        return SourceMaskResult(mask=combined,
                                 point_mask=point_mask, extended_mask=extended_mask,
-                                coverage=0.0, sky_sigma=float(sky_sigma),
-                                tiers=[], segments=[])
+                                coverage=float(combined.mean()),
+                                sky_sigma=float(sky_sigma),
+                                tiers=[], segments=[], user_mask=user_mask)
 
     # --- point-source tier, full resolution ---
     point_kernel_sigma = max(0.8, fwhm_px * _FWHM_TO_SIGMA)
@@ -487,15 +582,23 @@ def build_source_mask(data: np.ndarray, pedestal_surface: np.ndarray,
     extended_mask = _fill_small_holes(extended_mask, SOURCEMASK_MAX_HOLE_PX)
     extended_mask = _remove_small_objects(extended_mask, SOURCEMASK_MAX_HOLE_PX)
 
-    # Extended dominates where the two overlap, so the two reported classes stay
-    # mutually exclusive and their pixel counts sum to the total coverage.
+    # The three reported classes are kept mutually exclusive so their pixel
+    # counts sum to the total coverage. Precedence is user > extended > point:
+    # a pixel the user excluded is reported as theirs even where the detector
+    # also found something, since attributing it to the algorithm would
+    # overstate what the algorithm actually achieved.
+    if user_mask is not None:
+        extended_mask = extended_mask & ~user_mask
+        point_mask = point_mask & ~user_mask
     point_mask = point_mask & ~extended_mask
     combined = point_mask | extended_mask
+    if user_mask is not None:
+        combined = combined | user_mask
 
     return SourceMaskResult(
         mask=combined, point_mask=point_mask, extended_mask=extended_mask,
         coverage=float(combined.mean()), sky_sigma=float(sky_sigma),
-        tiers=tiers, segments=segments,
+        tiers=tiers, segments=segments, user_mask=user_mask,
     )
 
 
@@ -653,6 +756,7 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
                              step: int = 1,
                              n_passes: int = SOURCEMASK_N_PASSES,
                              exclude_percentile: float = SOURCEMASK_EXCLUDE_PERCENTILE,
+                             user_exclusion: np.ndarray | None = None,
                              mesh: np.ndarray | None = None,
                              rms_mesh: np.ndarray | None = None,
                              ) -> MaskedBackgroundResult:
@@ -662,6 +766,12 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
     has already computed (every AstroImage has them after estimate_background),
     avoiding a redundant full Background2D pass; omit them and they are
     computed here.
+
+    `user_exclusion` is a full-resolution boolean mask of regions the user drew
+    by hand. It is applied twice — to the stage-1 scaffold's cell selection and
+    to the final mask — because those do different jobs: the first improves the
+    pedestal (and therefore detection everywhere), the second guarantees the
+    pixels are excluded from the fit whatever the detector decided.
 
     `n_passes` repeats stages 2-4 with the previous pass's fitted surface as
     the detection pedestal. It defaults to 1 because that loop *diverges*: a
@@ -691,8 +801,23 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
         mesh = np.asarray(base.background_mesh, dtype=np.float64)
         rms_mesh = np.asarray(base.background_rms_mesh, dtype=np.float64)
 
+    user_mask = None
+    excluded_cells = None
+    if user_exclusion is not None:
+        user_mask = np.asarray(user_exclusion, dtype=bool)
+        if user_mask.shape[:2] != (h, w):
+            raise ValueError(
+                f"user_exclusion shape {user_mask.shape[:2]} does not match "
+                f"data shape {(h, w)}")
+        # A cell is dropped from the scaffold on the same "is it still a real
+        # measurement" rule stage 4 uses, so the two stages agree about what
+        # counts as usable.
+        frac = _cell_unmasked_fraction(user_mask, np.asarray(mesh).shape, box_size)
+        excluded_cells = frac < SOURCEMASK_MIN_CELL_UNMASKED_FRAC
+
     # --- Stage 1: gradient-robust scaffold, no segmentation involved ---
-    scaffold = fit_sky_scaffold(mesh, rms_mesh, box_size, (h, w))
+    scaffold = fit_sky_scaffold(mesh, rms_mesh, box_size, (h, w),
+                                excluded_cells=excluded_cells)
     if scaffold.get("insufficient_data"):
         return MaskedBackgroundResult(
             surface=None, rms_median=None, background_median=None, fit=None,
@@ -711,7 +836,11 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
 
     for _ in range(max(1, n_passes)):
         # --- Stages 2+3 ---
-        smask = build_source_mask(data, pedestal, sky_sigma, fwhm_px, step=step)
+        # Passed *into* build_source_mask rather than merged afterwards: this
+        # loop re-invokes it each pass, so a post-merge would be dropped on
+        # every pass after the first.
+        smask = build_source_mask(data, pedestal, sky_sigma, fwhm_px, step=step,
+                                  user_exclusion=user_mask)
         # --- Stage 4 ---
         payload, reason = masked_background_estimate(
             data, smask.mask, box_size, exclude_percentile=exclude_percentile)

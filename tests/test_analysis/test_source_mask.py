@@ -26,10 +26,12 @@ from analysis.source_mask import (MaskedBackgroundResult, SourceMaskResult,
                                   masked_background_estimate,
                                   source_masked_background)
 from core.models import (SOURCEMASK_MIN_CELLS_CONSTANT, SOURCEMASK_MIN_CELLS_PLANE,
-                         SOURCEMASK_MIN_CELLS_QUADRIC)
-from tests.bg_frames import (gradient_nebula_frame, heavy_nebula_frame,
-                             make_bg_frame, moderate_nebula_frame,
-                             star_only_frame)
+                         SOURCEMASK_MIN_CELLS_QUADRIC,
+                         SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA)
+from tests.bg_frames import (bounded_nebula_frame, gradient_nebula_frame,
+                             heavy_nebula_frame, make_bg_frame,
+                             moderate_nebula_frame, star_only_frame,
+                             vignetted_frame, vignetted_nebula_frame)
 
 
 def _unmasked_background(data):
@@ -104,8 +106,14 @@ class TestBackgroundRecoveryAccuracy:
         assert result.ok
         # Baseline here is ~1.28 sigma; the point of the whole module.
         assert abs(base_bias) > 1.0, "fixture no longer reproduces the biased regime"
-        assert abs(masked_bias) < 0.25
-        assert abs(masked_bias) < 0.3 * abs(base_bias)
+        # ~0.33 sigma, up from ~0.19 before the surface-brightness floor. The
+        # floor deliberately leaves the faintest nebulosity unmasked, and on a
+        # Gaussian blob whose wings never reach zero that unmasked remainder
+        # contaminates the surviving cells. It is the right trade anyway: the
+        # same floor takes bounded_nebula_frame from 0.105 to 0.015 sigma,
+        # because real nebulosity does end and the retained cells are clean.
+        assert abs(masked_bias) < 0.45
+        assert abs(masked_bias) < 0.35 * abs(base_bias)
 
     def test_gradient_plus_heavy_nebula(self, gradient_heavy):
         result, base_bias, masked_bias = gradient_heavy
@@ -150,6 +158,36 @@ class TestBackgroundRecoveryAccuracy:
                                     rcond=None)[0]
         assert gx == pytest.approx(0.4, abs=0.1)
         assert gy == pytest.approx(0.15, abs=0.1)
+
+    def test_bounded_nebula_is_where_the_floor_pays_off(self):
+        """Realistic nebulosity that actually ends, leaving genuine blank sky.
+
+        The Gaussian frames flatter an aggressive detector, because their wings
+        never reach zero so masking more always helps. Here over-masking starved
+        the fit to 15 clustered cells and cost 0.105 sigma; the floor keeps 23
+        and lands at 0.015.
+        """
+        data, true_sky, truth = bounded_nebula_frame()
+        base = _unmasked_background(data)
+        result = source_masked_background(
+            data, box_size=64, fwhm_px=4.0,
+            mesh=base.background_mesh, rms_mesh=base.background_rms_mesh)
+        assert result.ok
+        ss = truth["sky_sigma"]
+        assert abs(_bias_sigma(result.surface, true_sky, ss)) < 0.10
+        assert abs(_bias_sigma(result.surface, true_sky, ss)) \
+            < abs(_bias_sigma(base.background, true_sky, ss))
+
+    def test_vignetting_with_nebulosity(self):
+        """The ambiguous case: same curvature sign from optics and from nebula."""
+        data, true_sky, truth = vignetted_nebula_frame()
+        base = _unmasked_background(data)
+        result = source_masked_background(
+            data, box_size=64, fwhm_px=4.0,
+            mesh=base.background_mesh, rms_mesh=base.background_rms_mesh)
+        assert result.ok
+        assert abs(_bias_sigma(result.surface, true_sky, truth["sky_sigma"])) < 0.35
+        assert result.source_mask.coverage < 0.55
 
     def test_masked_rms_is_closer_to_true_sky_noise(self, heavy):
         """Nebula variance inflates MADStd; masking it should deflate the RMS."""
@@ -209,13 +247,41 @@ class TestSkyScaffold:
             "contaminated cells survived the one-sided rejection"
         assert fit["gradient"]["magnitude"] == pytest.approx(np.hypot(0.4, 0.15), rel=0.15)
 
-    def test_defaults_to_plane_order(self):
-        """max_order=1 by default — a quadric scaffold can absorb broad nebulosity."""
+    def test_rejects_with_a_plane_but_may_finish_with_a_quadric(self):
+        """Two-stage: reject at order 1, then let BIC add curvature if earned.
+
+        Iterating with a quadric lets the scaffold swallow broad nebulosity;
+        finishing with only a plane cannot represent vignetting. Rejecting with
+        a plane and refitting the survivors gets both.
+        """
         data, _, _ = heavy_nebula_frame()
         base = _unmasked_background(data)
-        fit = fit_sky_scaffold(base.background_mesh, base.background_rms_mesh,
-                               64, data.shape[:2])
-        assert fit["selected_order"] <= 1
+        two_stage = fit_sky_scaffold(base.background_mesh, base.background_rms_mesh,
+                                     64, data.shape[:2])
+        plane_only = fit_sky_scaffold(base.background_mesh, base.background_rms_mesh,
+                                      64, data.shape[:2], final_max_order=1)
+        # Same rejection either way — the second stage must not change which
+        # cells were kept, only the surface fitted through them.
+        assert np.array_equal(two_stage["kept_cells"], plane_only["kept_cells"])
+        assert plane_only["selected_order"] <= 1
+        assert two_stage["selected_order"] <= 2
+
+    def test_recovers_vignetting_the_plane_scaffold_could_not(self):
+        """The second stage exists for this frame: real curvature, no nebulosity.
+
+        A plane-only scaffold leaves the whole bowl in the residual, which the
+        detector then masks as if it were source — measured at >50% coverage on
+        a frame with no extended structure in it at all.
+        """
+        data, true_sky, truth = vignetted_frame()
+        base = _unmasked_background(data)
+        result = source_masked_background(
+            data, box_size=64, fwhm_px=4.0,
+            mesh=base.background_mesh, rms_mesh=base.background_rms_mesh)
+        assert result.ok
+        assert result.scaffold["selected_order"] == 2, "curvature was not recovered"
+        assert result.source_mask.coverage < 0.40, "still masking a source-free frame"
+        assert abs(_bias_sigma(result.surface, true_sky, truth["sky_sigma"])) < 0.25
 
 
 class TestDetectionThresholds:
@@ -245,12 +311,48 @@ class TestDetectionThresholds:
             assert {"kernel_sigma", "n_sigma", "npixels", "n_segments"} <= set(tier)
         assert tiers[0]["tier"] == "point"
 
-    def test_recorded_threshold_matches_the_formula(self, heavy):
+    def test_recorded_threshold_is_the_larger_of_both_bounds(self, heavy):
         result, _, _ = heavy
         sky_sigma = result.source_mask.sky_sigma
         for tier in result.source_mask.tiers[1:]:
-            expected = tier["n_sigma"] * _smoothed_sigma(sky_sigma, tier["kernel_sigma"])
-            assert tier["threshold_adu"] == pytest.approx(expected, rel=1e-6)
+            statistical = tier["n_sigma"] * _smoothed_sigma(sky_sigma, tier["kernel_sigma"])
+            floor = SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA * sky_sigma
+            assert tier["threshold_statistical_adu"] == pytest.approx(statistical, rel=1e-6)
+            assert tier["threshold_floor_adu"] == pytest.approx(floor, rel=1e-6)
+            assert tier["threshold_adu"] == pytest.approx(max(statistical, floor), rel=1e-6)
+
+    def test_floor_binds_on_the_deep_tiers_and_is_reported(self, heavy):
+        """The broadest kernels are exactly where statistical significance runs away.
+
+        At sigma_k=16 px the noise drops ~57x, so the statistical bound alone
+        triggered on structure at 3.5% of sky noise. The audit record must say
+        which bound won, or the report cannot explain why a tier stopped.
+        """
+        result, _, _ = heavy
+        deepest = max(result.source_mask.tiers[1:], key=lambda t: t["kernel_sigma"])
+        assert deepest["threshold_source"] == "surface brightness"
+        assert deepest["threshold_floor_adu"] > deepest["threshold_statistical_adu"]
+
+    def test_floor_detects_strictly_less_than_significance_alone(self):
+        """Compare the two thresholds on identical input — floor off vs on."""
+        rng = np.random.default_rng(3)
+        h = w = 512
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+        # A broad, very faint plateau: real signal, but far too faint to matter.
+        faint = 0.08 * 30.0 * np.exp(-0.5 * (np.hypot(yy - 256, xx - 256) / 150.0) ** 2)
+        residual = faint + rng.normal(0.0, 30.0, (h, w))
+
+        from analysis.source_mask import _detect_tier
+        loose, rec_loose = _detect_tier(residual, 16.0, 2.0, 512, 30.0,
+                                        min_surface_brightness=0.0)
+        tight, rec_tight = _detect_tier(residual, 16.0, 2.0, 512, 30.0,
+                                        min_surface_brightness=0.25)
+        assert rec_tight["threshold_adu"] > rec_loose["threshold_adu"]
+        assert rec_loose["threshold_source"] == "statistical"
+        assert rec_tight["threshold_source"] == "surface brightness"
+        assert tight.sum() < loose.sum(), "the floor did not reduce what was detected"
+        # Everything the tight cut finds must also be found by the loose one.
+        assert not np.any(tight & ~loose)
 
     def test_stars_do_not_dominate_the_extended_tiers(self, star_only):
         """A star-only frame must not come back mostly masked.
@@ -415,3 +517,99 @@ class TestBuildSourceMask:
         result, _, _ = heavy
         assert result.source_mask.mask.shape == heavy_nebula_frame()[0].shape
         assert result.source_mask.mask.dtype == bool
+
+
+class TestUserExclusionRegions:
+    """Hand-drawn regions — for structure no threshold can identify.
+
+    A smooth nebula is genuinely degenerate with a sky gradient, and a centred
+    nebula with vignetting, so those cases cannot be resolved from pixel values
+    alone however the detector is tuned.
+    """
+
+    @staticmethod
+    def _corner_region():
+        """A polygon over one corner, in the normalised schema the GUI stores."""
+        return [{"kind": "polygon",
+                 "points": [(0.02, 0.02), (0.30, 0.02), (0.30, 0.30), (0.02, 0.30)]}]
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def with_region(cls):
+        from analysis.inspector_regions import exclusion_mask
+        data, true_sky, truth = moderate_nebula_frame()
+        base = _unmasked_background(data)
+        user = exclusion_mask(data.shape[:2], cls._corner_region())
+        kwargs = dict(box_size=64, fwhm_px=4.0,
+                      mesh=base.background_mesh, rms_mesh=base.background_rms_mesh)
+        plain = source_masked_background(data, **kwargs)
+        drawn = source_masked_background(data, user_exclusion=user, **kwargs)
+        return plain, drawn, user, data, true_sky, truth
+
+    def test_default_none_is_unchanged(self, with_region):
+        """No regions must reproduce the un-supervised result exactly."""
+        plain, _, _, _, _, _ = with_region
+        assert plain.source_mask.user_mask is None
+        assert plain.source_mask.user_coverage == 0.0
+
+    def test_drawn_pixels_are_always_masked(self, with_region):
+        _, drawn, user, _, _, _ = with_region
+        assert drawn.source_mask.user_mask is not None
+        assert np.array_equal(drawn.source_mask.user_mask, user)
+        # Every drawn pixel is in the final mask, whatever the detector thought.
+        assert np.all(drawn.source_mask.mask[user])
+
+    def test_user_class_is_exclusive_of_the_detector_classes(self, with_region):
+        """Attribution matters: the report must not credit the algorithm."""
+        _, drawn, user, _, _, _ = with_region
+        sm = drawn.source_mask
+        assert not np.any(sm.point_mask & user)
+        assert not np.any(sm.extended_mask & user)
+        assert np.array_equal(sm.mask, sm.point_mask | sm.extended_mask | user)
+        assert sm.coverage == pytest.approx(sm.mask.mean())
+
+    def test_drawing_over_sky_costs_cells(self, with_region):
+        """A region over blank sky removes real measurements — it is not free."""
+        plain, drawn, _, _, _, _ = with_region
+        assert drawn.n_cells < plain.n_cells
+        assert drawn.coverage > plain.coverage
+
+    def test_scaffold_drops_the_excluded_cells(self):
+        """Stage 1 injection: the pedestal must not be fitted through drawn cells."""
+        from analysis.inspector_regions import exclusion_mask
+        data, _, _ = moderate_nebula_frame()
+        base = _unmasked_background(data)
+        user = exclusion_mask(data.shape[:2], self._corner_region())
+        result = source_masked_background(
+            data, box_size=64, fwhm_px=4.0, user_exclusion=user,
+            mesh=base.background_mesh, rms_mesh=base.background_rms_mesh)
+        kept = result.scaffold["kept_cells"]
+        from analysis.source_mask import _cell_unmasked_fraction
+        frac = _cell_unmasked_fraction(user, kept.shape, 64)
+        fully_drawn = frac < 0.5
+        assert fully_drawn.any(), "region too small to cover a whole mesh cell"
+        assert not np.any(kept & fully_drawn)
+
+    def test_shape_mismatch_raises(self):
+        data, _, _ = star_only_frame()
+        with pytest.raises(ValueError, match="does not match"):
+            source_masked_background(data, box_size=64,
+                                     user_exclusion=np.zeros((10, 10), dtype=bool))
+
+    def test_region_covering_everything_falls_back(self):
+        """Must report a fallback, not fabricate a surface or raise."""
+        data, _, _ = star_only_frame()
+        result = source_masked_background(
+            data, box_size=64, user_exclusion=np.ones(data.shape[:2], dtype=bool))
+        assert not result.ok
+        assert result.fallback_reason
+
+    def test_honoured_even_when_sky_sigma_is_degenerate(self):
+        """User regions do not depend on any threshold, so they still apply."""
+        data, _, _ = star_only_frame()
+        user = np.zeros(data.shape[:2], dtype=bool)
+        user[10:60, 10:60] = True
+        sm = build_source_mask(data, np.zeros(data.shape[:2]), 0.0, 4.0,
+                               user_exclusion=user)
+        assert np.array_equal(sm.mask, user)
+        assert sm.coverage == pytest.approx(user.mean())

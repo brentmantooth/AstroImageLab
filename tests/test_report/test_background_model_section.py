@@ -394,3 +394,71 @@ class TestWriteInspectorFileSourceMaskEntries:
     def test_mask_is_binary(self, npz_and_catalog):
         npz, _ = npz_and_catalog
         assert set(np.unique(npz["bgmask_mask_a"]).tolist()) <= {0, 1}
+
+
+class TestSectionSnrUserExclusionRegions:
+    """Section 3g must report user-drawn regions as the user's, not the detector's."""
+
+    REGION = [{"kind": "polygon",
+               "points": [(0.30, 0.30), (0.70, 0.30), (0.70, 0.70), (0.30, 0.70)]}]
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def html_with_regions(cls, image_pair):
+        img_a, img_b = image_pair
+        # The transport the GUI uses: AnalysisThread assigns onto the images,
+        # because the settings dict never reaches ReportBuilder.
+        for img in (img_a, img_b):
+            img.bg_exclusion_regions = cls.REGION
+        try:
+            yield ReportBuilder()._section_snr(
+                AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+        finally:
+            for img in (img_a, img_b):
+                img.bg_exclusion_regions = []
+
+    def test_regions_are_reported_as_the_users(self, html_with_regions):
+        assert "of which you excluded by hand" in html_with_regions
+        assert "Your exclusion regions are in use" in html_with_regions
+
+    def test_states_the_scaffold_also_used_them(self, html_with_regions):
+        """Stage-1 injection is the non-obvious half — it must be explained."""
+        assert "dropped from step 1" in html_with_regions
+
+    def test_absent_when_no_regions_drawn(self, image_pair):
+        # Sets its own state rather than relying on the sibling fixture's
+        # teardown: `image_pair` is class-scoped and shared, so a generator
+        # fixture that mutates it has not torn down yet when this test runs.
+        img_a, img_b = image_pair
+        saved = [getattr(i, "bg_exclusion_regions", []) for i in (img_a, img_b)]
+        try:
+            for img in (img_a, img_b):
+                img.bg_exclusion_regions = []
+            html = ReportBuilder()._section_snr(
+                AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+            assert "<h3>3g. Source-Masked Background Check</h3>" in html
+            assert "Your exclusion regions are in use" not in html
+        finally:
+            for img, prev in zip((img_a, img_b), saved):
+                img.bg_exclusion_regions = prev
+
+    def test_missing_attribute_is_tolerated(self, image_pair):
+        """AstroImages built outside the GUI never have the attribute set."""
+        img_a, _ = image_pair
+        saved = img_a.bg_exclusion_regions
+        try:
+            del img_a.bg_exclusion_regions
+            html = ReportBuilder()._section_snr(
+                AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, None)
+            assert "<h3>3g. Source-Masked Background Check</h3>" in html
+        finally:
+            img_a.bg_exclusion_regions = saved
+
+
+class TestSectionSnrThresholdProvenance:
+    def test_threshold_table_reports_which_bound_won(self, image_pair):
+        img_a, img_b = image_pair
+        html = ReportBuilder()._section_snr(
+            AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+        assert "<th>Set by</th>" in html
+        assert "surface brightness" in html

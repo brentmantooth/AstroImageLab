@@ -14,6 +14,7 @@ import pytest
 
 from analysis.image_filters import SpatialDetailAnalyzer
 from analysis.inspector_regions import (
+    exclusion_mask,
     COMPARE_DIFFERENCE,
     COMPARE_LOGRATIO,
     COMPARE_MODES,
@@ -745,3 +746,54 @@ class TestComposableRegions:
         s_out = correlation_sample(a, b, c, domain & ~split)
         assert s_in.n_total + s_out.n_total == int(domain.sum())
         assert not set(s_in.flat_ids.tolist()) & set(s_out.flat_ids.tolist())
+
+
+class TestExclusionMask:
+    """Union of user-drawn exclusion regions (Section 3g).
+
+    The load-bearing case is the empty one: roi_mask(shape, None) returns
+    all-True because "no ROI" means the whole frame is the domain, whereas an
+    empty exclusion list must mask *nothing*. Getting that inversion wrong would
+    mask every pixel of every image by default.
+    """
+
+    SQUARE = {"kind": "polygon",
+              "points": [(0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)]}
+
+    @pytest.mark.parametrize("regions", [None, [], (), [None]])
+    def test_empty_excludes_nothing(self, regions):
+        mask = exclusion_mask((40, 60), regions)
+        assert mask.shape == (40, 60)
+        assert mask.dtype == bool
+        assert not mask.any()
+
+    def test_single_polygon_covers_its_quadrant(self):
+        mask = exclusion_mask((40, 60), [self.SQUARE])
+        assert mask[:20, :30].all()
+        assert not mask[25:, 35:].any()
+
+    def test_multiple_regions_are_unioned(self):
+        other = {"kind": "polygon",
+                 "points": [(0.6, 0.6), (1.0, 0.6), (1.0, 1.0), (0.6, 1.0)]}
+        both = exclusion_mask((40, 60), [self.SQUARE, other])
+        first = exclusion_mask((40, 60), [self.SQUARE])
+        second = exclusion_mask((40, 60), [other])
+        assert np.array_equal(both, first | second)
+        assert both.sum() > first.sum()
+
+    def test_overlapping_regions_do_not_double_count(self):
+        shifted = {"kind": "polygon",
+                   "points": [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)]}
+        mask = exclusion_mask((40, 60), [self.SQUARE, shifted])
+        assert mask.dtype == bool
+        assert mask.sum() <= mask.size
+
+    def test_rect_kind_also_accepted(self):
+        """Shares roi_mask's schema, so any ROI kind works as an exclusion."""
+        rect = {"kind": "rect", "x0": 0.0, "y0": 0.0, "x1": 0.5, "y1": 0.5}
+        assert np.array_equal(exclusion_mask((40, 60), [rect]),
+                              exclusion_mask((40, 60), [self.SQUARE]))
+
+    def test_degenerate_polygon_excludes_nothing(self):
+        thin = {"kind": "polygon", "points": [(0.1, 0.1), (0.2, 0.2)]}
+        assert not exclusion_mask((40, 60), [thin]).any()

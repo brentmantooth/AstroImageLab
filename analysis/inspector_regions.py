@@ -168,6 +168,30 @@ def roi_mask(shape: tuple[int, int], roi: dict | None) -> np.ndarray:
     return mask
 
 
+def exclusion_mask(shape: tuple[int, int], regions) -> np.ndarray:
+    """Union of several normalised regions — True where a pixel is EXCLUDED.
+
+    Used for the user-drawn background exclusion zones (Section 3g): each entry
+    is a `roi_mask`-shaped dict, and a pixel is excluded if it falls inside any
+    of them.
+
+    Deliberately not `roi_mask()` with a None guard. `roi_mask(shape, None)`
+    returns all-**True**, because "no ROI" means the whole frame is the domain
+    of interest. An empty exclusion list means the exact opposite — exclude
+    nothing — so reusing that convention here would silently mask every pixel
+    in the default case, which is the one that runs on every image.
+    """
+    h, w = shape[:2]
+    mask = np.zeros((h, w), dtype=bool)
+    if not regions:
+        return mask
+    for region in regions:
+        if not region:
+            continue
+        mask |= roi_mask(shape, region)
+    return mask
+
+
 def _polygon_mask(shape: tuple[int, int], points) -> np.ndarray:
     """Point-in-polygon over the polygon's bounding box only.
 

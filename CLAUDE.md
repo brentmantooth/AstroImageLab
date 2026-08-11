@@ -53,6 +53,11 @@ gui/
   report_inspector.py  Interactive side-by-side figure viewer (matplotlib; being replaced)
   data_inspector.py    Data Inspector (QMainWindow) — pyqtgraph successor to the above
   inspector_widgets.py pyqtgraph widgets for the Data Inspector (drawing only, no maths)
+  bg_region_dialog.py  Background exclusion regions (QMainWindow, pyqtgraph) — freehand
+                       lasso over the image, region list, and a threaded preview of the
+                       Section 3g mask. Opened from the toolbar before Run; the dialog
+                       owns the drawing mode, so the control panel has a status label
+                       but no second checkable button to keep in sync
   synthetic_dialog.py  Synthetic Data Generator dialog (QMainWindow)
   halo_dialog.py       Halo Analyzer interactive tool (QDialog); click-a-star PSF/RDF inspector
 report/
@@ -106,8 +111,12 @@ tools/
 | `decimation_step(h, w, max_dim=BACKGROUND_DISPLAY_MAX_DIM)` | `core/astro_image.py` | The one shared striding formula behind `background_display()` and every Section 3e/3f/3g array built independently at a different call site (report figure vs. `_write_inspector_file`) — two arrays that must land on the *identical* pixel grid for an element-wise op (e.g. `model_disp - fitted_surface`) need to agree on `step` exactly, so this is factored out even though the identical one-line formula is tolerated duplicated elsewhere (`edge_analyzer.py`, `snr_analyzer.py`) where no cross-array alignment requirement exists |
 | `fit_background_surface(mesh, rms_mesh, box_size, image_shape)` / `evaluate_surface(fit_result, image_shape, step)` / `compare_fits(fit_a, fit_b)` | `analysis/background_fit.py` | Section 3f's gradient/curvature fit: weighted least squares (inverse-variance from `rms_mesh`) on 3 nested polynomial orders, minimum-BIC selection, decomposed into `gradient`/`isotropic_curvature`/`anisotropic_curvature` dicts (`magnitude`/`se`/`p_value`/derived ADU quantity, or `None` if the selected order doesn't include that term). `evaluate_surface`'s sampled-coordinate formula must exactly match `arr[::step, ::step]`'s shape — that's the load-bearing invariant keeping the residual (`background_display("model") - evaluate_surface(...)`) a valid element-wise subtraction |
 | `classify_background_pixels(data, box_size, sigma=BACKGROUND_SIGCLIP_SIGMA, maxiters=BACKGROUND_SIGCLIP_MAXITERS)` | `analysis/background_mask.py` | Reproduces `Background2D`'s own per-cell `SigmaClip` as a full-resolution boolean mask (`True` = kept as background) — see the "Reconstructing a mask" pitfall below for why this can't just be read off `Background2D` |
-| `source_masked_background(data, box_size=64, fwhm_px=4.0, step=1, n_passes=SOURCEMASK_N_PASSES, mesh=None, rms_mesh=None)` | `analysis/source_mask.py` | Section 3g's single entry point → `MaskedBackgroundResult`. Pass the caller's already-computed `mesh`/`rms_mesh` (every `AstroImage` has them after `estimate_background()`) to skip a redundant full `Background2D` pass. `.ok` is False when the mask left too little sky; `.fallback_reason` says why. ~13 s on a 24 MP frame |
-| `fit_sky_scaffold(mesh, rms_mesh, box_size, image_shape, reject_nsigma=…, max_iters=…, max_order=1)` | `analysis/source_mask.py` | Stage 1: doubly one-sided robust polynomial fit to an *unmasked* mesh (rejects only cells above the fit; scale from the lowest quartile). Returns a `fit_background_surface()` dict plus `kept_cells`/`n_iters`. Reach for this, not a `SigmaClip`, whenever the contamination being rejected is single-signed |
+| `source_masked_background(data, box_size=64, fwhm_px=4.0, step=1, n_passes=SOURCEMASK_N_PASSES, user_exclusion=None, mesh=None, rms_mesh=None)` | `analysis/source_mask.py` | Section 3g's single entry point → `MaskedBackgroundResult`. Pass the caller's already-computed `mesh`/`rms_mesh` (every `AstroImage` has them after `estimate_background()`) to skip a redundant full `Background2D` pass. `user_exclusion` is a full-res bool mask applied **twice** — to the stage-1 cell selection and to the final mask — because those do different jobs (better pedestal vs. guaranteed exclusion). `.ok` is False when the mask left too little sky; `.fallback_reason` says why. ~13 s on a 24 MP frame |
+| `fit_sky_scaffold(mesh, rms_mesh, box_size, image_shape, reject_nsigma=…, max_iters=…, reject_order=1, final_max_order=2, excluded_cells=None)` | `analysis/source_mask.py` | Stage 1: doubly one-sided robust fit to an *unmasked* mesh (rejects only cells above the fit; scale from the lowest quartile), **two-stage** — rejection at `reject_order`, final refit with BIC free up to `final_max_order`. Returns a `fit_background_surface()` dict plus `kept_cells`/`n_iters`. Reach for this, not a `SigmaClip`, whenever the contamination being rejected is single-signed |
+| `exclusion_mask(shape, regions)` | `analysis/inspector_regions.py` | OR of several normalised `roi_mask`-shaped dicts → True where **excluded**. Empty/None gives all-**False**, the exact inverse of `roi_mask(shape, None)` — see the pitfall row |
+| `LassoViewBox` (was `_BrushViewBox`) | `gui/inspector_widgets.py` | Freehand/rect polygon capture on any pyqtgraph ViewBox. Coordinate-system agnostic (emits whatever `mapToView` returns), which is why it is public: the correlation scatter and the image panels both use it |
+| `LinkedImageView.set_lasso_locked(locked)` / `polygon_drawn` / `set_overlay("exclusion", …)` | `gui/inspector_widgets.py` | Freehand drawing on an image panel, emitting a normalised `{"kind": "polygon", "points": …}` dict straight into `exclusion_mask`. Third overlay slot sits above mask/selection so user input stays visible where it overlaps |
+| `vignetted_frame()` / `vignetted_nebula_frame()` / `bounded_nebula_frame()` | `tests/bg_frames.py` | Regression guards for the failures the Gaussian frames could not expose — see the fixture-profile convention below |
 | `build_source_mask(data, pedestal_surface, sky_sigma, fwhm_px, step=1)` | `analysis/source_mask.py` | Stages 2+3 → `SourceMaskResult` (`mask`/`point_mask`/`extended_mask` plus the `tiers`/`segments` audit records the report renders). `step` decimates the extended tiers only |
 | `masked_background_estimate(data, source_mask, box_size, exclude_percentile=…, min_cell_unmasked_frac=…)` | `analysis/source_mask.py` | Stage 4 → `(payload, fallback_reason)`. Selects cells by *its own* unmasked-fraction rule, not by photutils' exclusion — see the interpolated-fill pitfall below |
 | `_cell_unmasked_fraction(source_mask, mesh_shape, box_size)` | `analysis/source_mask.py` | Per-mesh-cell surviving-pixel fraction via `np.add.reduceat`. The only reliable way to tell a *measured* cell from one photutils excluded and back-filled; also drives Section 3g's audit figure |
@@ -400,6 +409,53 @@ fold-independence assumption doesn't hold for a smooth spatial field). Apply the
 reasoning to any future "which of a few nested physically-meaningful models fits this
 data" decision before defaulting to a more general regularized regression.
 
+### Detection thresholds — statistical significance is only half the question
+
+A threshold set purely by "is this real?" runs away as soon as the test integrates over
+an area. Section 3g's broadest tier smooths with a σ=16 px kernel, which drops the noise
+~57×, so a 2σ cut triggered on structure at **3.5% of sky noise** — genuinely detectable,
+and completely irrelevant, since masking it shifts the background by nothing while
+consuming the mesh cells the fit needs. Coverage hit 62% on a frame whose visible
+nebulosity was 12.9%.
+
+Ask the second question too: **is acting on this worth what it costs?** Thresholds are
+now `max(statistical, SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA × sky_sigma)`, and the audit
+record carries `threshold_statistical_adu`, `threshold_floor_adu` and `threshold_source`
+so the report can say which bound was binding — without that, a reader cannot tell a
+correctly-quiet tier from a broken one. Apply the same shape to any future threshold
+whose test statistic improves with integration area or exposure.
+
+### A robust fit that also has to choose a model order — reject conservatively, then refit
+
+`fit_sky_scaffold` iterates its one-sided rejection with a **plane**, then refits the
+survivors with BIC free to pick a **quadric**. Neither order works alone, and the failure
+modes are opposite:
+
+| Scaffold | Fails on | How |
+| --- | --- | --- |
+| quadric throughout | nebulosity | the curved fit absorbs the nebula, the residual flattens, less is detected, pedestal ends up biased (heavy frame 0.299 → 1.053 σ) |
+| plane throughout | vignetting | cannot represent a bowl, so the whole bowl stays in the residual and gets masked as if it were source — estimate came out *worse than doing nothing* |
+
+The general rule: while a robust loop is still deciding *which points to trust*, give it
+the model that cannot explain away the contamination. Only once the outliers are gone is
+it safe to let the model complexity float. Measured best-or-near-best on all seven
+ground-truth frames, where each single order was catastrophic on at least one.
+
+### Some ambiguities are degenerate — no threshold resolves them, so ask the user
+
+Two pairs in this domain are *mathematically* indistinguishable from pixel values alone:
+
+- **smooth nebulosity vs. a sky gradient** — a nebula edge running parallel to the
+  gradient is exactly a steeper gradient. A test case had to be deleted over this;
+- **a centred nebula vs. vignetting** — both are radially symmetric with the same
+  curvature sign, so even the isotropic/anisotropic decomposition cannot separate them.
+
+Before spending effort tuning a discriminator, check whether the two hypotheses produce
+the *same* observable. If they do, the only fix is external information — hence the
+Background Regions dialog. Be honest in the report about which it was: Section 3g reports
+user-drawn pixels as their own mask class rather than folding them into the detector's,
+so the algorithm is never credited with the user's judgement.
+
 ### Single-signed contamination — reject one side, and estimate scale from the clean side
 
 `SigmaClip` is the reflex for "throw out the outliers", and it is the wrong tool whenever the
@@ -521,6 +577,17 @@ edge-analyzer lesson: a metric can be smooth, monotonic, plausible and confident
 only a known answer catches it. Frames are exported as named functions (`heavy_nebula_frame()`
 etc.) rather than fixtures alone, so a scratch script can reproduce exactly the frame a failing
 assertion refers to.
+
+**The fixture's profile decides which bugs it can expose.** `bg_frames.py` originally
+offered only Gaussian nebulae, whose wings never reach zero — so *every* frame was
+contaminated everywhere, masking more always improved measured accuracy, and an
+over-aggressive detector scored well. That single choice hid three real failures at once.
+`nebula_profile="bounded"` (compact, reaches exactly zero) and `vignetting=` were added
+after the fact, and immediately exposed all of them: the floor's benefit inverted sign,
+a plane-only scaffold turned out to mask >50% of a source-free frame, and the quadric
+cell threshold turned out to be too low. When a synthetic fixture makes a whole class of
+error impossible by construction, it is not testing the thing you think it is — vary the
+*shape* of the truth, not just its amplitude.
 
 **Stamp point sources into a bounded patch.** The first version evaluated a full-image `exp()`
 per star — fine at 512×512, but O(n_stars × H × W) made a 24 MP / 600-star frame take over ten
@@ -674,6 +741,39 @@ existing widgets — extend this pattern for any future toolbar addition:
   spacer approach renders before relying on it — don't assume the common Qt idiom is
   safe in this codebase's environment without checking.
 
+### Getting GUI state to the report — attach to the image, not to `generate()`
+
+`AnalysisThread` unpacks only two scalars from `settings` into `ReportBuilder.generate()`
+(`output_dir`, `ref_seeing_arcsec`, plus format flags) — **the settings dict never reaches
+the report builder**. Anything else the report needs has to travel on the objects that do
+get passed: the `AstroImage`s or the `AnalysisResult`s.
+
+The background exclusion regions use the `starless_image` precedent — a slot *declared* in
+`AstroImage.__init__` with a comment naming its external populator, rather than the
+undeclared-attribute style of `image.catalog`. `AnalysisThread` assigns it just before the
+report call; `report_builder` reads it through `getattr(img, …, None)` so an `AstroImage`
+built outside the GUI (tests, `tools/`) still works. No signature anywhere changes.
+
+Declaring a slot on `AstroImage` does **not** by itself break the Section 3g diagnostic-only
+guarantee: what preserves it is that `estimate_background()` never reads the slot. Keep
+that split explicit in the comment, or the next reader will assume the two are connected.
+
+### A dialog that owns a drawing mode needs no second checkable button
+
+The ROI and Line tools are checkable `QPushButton`s on the control panel, mirrored by
+non-checkable toolbar `QAction`s that call `.click()` on the real button — that pattern
+exists to avoid a second checked-state to keep in sync. A tool that lives in its **own
+window** sidesteps the problem entirely: `Background Regions…` is a plain `QAction` that
+opens a dialog, and the control panel gets only a **status label** (`set_bg_exclusions`,
+mirroring `set_roi`/`set_line`) plus the `settings()` key. There is no mode on the main
+window to toggle, so there is nothing to desynchronise. Prefer this shape for any future
+tool complex enough to want its own window.
+
+Clear the state in `MainWindow._on_image_loaded` alongside `_roi`/`_crosshair`. Normalised
+regions can never fall out of bounds, so unlike the ROI they need no re-validation ladder
+in `_on_run` — but they were still drawn against different sky, so they must not survive a
+new image.
+
 ### Fixed-size markers in report figures — matplotlib `markersize`, not a data-space patch
 
 When a marker must stay a constant *visual* size regardless of the image's zoom or
@@ -749,7 +849,7 @@ sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0
 ```bash
 conda activate astrolab
 pip install -r requirements-test.txt          # one-time setup; not in environment.yml
-pytest tests/ -m "not slow" -n auto           # fast suite (894 tests; parallel via pytest-xdist)
+pytest tests/ -m "not slow" -n auto           # fast suite (921 tests; parallel via pytest-xdist)
 pytest tests/ -m slow                         # slow/integration tests (full FITS generation)
 pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 ```
@@ -842,6 +942,10 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Reconstructing a pixel-level mask from an algorithm that only exposes cell-level statistics | `photutils.background.Background2D` sigma-clips raw pixel values *inside* each mesh cell before computing that cell's background/RMS, but never exposes which individual pixels survived the clip — only the resulting per-cell scalars (`background_mesh`/`background_rms_mesh`). Confirmed directly against the photutils API reference before writing any code: no `mask`-shaped output attribute exists. Section 3e's pixel-classification histogram/overlay needed that mask, so `analysis/background_mask.py::classify_background_pixels` re-runs `astropy.stats.SigmaClip` with the *same* sigma/maxiters independently, purely to recover it — which only stays correct if those two parameters are a single named source of truth (`BACKGROUND_SIGCLIP_SIGMA`/`BACKGROUND_SIGCLIP_MAXITERS` in `core/astro_image.py`, used by both `estimate_background()` and `classify_background_pixels()`), not two independently-hardcoded `3.0`/`10` literals that could silently drift apart. General pattern: before writing a second pass to recover "what did this library step actually do internally," check its public API surface first (don't assume it's exposed, and don't assume it isn't) — and if it must be recomputed, name-share every parameter the original call used. |
 | A closed-form "range across the frame" derived from a fitted plane needs corner evaluation, not `magnitude × diagonal_length` | `analysis/background_fit.py`'s gradient term reports the ADU swing across the image from its fitted plane `b·dx + c·dy`. The true corner-to-corner range of a linear function over a rectangle is `max(corner values) − min(corner values)`, which reduces to `abs(b)·w + abs(c)·h` — **not** `sqrt(b²+c²) · sqrt(w²+h²)` (magnitude times diagonal length), which overstates the true range by Cauchy-Schwarz whenever the gradient direction isn't aligned with the diagonal. Caught before it shipped by a dedicated test (`test_exact_adu_range_is_corner_based_not_diagonal`) constructing a deliberately non-diagonal gradient and asserting the two formulas differ meaningfully for it — a test using a diagonal-aligned gradient would have passed either (wrong) formula, since they only diverge off-diagonal. When deriving any "extreme value of a fitted function over a bounded region" quantity, evaluate at the actual boundary rather than reaching for a magnitude-times-extent shortcut, and specifically test a case where the shortcut and the correct answer diverge. |
 | A quadratic form's cross-term coefficient is `2×` the matrix's off-diagonal entry | `analysis/background_fit.py`'s anisotropic curvature term decomposes `d·x² + e·y² + f·xy` via the form's symmetric matrix `[[d, f/2], [f/2, e]]` — the `xy` polynomial coefficient `f` is twice the matrix entry `f/2`, because both `dx·dy` and `dy·dx` contribute to the quadratic form. The traceless-matrix eigenvalue magnitude is `sqrt(((d-e)/2)² + (f/2)²)`, not `sqrt(((d-e)/2)² + f²)` — using raw `f` overstates the anisotropic magnitude by an amount that depends on the ratio of the two terms (exactly 2× in the pure-`f` case). Caught by a dedicated test (`test_anisotropic_magnitude_uses_f_over_2_not_raw_f`) constructing a synthetic case with `d == e` so the anisotropic term is driven purely by `f`, making the correct answer exactly `abs(f)/2` and an `abs(f)`-using bug exactly 2× wrong — an easy, unambiguous numeric distinction a mixed-term synthetic case wouldn't give as cleanly. `atan2`-based *direction* formulas are scale-invariant, so this class of factor-of-2 bug only ever affects a *magnitude*, never an angle derived via `atan2` on the same two quantities — don't assume a magnitude bug implies a direction bug too. |
+| A plane-only robust scaffold on a vignetted frame | It cannot represent a bowl, so the whole vignette stays in the residual and the detector masks it as source: **53% of a frame with no nebulosity in it**, and an estimate worse than doing nothing (−0.267 σ against a +0.023 σ unmasked baseline). Vignetting is near-universal in real data, so this is a default-path bug, not an edge case. Reject with a plane, refit survivors with BIC free to add curvature. |
+| A detection threshold set only by statistical significance | It runs away as the test integrates over area — a σ=16 px kernel drops the noise ~57×, so a 2σ cut fired on structure at 3.5% of sky noise and masked 62% of a frame whose visible nebulosity was 12.9%. Add a physical floor (`max(statistical, k × sky_sigma)`) and record which bound won. |
+| `roi_mask(shape, None)` returns all-**True**, `exclusion_mask(shape, [])` all-**False** | Opposite conventions for the same-shaped data, and both are correct: "no ROI" means the whole frame is the domain of interest, "no exclusions" means exclude nothing. Reusing `roi_mask`'s None-guard for an exclusion list would mask every pixel of every image in the *default* case. A parametrized test pins `None`/`[]`/`()`/`[None]`. |
+| A class-scoped fixture that mutates shared state, plus a sibling test asserting the unmutated case | A generator fixture's teardown runs at the *end of the class*, so any other test in that class sees the mutation. `test_absent_when_no_regions_drawn` failed for exactly this reason against the shared `image_pair`. A test asserting the absence of something must set that state itself in a `try/finally` rather than rely on fixture ordering. |
 | A symmetric `SigmaClip` used against single-signed contamination | It cannot remove a bias carried by >50% of samples, and its scale estimate is inflated by the contamination itself. Reject one side only, and take the scale from the lowest quartile — see the "Single-signed contamination" convention above for the two intermediate estimators that also failed. |
 | Assuming a detect → mask → re-estimate loop converges | It diverges: the mask can only grow, so coverage ran away 54% → 84% → 95% and bias went +0.10 σ → −2.17 σ → −2.84 σ. `SOURCEMASK_N_PASSES = 1`. Verify convergence with ground truth before raising any iteration count. |
 | Treating `Background2D.background_mesh` values as measurements | Cells excluded by `exclude_percentile` are silently back-filled by interpolation, and `n_pixels_mesh` cannot distinguish them. Fitting the fills gave 55.5 ADU mesh error vs 5.1 for real cells, and halved a recovered gradient while the median bias still looked fine. Set `exclude_percentile` permissive and select cells yourself via `_cell_unmasked_fraction`. |

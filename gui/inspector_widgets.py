@@ -46,6 +46,7 @@ DEFAULT_LINE = (0.25, 0.5, 0.75, 0.5)
 # cyan marks pixels lassoed in a correlation plot.  Both user-changeable.
 OVERLAY_MASK_COLOR = "#ff00ff"
 OVERLAY_SELECTION_COLOR = "#00ffff"
+OVERLAY_EXCLUSION_COLOR = "#ff8c00"   # user-drawn background exclusion regions
 OVERLAY_DEFAULT_ALPHA = 115          # 0-255; ~45%, matching the report's mask figure
 
 _DARK_BG = "#1e1e1e"
@@ -108,6 +109,9 @@ class LinkedImageView(QWidget):
     swipe_changed = pyqtSignal(float)
     # ROI geometry dict in normalised coords (see analysis.inspector_regions.roi_mask)
     roi_changed = pyqtSignal(object)
+    # Freehand polygon, as a {"kind": "polygon", "points": [(xn, yn), ...]} dict in
+    # normalised coords — directly consumable by inspector_regions.exclusion_mask.
+    polygon_drawn = pyqtSignal(object)
 
     def __init__(self, title: str = "", dark: bool = False, parent=None):
         super().__init__(parent)
@@ -121,7 +125,13 @@ class LinkedImageView(QWidget):
         self._glw = pg.GraphicsLayoutWidget()
         self._glw.setBackground(bg)
 
-        self._plot = self._glw.addPlot(title=title)
+        # A LassoViewBox rather than the default: it behaves exactly like a
+        # normal ViewBox until a brush mode is set, so panning/zooming are
+        # unaffected, and it lets the same freehand gesture the correlation
+        # scatter uses be drawn straight onto the image.
+        self._vb = LassoViewBox()
+        self._vb.polygon_drawn.connect(self._on_polygon_drawn)
+        self._plot = self._glw.addPlot(title=title, viewBox=self._vb)
         self._plot.setAspectLocked(True)
         self._plot.invertY(True)          # row 0 at the top, matching origin="upper"
         self._plot.showAxes(False)
@@ -146,13 +156,18 @@ class LinkedImageView(QWidget):
         # 1 byte/px rather than 4.
         self._mask_overlay = pg.ImageItem(axisOrder="row-major")
         self._sel_overlay = pg.ImageItem(axisOrder="row-major")
-        for item, z in ((self._mask_overlay, 8), (self._sel_overlay, 9)):
+        # "exclusion" sits on top: it is the user's own input, so it must stay
+        # visible where it overlaps whatever the detector produced.
+        self._exclusion_overlay = pg.ImageItem(axisOrder="row-major")
+        for item, z in ((self._mask_overlay, 8), (self._sel_overlay, 9),
+                        (self._exclusion_overlay, 10)):
             item.setZValue(z)
             item.setVisible(False)
             self._plot.addItem(item)
         self._overlay_style = {
             "mask": (OVERLAY_MASK_COLOR, OVERLAY_DEFAULT_ALPHA),
             "selection": (OVERLAY_SELECTION_COLOR, OVERLAY_DEFAULT_ALPHA),
+            "exclusion": (OVERLAY_EXCLUSION_COLOR, OVERLAY_DEFAULT_ALPHA),
         }
 
         self._divider = pg.InfiniteLine(
@@ -354,7 +369,11 @@ class LinkedImageView(QWidget):
     # -- overlays ---------------------------------------------------------
 
     def _overlay_item(self, which: str) -> pg.ImageItem:
-        return self._mask_overlay if which == "mask" else self._sel_overlay
+        if which == "mask":
+            return self._mask_overlay
+        if which == "exclusion":
+            return self._exclusion_overlay
+        return self._sel_overlay
 
     def set_overlay(self, which: str, mask: np.ndarray | None) -> None:
         """Show `mask` (a boolean array) as a translucent layer, or clear it."""
@@ -387,6 +406,36 @@ class LinkedImageView(QWidget):
         c = pg.mkColor(color)
         return np.array([[0, 0, 0, 0],
                          [c.red(), c.green(), c.blue(), int(alpha)]], dtype=np.ubyte)
+
+    # -- freehand lasso ---------------------------------------------------
+
+    def set_lasso_locked(self, locked: bool) -> None:
+        """Enable/disable freehand drawing on this panel.
+
+        Mirrors set_line_locked / set_roi_locked so the owning window can keep
+        exactly one tool accepting the mouse — with several draggable items in
+        one panel a click is otherwise ambiguous. Unlocked, a left-drag draws;
+        locked, it pans as usual.
+        """
+        self._vb.set_brush_mode(BRUSH_OFF if locked else BRUSH_LASSO)
+
+    def _on_polygon_drawn(self, poly) -> None:
+        """Convert a polygon in image-pixel coords to the normalised schema.
+
+        Normalised because that is what survives a panel resize and can never
+        fall out of bounds — the same reason the line, ROI and view rectangle
+        all use it. Points are clamped rather than dropped, so a stroke that
+        runs off the edge sticks to the border instead of vanishing.
+        """
+        shape = self.shape
+        if shape is None or poly is None or len(poly) < 3:
+            return
+        h, w = shape
+        if h <= 0 or w <= 0:
+            return
+        pts = [(float(np.clip(x / w, 0.0, 1.0)), float(np.clip(y / h, 0.0, 1.0)))
+               for x, y in np.asarray(poly, dtype=float)]
+        self.polygon_drawn.emit({"kind": "polygon", "points": pts})
 
     # -- ROI --------------------------------------------------------------
 
@@ -850,12 +899,17 @@ BRUSH_RECT = "rect"
 BRUSH_LASSO = "lasso"
 
 
-class _BrushViewBox(pg.ViewBox):
+class LassoViewBox(pg.ViewBox):
     """ViewBox that can capture a rectangle or freehand polygon instead of panning.
 
     While dragging, only the outline is drawn — the point-in-polygon test runs once,
     on release.  Testing every point on every mouse-move is what makes a lasso feel
     heavy on a 50 000-point scatter.
+
+    Coordinate-system agnostic: it emits whatever `mapToView` returns, so the same
+    gesture serves a scatter plot (data coords) and an image panel (pixel coords).
+    That is why it is public rather than private to CorrelationPlot — the
+    background-exclusion dialog reuses it over an ImageItem.
     """
 
     polygon_drawn = pyqtSignal(object)     # (N, 2) vertices in data coords
@@ -952,7 +1006,7 @@ class CorrelationPlot(QWidget):
         self._sel_token = 0
         self._sel_thread: _SelectionThread | None = None
 
-        self._vb = _BrushViewBox()
+        self._vb = LassoViewBox()
         self._glw = pg.GraphicsLayoutWidget()
         self._glw.setBackground(bg)
         self._plot = self._glw.addPlot(viewBox=self._vb, title=title)

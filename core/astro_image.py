@@ -100,6 +100,12 @@ class AstroImage:
         self.background_rms: np.ndarray | None = None
         self.is_color: bool = False                    # True when RGB file was converted to luminance
         self.starless_image: AstroImage | None = None  # Set by ImagePanel when starless is loaded
+        # Normalised polygon dicts the user drew in the Background Regions dialog,
+        # populated by AnalysisThread from the settings. Read only by Section 3g's
+        # diagnostic (report_builder) -- estimate_background() below deliberately
+        # ignores it, so the background actually subtracted throughout the report
+        # is unchanged whether or not regions were drawn.
+        self.bg_exclusion_regions: list[dict] = []
 
         # Extracted metadata for display
         self.meta: dict = {}

@@ -38,6 +38,7 @@ from core.astro_image import AstroImage, decimation_step
 from core.inspector_catalog import panel_display_name, panel_concept
 from analysis.background_fit import compare_fits, evaluate_surface, fit_background_surface
 from analysis.background_mask import classify_background_pixels
+from analysis.inspector_regions import exclusion_mask
 from analysis.source_mask import source_masked_background
 
 _TEST_IMAGE_PATH = Path(__file__).parent.parent / "resources" / "ContrastTestImage.png"
@@ -80,8 +81,13 @@ def _sourcemask_for(cache: dict, img: AstroImage, fwhm_px: float = 4.0):
         return None
     key = id(img)
     if key not in cache:
+        # getattr rather than attribute access: an AstroImage built outside the
+        # GUI (tests, tools) never has regions assigned.
+        regions = getattr(img, "bg_exclusion_regions", None)
+        user = exclusion_mask(img.data.shape[:2], regions) if regions else None
         cache[key] = source_masked_background(
             img.data, box_size=int(img.background.box_size[0]), fwhm_px=fwhm_px,
+            user_exclusion=user if (user is not None and user.any()) else None,
             mesh=img.background.background_mesh,
             rms_mesh=img.background.background_rms_mesh)
     return cache[key]
@@ -5520,26 +5526,38 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         sky_color = np.array(mcolors.to_rgb("steelblue"))    # kept as background
         ext_color = np.array(mcolors.to_rgb("tomato"))       # extended structure
         pt_color = np.array(mcolors.to_rgb("gold"))          # point sources
+        usr_color = np.array(mcolors.to_rgb("darkorange"))   # user-drawn regions
+        any_user = False
         for ax, (disp, masks, lbl) in zip(axes, panels):
-            point, extended = masks
+            point, extended, user = masks
             h = min(disp.shape[0], point.shape[0])
             w = min(disp.shape[1], point.shape[1])
             gray = disp[:h, :w].astype(np.float32) / 255.0
             point = point[:h, :w]
             extended = extended[:h, :w]
-            sky = ~(point | extended)
+            user = None if user is None else user[:h, :w]
+            covered = point | extended
+            if user is not None:
+                covered = covered | user
+                any_user = any_user or bool(user.any())
+            sky = ~covered
             rgb = np.stack([gray, gray, gray], axis=-1)
-            for sel, color in ((sky, sky_color), (extended, ext_color), (point, pt_color)):
+            layers = [(sky, sky_color), (extended, ext_color), (point, pt_color)]
+            if user is not None:
+                layers.append((user, usr_color))   # drawn last: the user's own input wins
+            for sel, color in layers:
                 if sel.any():
                     rgb[sel] = (1 - alpha) * rgb[sel] + alpha * color
             ax.imshow(np.clip(rgb, 0, 1), origin="upper", interpolation="nearest")
             ax.axis("off")
             ax.set_title(f"Source mask — {lbl}", fontsize=10)
-        handles = [Patch(facecolor=c, label=t) for c, t in
-                   ((sky_color, "Sky (used for background)"),
-                    (ext_color, "Extended structure (masked)"),
-                    (pt_color, "Point sources (masked)"))]
-        fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8,
+        entries = [(sky_color, "Sky (used for background)"),
+                   (ext_color, "Extended structure (masked)"),
+                   (pt_color, "Point sources (masked)")]
+        if any_user:
+            entries.append((usr_color, "Your exclusion regions (masked)"))
+        handles = [Patch(facecolor=c, label=t) for c, t in entries]
+        fig.legend(handles=handles, loc="lower center", ncol=len(entries), fontsize=8,
                    frameon=False, bbox_to_anchor=(0.5, -0.02))
         fig.tight_layout()
         return fig
@@ -5625,6 +5643,9 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         for label, fn, fmt in (
                 ("Mesh cells used", lambda r: f"{r.n_cells} / {r.n_cells_total}", None),
                 ("Source mask coverage", lambda r: r.coverage, ".1%"),
+                ("&nbsp;&nbsp;of which you excluded by hand",
+                 lambda r: (r.source_mask.user_coverage
+                            if r.source_mask is not None else 0.0), ".1%"),
                 ("Point / extended segments",
                  lambda r: (f"{r.source_mask.n_point} / {r.source_mask.n_extended}"
                             if r.source_mask else "—"), None),
@@ -5660,6 +5681,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
             f"<tr><td>{t['tier']}</td><td>{_val(t['kernel_sigma'], '.3g')}</td>"
             f"<td>{_val(t['n_sigma'], '.2f')}</td>"
             f"<td>{_val(t['threshold_adu'], '.4g')}</td>"
+            f"<td>{t.get('threshold_source', '—')}</td>"
             f"<td>{t['npixels']}</td><td>{t['n_segments']}</td></tr>"
             for t in res.source_mask.tiers)
         return f"""
@@ -5667,9 +5689,15 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
 (sky &sigma; = {_val(res.source_mask.sky_sigma, '.4g')} ADU)</p>
 <table>
   <thead><tr><th>Tier</th><th>Kernel &sigma; (px)</th><th>n&sigma;</th>
-  <th>Threshold (ADU, smoothed)</th><th>Min. pixels</th><th>Segments</th></tr></thead>
+  <th>Threshold (ADU, smoothed)</th><th>Set by</th>
+  <th>Min. pixels</th><th>Segments</th></tr></thead>
   <tbody>{rows}</tbody>
-</table>"""
+</table>
+<p class="caption">&ldquo;Set by&rdquo; shows which bound decided each threshold.
+<em>Statistical</em> means n&sigma; above the smoothed noise; <em>surface
+brightness</em> means that bound was too deep to be worth acting on and the
+floor took over &mdash; expected on the broadest kernels, where smoothing makes
+almost anything detectable.</p>"""
 
     def _section_snr(self, ra: AnalysisResult, rb: AnalysisResult,
                       img_a: AstroImage, img_b: AstroImage | None) -> str:
@@ -6102,8 +6130,10 @@ nebulosity leaking into the background estimate.</p>"""
                     continue
                 step = decimation_step(*img.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
                 disp = img.display_image(stretch=True)[::step, ::step]
+                _um = res.source_mask.user_mask
                 masks = (res.source_mask.point_mask[::step, ::step],
-                         res.source_mask.extended_mask[::step, ::step])
+                         res.source_mask.extended_mask[::step, ::step],
+                         None if _um is None else _um[::step, ::step])
                 surf = res.surface[::step, ::step]
                 diff = surf - img.background_display(kind="model")
                 if img is img_a:
@@ -6148,7 +6178,26 @@ nebulosity leaking into the background estimate.</p>"""
                         f'unavailable — {res.fallback_reason}. The current estimate is '
                         f'shown unchanged for this image.</p>')
 
+            _user_drawn = any(
+                r is not None and r.source_mask is not None
+                and r.source_mask.user_coverage > 0
+                for r in (smres_a, smres_b))
+            _user_para = (
+                '<strong>Your exclusion regions are in use.</strong> The areas you drew '
+                'are excluded from the background wherever they fall, and their mesh '
+                'cells are also dropped from step 1, so the scaffold is not bent by '
+                'structure you already identified &mdash; that improves detection across '
+                'the whole frame, not only inside what you drew. They exist because two '
+                'situations cannot be resolved from pixel values alone however the '
+                'thresholds are set: smooth nebulosity is indistinguishable from a sky '
+                'gradient, and a centred nebula from vignetting, since both are radially '
+                'symmetric with the same curvature. Only you know which is which. Note '
+                'that drawing over genuinely blank sky is not free &mdash; it removes '
+                'real measurements the fit would otherwise use.<br><br>'
+            ) if _user_drawn else ''
+
             smask_info_text = (
+                _user_para +
                 '<strong>This section is diagnostic only.</strong> Every SNR value, star '
                 'measurement and comparison elsewhere in this report still uses the '
                 'unmasked <code>Background2D</code> estimate shown in 3e. Nothing here '
@@ -6160,13 +6209,17 @@ nebulosity leaking into the background estimate.</p>"""
                 'sky level and the background is over-estimated, which then '
                 '<em>under</em>-states every SNR in this report. This section rebuilds '
                 'the estimate with the sources excluded, in four auditable steps.<br><br>'
-                '<strong>1. Sky scaffold</strong> &mdash; a robust plane is fitted to the '
-                'existing mesh, rejecting only cells that sit <em>above</em> it. The '
+                '<strong>1. Sky scaffold</strong> &mdash; a robust surface is fitted to '
+                'the existing mesh, rejecting only cells that sit <em>above</em> it. The '
                 'one-sidedness is the point: nebulosity only ever adds flux, so a '
                 'symmetric clip cannot remove a bias carried by most of the cells, and '
                 'would additionally discard genuine dark-sky cells. Its scale is measured '
                 'from the lowest quartile of the residuals, which stays uncontaminated '
-                'even when three quarters of the frame carries signal.<br>'
+                'even when three quarters of the frame carries signal. Rejection runs '
+                'with a plane, then the surviving cells are refitted allowing curvature: '
+                'a curved fit during rejection quietly swallows broad nebulosity, while a '
+                'plane-only fit cannot represent vignetting and leaves the whole bowl in '
+                'the residual for the next step to mask as if it were a source.<br>'
                 '<strong>2. Detection</strong> &mdash; the scaffold is subtracted, which '
                 'flattens any large-scale gradient so one global threshold is valid '
                 'everywhere. Sources are then detected at four scales: one matched to the '
@@ -6174,7 +6227,14 @@ nebulosity leaking into the background estimate.</p>"""
                 'brightness structure. Point sources are removed before the broad scales '
                 'run, because a bright star smoothed over 16 px still towers over a '
                 'faint-nebulosity threshold and would otherwise be masked as a large '
-                'extended blob. Every threshold is listed below.<br>'
+                'extended blob. Each threshold is the larger of two bounds &mdash; what '
+                'is statistically detectable, and what is bright enough to be worth '
+                'masking at all. The second matters because smoothing over a wide kernel '
+                'makes almost anything detectable: left to significance alone the '
+                'broadest scale triggered on structure at 3&nbsp;% of the sky noise, '
+                'which shifts the background by nothing while consuming the mesh cells '
+                'the fit needs. Every threshold is listed below, with which bound set '
+                'it.<br>'
                 '<strong>3. Classification</strong> &mdash; segments are split into point '
                 'sources and extended structure by <em>extent</em> (equivalent radius '
                 'against the PSF, plus the scale that detected them), then grown by an '
