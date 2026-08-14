@@ -294,6 +294,12 @@ class AstroImage:
         if self.original_dtype is not None:
             self.meta["Bit depth"] = _dtype_label(self.original_dtype)
 
+        # Image dimensions — from the loaded array, not the header, so it's
+        # always available regardless of what the file's keywords contain.
+        if self.data is not None:
+            h, w = self.data.shape[:2]
+            self.meta["Image dimensions"] = f"{w} × {h} px"
+
         if self.header is None:
             return
         mapping = {
@@ -312,6 +318,33 @@ class AstroImage:
                 if kw in self.header:
                     self.meta[display_key] = str(self.header[kw]).strip()
                     break
+
+        # Frames combined — present only for an integrated/stacked image. No
+        # single de facto keyword across stacking tools, so try the IRAF-derived
+        # convention (NCOMBINE, widely honoured) alongside common tool-specific
+        # keywords (Siril's STACKCNT) in priority order.
+        for kw in ("NCOMBINE", "STACKCNT", "NSTACKED", "NFRAMES", "NIMAGES"):
+            if kw in self.header:
+                try:
+                    n = int(float(self.header[kw]))
+                    if n > 0:
+                        self.meta["Frames combined"] = str(n)
+                        break
+                except (TypeError, ValueError):
+                    pass
+
+        # Camera's native ADC bit depth — distinct from "Bit depth" above, which
+        # is the file's own storage dtype and is commonly 32-bit float after
+        # calibration/stacking regardless of what the sensor originally captured.
+        for kw in ("BITDEPTH", "CAMBITS", "ADCBITS", "CCDBITS"):
+            if kw in self.header:
+                try:
+                    bits = int(float(self.header[kw]))
+                    if bits > 0:
+                        self.meta["Camera bit depth"] = f"{bits}-bit"
+                        break
+                except (TypeError, ValueError):
+                    pass
 
         # Gain — prefer the resolved physical e-/ADU value (EGAIN priority order,
         # see _resolve_gain); fall back to the raw GAIN string (often a camera mode
