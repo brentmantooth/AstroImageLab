@@ -23,6 +23,10 @@ from analysis.image_filters import SpatialDetailAnalyzer
 from analysis.inspector_regions import exclusion_mask
 from report.report_builder import ReportBuilder
 
+# sep's default extract_pixstack (300_000) is sized for typical starfields; a
+# large extended/bright target can exceed it during astroalign's source
+# detection. See the comment at the call site in AnalysisThread._align.
+SEP_EXTRACT_PIXSTACK = 1_000_000
 
 
 class AnalysisThread(QThread):
@@ -461,6 +465,17 @@ class AnalysisThread(QThread):
                 result: AnalysisResult) -> bool:
         try:
             import astroalign as aa
+            # astroalign's source-detection step (sep.extract) caps the number of
+            # active above-threshold pixels it can track at once (sep default:
+            # 300_000). A large, bright, extended target (e.g. the Orion Nebula
+            # core) can blow past that on a single connected blob; astroalign
+            # then swallows sep's real error and re-raises a generic
+            # "Input type for source not supported." with no indication this is
+            # a capacity limit, not a data-format problem. Raise the ceiling
+            # before every alignment attempt — this is a process-global sep
+            # setting, harmless and free to set on ordinary images too.
+            import sep
+            sep.set_extract_pixstack(SEP_EXTRACT_PIXSTACK)
             aligned_data, _ = aa.register(
                 np.ascontiguousarray(img_a.data, dtype=np.float64),
                 np.ascontiguousarray(img_b.data, dtype=np.float64),

@@ -974,6 +974,23 @@ python AstroImageLab.py          # run from source
 pyinstaller AstroImageLab.spec   # build standalone binary
 ```
 
+**Locating `astrolab` from a Claude Code tool call.** The Bash/PowerShell tools run a
+non-interactive shell that has not sourced the user's profile, so `conda`/`python` are
+not on `PATH` and `conda activate astrolab` fails with "command not found" even though
+it works fine in the user's own terminal. Skip environment activation entirely and
+call the env's interpreter directly — this is the most reliable path and needs no
+`conda` on `PATH` at all:
+
+```text
+C:\Users\bmant\anaconda3\envs\astrolab\python.exe script.py
+```
+
+Only reach for `conda.exe` itself (env creation, package install/list) — its `Scripts\`
+folder sits next to the base install, e.g. `C:\Users\bmant\anaconda3\Scripts\conda.exe`.
+If either path has moved, `Get-ChildItem -Path "$env:USERPROFILE" -Filter python.exe
+-Recurse -Depth 4` (PowerShell) will re-find it — but check these known paths first
+rather than re-deriving them every session.
+
 Output binary names: `AstroImageLab.exe` (Windows), `AstroImageLab` (macOS / Linux).
 The spec post-build step automatically creates a platform-labelled zip:
 `AstroImageLab-win64.zip`, `AstroImageLab-macos.zip`, or `AstroImageLab-linux.zip`.
@@ -1066,6 +1083,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Linux build needs system Qt libraries | PyInstaller must be able to import PyQt6 during analysis. On `ubuntu-latest` run `sudo apt-get install -y libgl1 libegl1 libxcb-cursor0 libxkbcommon-x11-0` before `pip install -r requirements-build.txt`. |
 | `PowerSpectrumAnalyzer` crashes on images smaller than 2048 px | `POWER_SPECTRUM_NPIX = 2048`. The auto-select loop is empty when `min(h, w) < 2048`; the fallback produces negative slice indices → non-square region → `_apply_window` shape mismatch. Fix: `N = min(N, h, w)` before the loop, add `+1` to loop upper bounds, clamp fallback with `max(0, ...)`. |
 | `sigma_clip` mask is scalar `False` when nothing is clipped | `clipped.mask` is `np.ma.nomask` (== `False`) when no values are clipped. `region[False]` silently writes only the first row. Use `np.ma.getmaskarray(clipped)` to get a full bool array, then guard with `.any()`. |
+| `astroalign.register()` fails with "Input type for source not supported." on a large/bright target — this is not a dtype problem | `gui/analysis_thread.py::_align()` already casts both images to float64 before calling `aa.register()`, and astroalign's own `_find_sources` re-casts to float32 internally regardless (`image.astype("float32")` right before `sep.extract`), so dtype was never the mechanism. `find_transform()` wraps its whole source-detection step in a blanket `except Exception: raise TypeError("Input type for source not supported.")`, so *any* failure inside `sep` gets relabeled with that one misleading message. The real cause, confirmed by calling astroalign's internal `_find_sources` directly on the failing array: `sep.extract`'s internal pixel buffer (default `extract_pixstack = 300_000` active above-threshold pixels) overflows when a large, bright, extended target — measured on the Orion Nebula core, 523 061 pixels (4.5 % of a 2822×4144 frame) above a 5σ threshold — forms one connected blob past that cap. `_align()` now calls `sep.set_extract_pixstack(SEP_EXTRACT_PIXSTACK)` (1,000,000, a process-global sep setting, harmless on ordinary starfields) before every `aa.register()` call. When astroalign raises this exact message, reproduce with `astroalign._find_sources(astroalign._bw(arr), detection_sigma=5, min_area=5, mask=astroalign._mask(arr))` on each image directly — it surfaces the real underlying exception instead of the generic one `register()`/`find_transform()` re-raise. |
 | Adding a float64 cast in analysis code | Don't. All image data is float32 after `AstroImage.load()`. The only float64 exception is `astroalign` in `gui/analysis_thread.py`. Redundant float64 casts waste memory and defeat the float32 performance gains. |
 | Mixed float32/float64 arithmetic silently widens to float64 | NumPy upcasts when operands differ (e.g. `float32_array - float64_scalar`). If photutils ever returns a float64 background model, `background_subtracted()` will silently return float64. Guard by adding `.astype(np.float32)` at the end of `background_subtracted()` in `astro_image.py` if this is observed. |
 | `_section_snr` crashed when SNR metric is unchecked | `_plot_snr_pair` (`report_builder.py`) built a `panels` list filtered to non-`None` entries but never checked whether it was empty before calling `plt.subplots(1, len(panels), ...)` — 0 columns raised `ValueError: Number of columns must be a positive integer, not 0`. Hit whenever SNR is unchecked while another metric (e.g. Power Spectrum) is run. Fixed with an early `if not panels: return None` guard, matching `_plot_radial_overlay`/`_plot_radial_ratio_db`; both call sites already pipe the result through `_img_tag`, which turns `None` into `""`. |
