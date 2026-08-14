@@ -1284,10 +1284,16 @@ class ReportBuilder:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # The report filename identifies which input files were analyzed, so it must use
+        # the original filename even when the label shown in the report body was
+        # abbreviated to "Image A"/"Image B" for LABEL_MAX_LEN (see the long-filename
+        # substitution in gui/analysis_thread.py, which runs before generate() is called).
+        _fname_label_a = result_a.original_label or result_a.label
+        _fname_label_b = result_b.original_label or result_b.label
         if self._single_image:
-            stem = f"report_{result_a.label}_{ts}".replace(" ", "_")
+            stem = f"report_{_fname_label_a}_{ts}".replace(" ", "_")
         else:
-            stem = f"report_{result_a.label}_{result_b.label}_{ts}".replace(" ", "_")
+            stem = f"report_{_fname_label_a}_{_fname_label_b}_{ts}".replace(" ", "_")
         filename = stem + ".html"
 
         if report_format == REPORT_OUTPUT_SUBFOLDER:

@@ -14,7 +14,7 @@ import re
 import matplotlib
 matplotlib.use("Agg")
 
-from core.models import REPORT_OUTPUT_SINGLE_FILE, REPORT_OUTPUT_SUBFOLDER
+from core.models import AnalysisResult, REPORT_OUTPUT_SINGLE_FILE, REPORT_OUTPUT_SUBFOLDER
 from report.report_builder import ReportBuilder, _slugify, _export_ctx
 
 _SRC_RE = re.compile(r'src="([^"]+)"')
@@ -91,6 +91,47 @@ class TestSingleFileMode:
             report_format=REPORT_OUTPUT_SINGLE_FILE,
         )
         assert _export_ctx.enabled is False
+
+
+class TestReportFilenameUsesOriginalLabel:
+    """gui/analysis_thread.py abbreviates result_a/result_b.label to "Image A"/"Image B"
+    for figures/legends when the source filename exceeds LABEL_MAX_LEN, and stashes the
+    real filename in original_label. generate() is called while label is still
+    abbreviated, so the report's own output filename must prefer original_label —
+    otherwise the .html filename can no longer tell the user which files were compared.
+    """
+
+    def test_single_image_stem_uses_original_label_not_abbreviated_label(
+        self, astro_image_a, tmp_path
+    ):
+        long_name = "a_very_long_calibrated_filter_filename_that_exceeds_the_cap"
+        result_a = AnalysisResult(label="Image A", original_label=long_name)
+        out = ReportBuilder().generate(
+            astro_image_a, result_a=result_a, output_dir=tmp_path, open_browser=False,
+        )
+        assert long_name in out.stem
+        assert "Image_A" not in out.stem
+
+    def test_two_image_stem_uses_both_original_labels(self, astro_image_a, tmp_path):
+        long_name_a = "first_extremely_long_source_filename_for_image_a"
+        long_name_b = "second_extremely_long_source_filename_for_image_b"
+        result_a = AnalysisResult(label="Image A", original_label=long_name_a)
+        result_b = AnalysisResult(label="Image B", original_label=long_name_b)
+        out = ReportBuilder().generate(
+            astro_image_a, astro_image_a, result_a=result_a, result_b=result_b,
+            output_dir=tmp_path, open_browser=False,
+        )
+        assert long_name_a in out.stem
+        assert long_name_b in out.stem
+        assert "Image_A" not in out.stem
+        assert "Image_B" not in out.stem
+
+    def test_short_label_unaffected(self, astro_image_a, tmp_path):
+        result_a = AnalysisResult(label="TestA")
+        out = ReportBuilder().generate(
+            astro_image_a, result_a=result_a, output_dir=tmp_path, open_browser=False,
+        )
+        assert "TestA" in out.stem
 
 
 class TestSlugify:
