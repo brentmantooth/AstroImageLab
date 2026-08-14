@@ -252,6 +252,11 @@ tools/
 
 Wavelet noise estimation uses the robust MAD estimator from Donoho & Johnstone (1994).
 SNR background estimation uses photutils `Background2D` with `MADStdBackgroundRMS`.
+By default stars and extended nebulosity are detected and masked out first, and the sky
+level is a BIC-selected low-order surface fitted to the mesh cells that survive — the
+plain per-cell estimate assumes every cell is sky-dominated and biases upward over
+nebulosity. Report section 3g carries the mask, the per-tier detection thresholds, and
+the before/after comparison; the **Source-masked background** checkbox turns it off.
 
 ---
 

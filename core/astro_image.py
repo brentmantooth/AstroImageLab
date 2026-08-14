@@ -21,6 +21,10 @@ from core.models import (BACKGROUND_DISPLAY_MAX_DIM, DEFAULT_PIXEL_SCALE,
 BACKGROUND_SIGCLIP_SIGMA = 3.0
 BACKGROUND_SIGCLIP_MAXITERS = 10
 
+# Fallback star FWHM for the source mask's point-source tier when no better hint
+# is available (an AstroImage built outside the GUI, e.g. by a test or a tool).
+SOURCEMASK_DEFAULT_FWHM_PX = 4.0
+
 
 def decimation_step(h: int, w: int, max_dim: int = BACKGROUND_DISPLAY_MAX_DIM) -> int:
     """Stride for downsampling an (h, w) array so its longer side is <= max_dim.
@@ -96,16 +100,45 @@ class AstroImage:
         self.bandwidth_nm: float | None = None
         self.filter_thickness_mm: float = FILTER_THICKNESS_MM
         self.original_dtype: np.dtype | None = None   # dtype before float32 conversion
+        # The UNMASKED Background2D. Kept under this name and with this meaning
+        # even after source-masking is adopted: stage 1's sky scaffold requires an
+        # unmasked mesh by design, Section 3f reads box_size/mesh from it, and
+        # Section 3g's "before" column is the comparison that justifies the change.
         self.background: Background2D | None = None
+        # The noise floor actually used everywhere (SNR, star detection, Section 8).
+        # The masked pass's RMS map once source-masking succeeds, otherwise the
+        # unmasked one -- removing nebulosity lowers the measured noise as well as
+        # the level, so pairing a masked background with an unmasked RMS would mix
+        # two different estimates of the same sky.
         self.background_rms: np.ndarray | None = None
+        # The sky model actually subtracted. Its own attribute rather than
+        # `background.background`, because the adopted model is a fitted polynomial
+        # surface, not a Background2D product. Feeding the source mask straight into
+        # Background2D(mask=...) instead is the known-bad configuration: at high
+        # coverage most cells are excluded and photutils back-fills them by
+        # interpolation, which measured worse than the bias being removed.
+        self.background_model: np.ndarray | None = None
+        self.source_mask_result = None      # analysis.source_mask.MaskedBackgroundResult | None
         self.is_color: bool = False                    # True when RGB file was converted to luminance
         self.starless_image: AstroImage | None = None  # Set by ImagePanel when starless is loaded
         # Normalised polygon dicts the user drew in the Background Regions dialog,
-        # populated by AnalysisThread from the settings. Read only by Section 3g's
-        # diagnostic (report_builder) -- estimate_background() below deliberately
-        # ignores it, so the background actually subtracted throughout the report
-        # is unchanged whether or not regions were drawn.
+        # populated by AnalysisThread from the settings. Kept alongside the
+        # rasterised mask below because the report describes the regions (how many,
+        # what fraction) while estimate_background() needs the pixels.
         self.bg_exclusion_regions: list[dict] = []
+        # Full-resolution bool mask of those regions, True where excluded. Set from
+        # outside via set_background_exclusion_mask() rather than rasterised here:
+        # analysis.inspector_regions.exclusion_mask reaches analysis.image_filters,
+        # which imports this module, so importing it would close a cycle. Same
+        # externally-populated-slot convention as `starless_image`.
+        self.bg_exclusion_mask: np.ndarray | None = None
+        # Whether estimate_background() runs the Section 3g source-masked pass and
+        # adopts its result. Set by AnalysisThread from the control panel.
+        self.use_source_masked_background: bool = True
+        # Star FWHM for the source mask's point-source tier. Only a hint: PSF
+        # analysis cannot supply a measured value because it needs the background
+        # first, so AnalysisThread derives one from the reference-seeing setting.
+        self.psf_fwhm_hint_px: float = SOURCEMASK_DEFAULT_FWHM_PX
 
         # Extracted metadata for display
         self.meta: dict = {}
@@ -334,11 +367,42 @@ class AstroImage:
     # Background estimation
     # ------------------------------------------------------------------
 
+    def set_background_exclusion_mask(self, mask: np.ndarray | None) -> None:
+        """Attach the user's hand-drawn exclusion mask.
+
+        Must be called BEFORE estimate_background(). It invalidates any background
+        already computed, because the mask changes the answer and the idempotency
+        guard below would otherwise hand back a background estimated without it --
+        a silent wrong result rather than an error.
+
+        Rasterisation happens in the caller (analysis.inspector_regions.
+        exclusion_mask); importing that here would close a cycle back through
+        analysis.image_filters.
+        """
+        self.bg_exclusion_mask = None if mask is None else np.asarray(mask, dtype=bool)
+        self.background = None
+        self.background_model = None
+        self.background_rms = None
+        self.source_mask_result = None
+
     def estimate_background(self, box_size: int = 64) -> None:
+        """Estimate the sky background, in two phases.
+
+        Phase 1 is the plain per-cell-sigma-clipped Background2D, kept on
+        `self.background` because later stages and Section 3f/3g all need the
+        unmasked mesh. Phase 2 re-estimates it with stars and extended nebulosity
+        masked out (analysis/source_mask.py) and adopts that result as the model
+        actually subtracted, since the phase-1 clip assumes every cell is
+        sky-dominated and biases upward wherever that fails.
+
+        Falls back to phase 1 silently whenever phase 2 cannot produce a surface
+        (too little sky left, too few surviving cells); `source_mask_result
+        .fallback_reason` carries the explanation for the report.
+        """
         if self.data is None:
             raise RuntimeError("Image not loaded")
-        if self.background is not None:
-            return   # already computed for this instance's data; self.data never changes post-load
+        if self.background_model is not None:
+            return   # already computed; self.data and the mask both fixed by now
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=AstropyUserWarning)
             self.background = Background2D(
@@ -350,34 +414,64 @@ class AstroImage:
                 bkg_estimator=SExtractorBackground(),
                 bkg_rms_estimator=MADStdBackgroundRMS(),
             )
+        # Adopt the unmasked result first, so every exit path below leaves a usable
+        # model behind even if phase 2 raises or declines.
+        self.background_model = self.background.background
         self.background_rms = self.background.background_rms
+
+        if not self.use_source_masked_background:
+            return
+
+        # Imported here, not at module scope: analysis.source_mask is safe to import
+        # from core (it reaches only analysis.background_fit + numpy/scipy/photutils)
+        # but keeping it local means a caller that never enables source-masking does
+        # not pay photutils.segmentation's import cost.
+        from analysis.source_mask import source_masked_background
+
+        user = self.bg_exclusion_mask
+        res = source_masked_background(
+            self.data, box_size=box_size,
+            fwhm_px=float(self.psf_fwhm_hint_px),
+            user_exclusion=user if (user is not None and user.any()) else None,
+            mesh=self.background.background_mesh,
+            rms_mesh=self.background.background_rms_mesh)
+        self.source_mask_result = res
+        if res.ok:
+            self.background_model = np.asarray(res.surface, dtype=np.float32)
+            if res.rms_map is not None:
+                self.background_rms = np.asarray(res.rms_map, dtype=np.float32)
 
     def background_subtracted(self) -> np.ndarray:
         if self.data is None:
             raise RuntimeError("Image not loaded")
-        if self.background is None:
+        if self.background_model is None:
             return self.data.copy()
-        return (self.data - self.background.background).astype(np.float32)
+        return (self.data - self.background_model).astype(np.float32)
 
     def background_display(self, kind: str = "model",
                             max_dim: int = BACKGROUND_DISPLAY_MAX_DIM) -> np.ndarray:
         """Stride-decimated float32 copy of a Background2D-derived array, for
         report figures / Data Inspector display.
 
-        kind="model" -> self.background.background (full-res interpolated sky level)
-        kind="rms"   -> self.background_rms         (full-res noise floor)
+        kind="model"          -> self.background_model      (the sky level actually subtracted)
+        kind="rms"            -> self.background_rms        (the noise floor actually used)
+        kind="unmasked_model" -> self.background.background (phase 1, for Section 3g's
+                                 before/after comparison)
 
         Stride decimation (not the LANCZOS resize used for photographic display
         images) so the smoothly-varying field keeps its exact computed values.
         """
-        if self.background is None:
+        if self.background is None or self.background_model is None:
             raise RuntimeError("Background not estimated; call estimate_background() first")
         if kind == "model":
-            arr = self.background.background
+            arr = self.background_model
         elif kind == "rms":
             arr = self.background_rms
+        elif kind == "unmasked_model":
+            arr = self.background.background
         else:
-            raise ValueError(f"unknown kind {kind!r}; expected 'model' or 'rms'")
+            raise ValueError(
+                f"unknown kind {kind!r}; expected 'model', 'rms' or 'unmasked_model'")
         h, w = arr.shape[:2]
         step = decimation_step(h, w, max_dim)
         return arr[::step, ::step].astype(np.float32)

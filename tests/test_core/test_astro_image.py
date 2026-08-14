@@ -132,12 +132,23 @@ class TestBackground:
     def test_background_display_downsamples_large_image(self, astro_image_a):
         max_dim = 100
         disp = astro_image_a.background_display(kind="model", max_dim=max_dim)
-        h, w = astro_image_a.background.background.shape
+        h, w = astro_image_a.background_model.shape
         step = decimation_step(h, w, max_dim)
-        expected = astro_image_a.background.background[::step, ::step].astype(np.float32)
+        expected = astro_image_a.background_model[::step, ::step].astype(np.float32)
         assert disp.shape == expected.shape
-        assert disp.shape[0] < astro_image_a.background.background.shape[0]
+        assert disp.shape[0] < astro_image_a.background_model.shape[0]
         np.testing.assert_array_equal(disp, expected)
+
+    def test_background_display_unmasked_model_is_the_phase_one_estimate(self, astro_image_a):
+        """kind="unmasked_model" must stay pinned to Background2D's own surface.
+
+        Section 3g's before/after comparison is built on it, so if it ever started
+        tracking the adopted model the difference map would silently go to zero
+        rather than error.
+        """
+        disp = astro_image_a.background_display(kind="unmasked_model")
+        np.testing.assert_array_equal(
+            disp, astro_image_a.background.background.astype(np.float32))
 
     def test_background_display_unknown_kind_raises(self, astro_image_a):
         with pytest.raises(ValueError):
@@ -148,6 +159,81 @@ class TestBackground:
         img.load()
         with pytest.raises(RuntimeError):
             img.background_display()
+
+
+class TestSourceMaskedAdoption:
+    """estimate_background()'s phase 2 — adopting the source-masked estimate."""
+
+    def test_adopted_model_is_not_the_unmasked_one(self, astro_image_a):
+        assert astro_image_a.source_mask_result is not None
+        assert astro_image_a.source_mask_result.ok
+        assert not np.array_equal(astro_image_a.background_model,
+                                  astro_image_a.background.background)
+
+    def test_background_subtracted_uses_the_adopted_model(self, astro_image_a):
+        np.testing.assert_allclose(
+            astro_image_a.background_subtracted(),
+            (astro_image_a.data - astro_image_a.background_model).astype(np.float32),
+            rtol=0, atol=0)
+
+    def test_rms_is_the_masked_map_not_the_unmasked_one(self, astro_image_a):
+        """Pairing a masked background with an unmasked RMS would mix two
+        different estimates of the same sky, so the RMS must move too."""
+        res = astro_image_a.source_mask_result
+        assert res.rms_map is not None
+        np.testing.assert_array_equal(astro_image_a.background_rms, res.rms_map)
+
+    def test_flag_off_keeps_the_plain_estimate(self, test_fits_path):
+        img = AstroImage(str(test_fits_path), label="Plain")
+        img.load()
+        img.use_source_masked_background = False
+        img.estimate_background()
+        assert img.source_mask_result is None
+        np.testing.assert_array_equal(img.background_model,
+                                      img.background.background)
+        np.testing.assert_array_equal(img.background_rms,
+                                      img.background.background_rms)
+
+    def test_setting_the_exclusion_mask_invalidates_a_computed_background(
+            self, test_fits_path):
+        """The guard keys on background_model, so a mask attached afterwards
+        would otherwise be silently ignored — a wrong answer, not an error."""
+        img = AstroImage(str(test_fits_path), label="Excl")
+        img.load()
+        img.use_source_masked_background = False
+        img.estimate_background()
+        assert img.background_model is not None
+
+        mask = np.zeros(img.data.shape[:2], dtype=bool)
+        mask[:64, :64] = True
+        img.set_background_exclusion_mask(mask)
+        assert img.background is None
+        assert img.background_model is None
+        assert img.background_rms is None
+        assert img.source_mask_result is None
+
+    def test_drawn_region_reaches_the_source_mask(self, test_fits_path):
+        img = AstroImage(str(test_fits_path), label="Excl")
+        img.load()
+        mask = np.zeros(img.data.shape[:2], dtype=bool)
+        mask[100:200, 100:200] = True
+        img.set_background_exclusion_mask(mask)
+        img.estimate_background()
+        res = img.source_mask_result
+        assert res is not None and res.source_mask is not None
+        assert res.source_mask.user_mask is not None
+        # Every drawn pixel is excluded, whatever the detector concluded.
+        assert res.source_mask.mask[mask].all()
+
+    def test_second_call_is_a_no_op(self, test_fits_path):
+        img = AstroImage(str(test_fits_path), label="Idem")
+        img.load()
+        img.estimate_background()
+        first_model = img.background_model
+        first_res = img.source_mask_result
+        img.estimate_background()
+        assert img.background_model is first_model
+        assert img.source_mask_result is first_res
 
 
 class TestDecimationStep:

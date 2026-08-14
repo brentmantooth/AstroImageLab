@@ -1,4 +1,10 @@
-"""Source-masked background estimation — Section 3g's diagnostic.
+"""Source-masked background estimation — the report's background model.
+
+Adopted by `AstroImage.estimate_background()` as the sky model actually
+subtracted (Section 3e), with Section 3g carrying the audit trail: the mask,
+the per-tier thresholds, the surviving mesh cells, and the before/after
+comparison against the plain unmasked estimate. It runs as a diagnostic only
+when the user switches source masking off.
 
 photutils' `Background2D` sigma-clips each mesh cell independently, which
 assumes every cell is sky-dominated. That assumption fails when extended
@@ -56,10 +62,14 @@ from core.models import (SOURCEMASK_EXCLUDE_PERCENTILE,
                          SOURCEMASK_EXT_NSIGMA, SOURCEMASK_EXTENDED_RADIUS_MULT,
                          SOURCEMASK_MASKED_FILTER_SIZE, SOURCEMASK_MAX_COVERAGE,
                          SOURCEMASK_MAX_HOLE_PX, SOURCEMASK_MIN_CELL_UNMASKED_FRAC,
+                         SOURCEMASK_AGREEMENT_GRID,
+                         SOURCEMASK_DEMOTE_ON_DIVERGENCE,
+                         SOURCEMASK_MAX_EXTRAPOLATION_RATIO,
+                         SOURCEMASK_MAX_MODEL_DIVERGENCE_SIGMA,
                          SOURCEMASK_MIN_CELLS_CONSTANT, SOURCEMASK_MIN_CELLS_PLANE,
                          SOURCEMASK_MIN_CELLS_QUADRIC,
                          SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA,
-                         SOURCEMASK_N_PASSES,
+                         SOURCEMASK_N_PASSES, SOURCEMASK_QUADRIC_CELL_FRACTION,
                          SOURCEMASK_POINT_NPIXELS, SOURCEMASK_POINT_NSIGMA,
                          SOURCEMASK_SCAFFOLD_MAX_ITERS,
                          SOURCEMASK_SCAFFOLD_REJECT_NSIGMA,
@@ -121,6 +131,13 @@ class MaskedBackgroundResult:
     fallback_reason: str | None
     source_mask: SourceMaskResult | None
     scaffold: dict | None            # stage-1 fit, kept for the report's audit box
+    # Full-resolution noise floor from the masked Background2D pass. Carried so a
+    # caller adopting this estimate gets the masked RMS map too -- removing the
+    # nebulosity lowers the measured noise as well as the level, and using the
+    # masked background with the unmasked RMS would mix the two.
+    rms_map: np.ndarray | None = None
+    # plane_quadric_agreement() record, or None when no quadric was on the table.
+    agreement: dict | None = None
 
     @property
     def ok(self) -> bool:
@@ -634,15 +651,106 @@ def _cell_unmasked_fraction(source_mask: np.ndarray, mesh_shape: tuple[int, int]
     return out
 
 
-def _order_cap_for(n_cells: int) -> int | None:
-    """Max polynomial order the surviving-cell count can honestly support."""
-    if n_cells >= SOURCEMASK_MIN_CELLS_QUADRIC:
+def _order_cap_for(n_cells: int, n_cells_total: int = 0) -> int | None:
+    """Max polynomial order the surviving-cell count can honestly support.
+
+    The quadric must clear an absolute floor AND a fraction of the whole mesh.
+    An absolute count alone does not survive a change of image scale: 35 cells
+    is 54.7% of the 64-cell mesh it was tuned on but 1.2% of a 24 MP frame's
+    2925-cell mesh, so the guard evaporates on exactly the large images where a
+    quadric has the most masked area to extrapolate across.
+
+    `n_cells_total=0` makes the fraction term vanish, so a single-argument call
+    reproduces the old absolute-only rule exactly.
+    """
+    quadric_min = max(SOURCEMASK_MIN_CELLS_QUADRIC,
+                      int(np.ceil(SOURCEMASK_QUADRIC_CELL_FRACTION * max(0, n_cells_total))))
+    if n_cells >= quadric_min:
         return 2
     if n_cells >= SOURCEMASK_MIN_CELLS_PLANE:
         return 1
     if n_cells >= SOURCEMASK_MIN_CELLS_CONSTANT:
         return 0
     return None
+
+
+def plane_quadric_agreement(mesh: np.ndarray, rms_mesh: np.ndarray, box_size: int,
+                            image_shape: tuple[int, int], valid: np.ndarray,
+                            sky_sigma: float,
+                            n_grid: int = SOURCEMASK_AGREEMENT_GRID) -> dict | None:
+    """Fit the same cells at order 1 and order 2 and measure where they part company.
+
+    A quadric fitted to cells that survive a dense mask can pass through every
+    measurement and still swing wildly across the region with no data. BIC cannot
+    see that -- it only scores the fit against the cells it was given -- and no
+    cell-count threshold generalises across image scale, so the honest test is to
+    fit both orders and look at the disagreement itself.
+
+    Two numbers, because one is not enough:
+
+      * `max_divergence_adu` -- worst |quadric - plane| anywhere on the frame.
+      * `max_divergence_measured_adu` -- worst |quadric - plane| at the surviving
+        cell centres, i.e. where both models are actually constrained.
+
+    Divergence alone cannot separate real curvature from invented curvature: on a
+    genuinely vignetted frame the plane simply cannot fit, so the two surfaces
+    differ a lot *everywhere*, including where the data is -- and the quadric is
+    right. What identifies extrapolation is the ratio: agreement where cells
+    survive, disagreement only out across the mask.
+
+    Returns None when either fit is unavailable (too few cells, degenerate mesh).
+    """
+    finite = np.isfinite(mesh) & np.isfinite(rms_mesh) & (rms_mesh > 0) & valid
+    if int(finite.sum()) < SOURCEMASK_MIN_CELLS_PLANE:
+        return None
+    masked_mesh = np.where(finite, mesh, np.nan)
+    masked_rms = np.where(finite, rms_mesh, np.nan)
+
+    plane = fit_background_surface(masked_mesh, masked_rms, box_size, image_shape,
+                                   max_order=1)
+    quadric = fit_background_surface(masked_mesh, masked_rms, box_size, image_shape,
+                                     max_order=2)
+    if plane.get("insufficient_data") or quadric.get("insufficient_data"):
+        return None
+
+    h, w = image_shape[:2]
+    n = max(2, int(n_grid))
+    gx, gy = np.meshgrid(np.linspace(0.0, float(w - 1), n),
+                         np.linspace(0.0, float(h - 1), n))
+    frame_diff = np.abs(evaluate_surface_at(quadric, gx, gy)
+                        - evaluate_surface_at(plane, gx, gy))
+    max_frame = float(np.nanmax(frame_diff)) if frame_diff.size else 0.0
+
+    cx, cy = _mesh_cell_centres(mesh.shape, box_size)
+    cell_diff = np.abs(evaluate_surface_at(quadric, cx[finite], cy[finite])
+                       - evaluate_surface_at(plane, cx[finite], cy[finite]))
+    max_cells = float(np.nanmax(cell_diff)) if cell_diff.size else 0.0
+
+    sigma_units = (max_frame / sky_sigma
+                   if np.isfinite(sky_sigma) and sky_sigma > 0 else None)
+    # Guard the ratio on the noise floor, not on zero: two surfaces that agree to
+    # within a rounding error everywhere would otherwise produce an enormous and
+    # meaningless ratio from dividing one tiny number by another.
+    floor = (0.01 * sky_sigma if np.isfinite(sky_sigma) and sky_sigma > 0
+             else max(max_frame, 1e-12) * 1e-6)
+    ratio = float(max_frame / max(max_cells, floor))
+
+    diverges = bool(
+        sigma_units is not None
+        and sigma_units > SOURCEMASK_MAX_MODEL_DIVERGENCE_SIGMA
+        and ratio > SOURCEMASK_MAX_EXTRAPOLATION_RATIO)
+
+    return {
+        "plane_fit": plane,
+        "quadric_fit": quadric,
+        "max_divergence_adu": max_frame,
+        "max_divergence_measured_adu": max_cells,
+        "max_divergence_sigma": sigma_units,
+        "extrapolation_ratio": ratio,
+        "verdict": "diverge" if diverges else "agree",
+        "demoted": False,          # set by masked_background_estimate if it acts
+        "n_cells": int(finite.sum()),
+    }
 
 
 def _geometry_supported_order(cx: np.ndarray, cy: np.ndarray,
@@ -674,12 +782,16 @@ def masked_background_estimate(data: np.ndarray, source_mask: np.ndarray,
                                box_size: int, *,
                                exclude_percentile: float = SOURCEMASK_EXCLUDE_PERCENTILE,
                                min_cell_unmasked_frac: float = SOURCEMASK_MIN_CELL_UNMASKED_FRAC,
+                               sky_sigma: float | None = None,
                                ) -> tuple[dict | None, str | None]:
     """Run the masked Background2D pass and fit its surviving mesh cells.
 
     Returns (payload, fallback_reason). `payload` carries the fit, the
     surviving-cell bookkeeping and the masked RMS; it is None whenever the mask
     leaves too little sky, in which case fallback_reason says why.
+
+    `sky_sigma` scales the plane-vs-quadric agreement check into sky-noise units;
+    omitted, the surviving cells' own median RMS stands in for it.
 
     The fit -- not Background2D's interpolated mesh -- is the product here.
     Once the mask is dense, most cells are empty and photutils interpolates
@@ -722,13 +834,29 @@ def masked_background_estimate(data: np.ndarray, source_mask: np.ndarray,
     n_cells = int(valid.sum())
     n_cells_total = int(mesh.size)
 
-    cap = _order_cap_for(n_cells)
+    cap = _order_cap_for(n_cells, n_cells_total)
     if cap is None:
         return None, (f"only {n_cells} of {n_cells_total} mesh cells survived the "
                       f"source mask (minimum {SOURCEMASK_MIN_CELLS_CONSTANT})")
 
     cx, cy = _mesh_cell_centres(mesh.shape, box_size)
     cap = _geometry_supported_order(cx, cy, valid, cap)
+
+    # Plane-vs-quadric agreement. Computed whenever a quadric is on the table at
+    # all, because the number is worth reporting even when it does not change the
+    # decision -- a reader cannot otherwise tell a curved fit that follows real
+    # curvature from one that is extrapolating across the mask.
+    agreement = None
+    if cap >= 2:
+        sigma = (float(sky_sigma) if sky_sigma is not None
+                 and np.isfinite(sky_sigma) and sky_sigma > 0
+                 else float(np.median(rms_mesh[valid])))
+        agreement = plane_quadric_agreement(mesh, rms_mesh, box_size, (h, w),
+                                            valid, sigma)
+        if (agreement is not None and agreement["verdict"] == "diverge"
+                and SOURCEMASK_DEMOTE_ON_DIVERGENCE):
+            cap = 1
+            agreement["demoted"] = True
 
     fit = fit_background_surface(mesh, rms_mesh, box_size, (h, w), max_order=cap)
     if fit.get("insufficient_data"):
@@ -741,9 +869,14 @@ def masked_background_estimate(data: np.ndarray, source_mask: np.ndarray,
         "order_cap": cap,
         "coverage": coverage,
         "rms_median": float(np.median(rms_mesh[valid])),
+        # The full-resolution RMS map from this same masked pass. photutils has
+        # already computed it; returning it is what lets a caller adopt the masked
+        # noise floor rather than only the masked background level.
+        "rms_map": np.asarray(bkg.background_rms, dtype=np.float32),
         "n_pixels_mesh": np.asarray(bkg.n_pixels_mesh).copy(),
         "cell_unmasked_fraction": cell_frac,
         "mesh_valid": valid,
+        "agreement": agreement,
     }, None
 
 
@@ -843,7 +976,8 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
                                   user_exclusion=user_mask)
         # --- Stage 4 ---
         payload, reason = masked_background_estimate(
-            data, smask.mask, box_size, exclude_percentile=exclude_percentile)
+            data, smask.mask, box_size, exclude_percentile=exclude_percentile,
+            sky_sigma=sky_sigma)
         if payload is None:
             break
         surface = np.asarray(evaluate_surface_at(payload["fit"], xx, yy),
@@ -871,4 +1005,6 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
         fallback_reason=None,
         source_mask=smask,
         scaffold=scaffold,
+        rms_map=payload.get("rms_map"),
+        agreement=payload.get("agreement"),
     )

@@ -4,9 +4,15 @@ accept/reject mask.
 Background2D itself never exposes which raw pixels within each mesh cell
 survived its internal SigmaClip -- only the resulting per-cell scalar
 background/RMS values (background_mesh/background_rms_mesh). This module
-re-runs the identical clip (same sigma/maxiters, same box_size cells) purely
-to recover that mask, for the Section 3e "which pixels count as background"
-diagnostic. See CLAUDE.md's background-diagnostics notes.
+re-runs the identical clip (same sigma/maxiters, same box_size cells, and --
+since Section 3e adopted the source-masked estimate -- the same source mask)
+purely to recover that mask, for the Section 3e "which pixels count as
+background" diagnostic. See CLAUDE.md's background-diagnostics notes.
+
+"Identical" is load-bearing and is maintained by name-sharing every parameter
+with the real call, not by duplicating literals: sigma/maxiters come from
+core.astro_image, and the mask is passed in by the caller that handed the same
+array to Background2D.
 """
 from __future__ import annotations
 
@@ -18,7 +24,8 @@ from core.astro_image import BACKGROUND_SIGCLIP_MAXITERS, BACKGROUND_SIGCLIP_SIG
 
 def classify_background_pixels(data: np.ndarray, box_size: int,
                                 sigma: float = BACKGROUND_SIGCLIP_SIGMA,
-                                maxiters: int = BACKGROUND_SIGCLIP_MAXITERS) -> np.ndarray:
+                                maxiters: int = BACKGROUND_SIGCLIP_MAXITERS,
+                                mask: np.ndarray | None = None) -> np.ndarray:
     """Bool array, same shape as `data`. True = kept as background by the
     same per-cell sigma-clip Background2D runs internally on raw pixel
     values (before any background subtraction).
@@ -27,6 +34,14 @@ def classify_background_pixels(data: np.ndarray, box_size: int,
     bottom/right edge if the dimensions aren't evenly divisible -- a
     documented approximation of Background2D's own internal edge handling,
     acceptable for a diagnostic pixel classification.
+
+    `mask` is the source/exclusion mask handed to Background2D itself (True =
+    excluded). Those pixels are withheld from the clip rather than merely marked
+    afterwards, because leaving them in would let the very structure being
+    excluded set the clip's own centre and scale -- the result would no longer
+    describe the clip that actually ran. They come back False, so a caller
+    wanting to distinguish "the clip rejected this" from "the mask excluded it"
+    subtracts the mask it already holds.
 
     The uniform-size interior cells are clipped in one vectorized call
     (reshaped into (n_cells, box_size**2), SigmaClip's own axis=1 per-row
@@ -39,12 +54,23 @@ def classify_background_pixels(data: np.ndarray, box_size: int,
     n_cols_full = w // b
     clip = SigmaClip(sigma=sigma, maxiters=maxiters)
     kept = np.zeros((h, w), dtype=bool)
+    excluded = None if mask is None else np.asarray(mask, dtype=bool)
+    if excluded is not None and excluded.shape[:2] != (h, w):
+        raise ValueError(f"mask shape {excluded.shape[:2]} does not match "
+                         f"data shape {(h, w)}")
+
+    def _cells(arr, rows, cols):
+        return (arr.reshape(rows, b, cols, b)
+                   .transpose(0, 2, 1, 3)
+                   .reshape(rows * cols, b * b))
 
     if n_rows_full > 0 and n_cols_full > 0:
         core = data[:n_rows_full * b, :n_cols_full * b]
-        cells = (core.reshape(n_rows_full, b, n_cols_full, b)
-                     .transpose(0, 2, 1, 3)
-                     .reshape(n_rows_full * n_cols_full, b * b))
+        cells = _cells(core, n_rows_full, n_cols_full)
+        if excluded is not None:
+            cells = np.ma.masked_array(
+                cells, mask=_cells(excluded[:n_rows_full * b, :n_cols_full * b],
+                                   n_rows_full, n_cols_full))
         clipped = clip(cells, axis=1, masked=True)
         # nomask (scalar False) when nothing was clipped anywhere -- must use
         # getmaskarray, not .mask directly, or a boolean-indexed assignment
@@ -66,6 +92,9 @@ def classify_background_pixels(data: np.ndarray, box_size: int,
             if not (row_ragged or col_ragged):
                 continue   # already handled by the vectorized core above
             cell = data[r0:r1, c0:c1].ravel()
+            if excluded is not None:
+                cell = np.ma.masked_array(
+                    cell, mask=excluded[r0:r1, c0:c1].ravel())
             clipped_cell = clip(cell, masked=True)
             cell_mask = np.ma.getmaskarray(clipped_cell)
             kept[r0:r1, c0:c1] = (~cell_mask).reshape(r1 - r0, c1 - c0)

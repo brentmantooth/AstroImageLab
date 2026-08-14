@@ -24,8 +24,11 @@ from analysis.source_mask import (MaskedBackgroundResult, SourceMaskResult,
                                   _order_cap_for, _smoothed_sigma,
                                   build_source_mask, fit_sky_scaffold,
                                   masked_background_estimate,
+                                  plane_quadric_agreement,
                                   source_masked_background)
-from core.models import (SOURCEMASK_MIN_CELLS_CONSTANT, SOURCEMASK_MIN_CELLS_PLANE,
+from core.models import (SOURCEMASK_MAX_EXTRAPOLATION_RATIO,
+                         SOURCEMASK_MAX_MODEL_DIVERGENCE_SIGMA,
+                         SOURCEMASK_MIN_CELLS_CONSTANT, SOURCEMASK_MIN_CELLS_PLANE,
                          SOURCEMASK_MIN_CELLS_QUADRIC,
                          SOURCEMASK_MIN_SURFACE_BRIGHTNESS_SIGMA)
 from tests.bg_frames import (bounded_nebula_frame, gradient_nebula_frame,
@@ -82,6 +85,13 @@ def heavy():
 @pytest.fixture(scope="module")
 def gradient_heavy():
     return _run(gradient_nebula_frame())
+
+
+@pytest.fixture(scope="module")
+def vignetted():
+    """The frame whose curvature is real — the counter-example every
+    curvature guard has to survive."""
+    return _run(vignetted_frame())
 
 
 class TestBackgroundRecoveryAccuracy:
@@ -423,6 +433,33 @@ class TestOrderCapAndFallback:
     def test_order_cap_ladder(self, n_cells, expected):
         assert _order_cap_for(n_cells) is expected
 
+    def test_quadric_gate_is_relative_to_mesh_size(self):
+        """The same surviving-cell count must mean different things on different
+        image scales.
+
+        SOURCEMASK_MIN_CELLS_QUADRIC alone is 54.7% of a 64-cell mesh but 1.2% of
+        a 2925-cell one, so an absolute-only gate evaporates on exactly the large
+        frames where a quadric has the most masked area to extrapolate across.
+        """
+        n = SOURCEMASK_MIN_CELLS_QUADRIC
+        assert _order_cap_for(n, 64) == 2            # over half a small mesh: fine
+        assert _order_cap_for(n, 2925) == 1          # a rounding error of a big one
+        # 492 of 2925 is the real-data case that motivated this.
+        assert _order_cap_for(492, 2925) == 1
+        assert _order_cap_for(1500, 2925) == 2
+
+    def test_absolute_floor_still_binds_on_a_small_mesh(self):
+        """The fraction must never *loosen* the gate: a quarter of a 64-cell mesh
+        is 16 cells, and 16 cells cannot honestly carry six quadric terms."""
+        assert _order_cap_for(20, 64) == 1
+        assert _order_cap_for(SOURCEMASK_MIN_CELLS_QUADRIC - 1, 64) == 1
+
+    def test_default_total_reproduces_the_absolute_only_rule(self):
+        """n_cells_total defaults to 0 so every single-argument call, including
+        the ones in this file, keeps its pre-existing meaning."""
+        for n in (3, 4, 8, 20, 34, 35, 100):
+            assert _order_cap_for(n) == _order_cap_for(n, 0)
+
     def test_selected_order_never_exceeds_the_cap(self, heavy, gradient_heavy):
         for result, _, _ in (heavy, gradient_heavy):
             assert result.fit["selected_order"] <= result.order_cap
@@ -461,6 +498,65 @@ class TestOrderCapAndFallback:
         if not result.ok:
             assert result.surface is None
             assert result.fallback_reason
+
+
+class TestPlaneQuadricAgreement:
+    """Is a fitted quadric following real curvature, or extrapolating across the mask?"""
+
+    def test_reported_whenever_a_quadric_was_on_the_table(self, vignetted):
+        result, _, _ = vignetted
+        assert result.order_cap == 2
+        ag = result.agreement
+        assert ag is not None
+        assert ag["max_divergence_adu"] >= 0
+        assert ag["max_divergence_measured_adu"] >= 0
+        assert ag["verdict"] in ("agree", "diverge")
+
+    def test_real_curvature_survives_despite_a_large_divergence(self, vignetted):
+        """The load-bearing case. A vignetted frame's plane genuinely cannot fit,
+        so the two surfaces differ hugely — several sky sigma — and the quadric is
+        nonetheless correct. Divergence alone would demote it and make the
+        estimate worse; the ratio is what keeps it.
+        """
+        ag = vignetted[0].agreement
+        assert ag["max_divergence_sigma"] > SOURCEMASK_MAX_MODEL_DIVERGENCE_SIGMA
+        assert ag["extrapolation_ratio"] <= SOURCEMASK_MAX_EXTRAPOLATION_RATIO
+        assert ag["verdict"] == "agree"
+        assert ag["demoted"] is False
+        assert vignetted[0].fit["selected_order"] == 2
+
+    def test_absent_when_no_quadric_was_considered(self, heavy):
+        """The common healthy case: the cell-count gate already ruled curvature
+        out, so there is nothing to second-guess and nothing to report."""
+        result, _, _ = heavy
+        assert result.order_cap < 2
+        assert result.agreement is None
+
+    def test_divergence_is_measured_over_the_whole_frame_not_just_the_cells(self):
+        """The frame maximum can only ever be >= the maximum at the cells, since
+        the cells are a subset of the frame. If that ever inverted, the ratio
+        would read below 1 and the extrapolation test would be inert.
+        """
+        data, _, _ = gradient_nebula_frame()
+        base = _unmasked_background(data)
+        mesh = np.asarray(base.background_mesh, dtype=np.float64)
+        rms = np.asarray(base.background_rms_mesh, dtype=np.float64)
+        valid = np.isfinite(mesh) & np.isfinite(rms) & (rms > 0)
+        ag = plane_quadric_agreement(mesh, rms, 64, data.shape[:2], valid,
+                                     float(np.median(rms)))
+        assert ag is not None
+        assert ag["max_divergence_adu"] >= ag["max_divergence_measured_adu"]
+        assert ag["extrapolation_ratio"] >= 1.0
+
+    def test_returns_none_when_the_cells_cannot_support_both_fits(self):
+        data, _, _ = star_only_frame()
+        base = _unmasked_background(data)
+        mesh = np.asarray(base.background_mesh, dtype=np.float64)
+        rms = np.asarray(base.background_rms_mesh, dtype=np.float64)
+        valid = np.zeros(mesh.shape, dtype=bool)
+        valid.flat[:2] = True       # two cells: not even a plane
+        assert plane_quadric_agreement(mesh, rms, 64, data.shape[:2], valid,
+                                       float(np.median(rms))) is None
 
 
 class TestOrchestrator:

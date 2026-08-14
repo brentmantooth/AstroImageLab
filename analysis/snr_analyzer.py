@@ -82,9 +82,12 @@ class SNRAnalyzer:
                          if snr_global > 0 else None)
 
         # --- Sky background level ----------------------------------------
-        # Median of the 2D background model in ADU; lower = darker sky.
-        background_median = (float(bn.median(image.background.background))
-                             if image.background is not None else None)
+        # Median of the 2D background model in ADU; lower = darker sky. Reads the
+        # adopted model, not background.background -- the latter is always the
+        # unmasked phase-1 estimate, so it would report a sky level that nothing
+        # else in this result was actually computed against.
+        background_median = (float(bn.median(image.background_model))
+                             if image.background_model is not None else None)
 
         # --- Camera gain from FITS header --------------------------------
         # See core.astro_image._resolve_gain for the EGAIN-priority rationale

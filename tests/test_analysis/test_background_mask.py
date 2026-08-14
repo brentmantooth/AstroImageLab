@@ -71,3 +71,58 @@ class TestVectorizedMatchesNaiveLoop:
                 naive[r0:r1, c0:c1] = (~cell_mask).reshape(r1 - r0, c1 - c0)
 
         np.testing.assert_array_equal(vectorized, naive)
+
+
+class TestSourceMask:
+    """Section 3e now hands in the same source mask Background2D itself was given."""
+
+    def test_masked_pixels_are_never_kept(self):
+        rng = np.random.default_rng(4)
+        data = rng.normal(100.0, 1.0, size=(256, 256)).astype(np.float32)
+        mask = np.zeros(data.shape, dtype=bool)
+        mask[100:150, 100:150] = True
+        kept = classify_background_pixels(data, box_size=64, mask=mask)
+        assert not kept[mask].any()
+
+    def test_mask_is_withheld_from_the_clip_not_just_relabelled(self):
+        """The point of passing the mask through rather than subtracting it
+        afterwards: a bright region left in the cell sets the clip's own centre
+        and scale, so the surviving pixels' verdicts differ.
+        """
+        rng = np.random.default_rng(5)
+        data = rng.normal(100.0, 1.0, size=(128, 128)).astype(np.float32)
+        # Half of one cell is a strong positive excursion. Clipped with it in
+        # place the cell's centre is dragged up and its scale inflated.
+        region = np.zeros(data.shape, dtype=bool)
+        region[0:64, 0:32] = True
+        data[region] += 30.0
+
+        without = classify_background_pixels(data, box_size=64)
+        with_mask = classify_background_pixels(data, box_size=64, mask=region)
+        outside = ~region
+        assert not np.array_equal(without[outside], with_mask[outside])
+
+    def test_no_mask_is_identical_to_omitting_it(self):
+        rng = np.random.default_rng(6)
+        data = rng.normal(50.0, 2.0, size=(192, 192)).astype(np.float32)
+        data[20:30, 20:30] += 300.0
+        np.testing.assert_array_equal(
+            classify_background_pixels(data, box_size=64),
+            classify_background_pixels(data, box_size=64,
+                                       mask=np.zeros(data.shape, dtype=bool)))
+
+    def test_mask_shape_mismatch_raises(self):
+        data = np.zeros((128, 128), dtype=np.float32)
+        with pytest.raises(ValueError):
+            classify_background_pixels(data, box_size=64,
+                                       mask=np.zeros((64, 64), dtype=bool))
+
+    def test_ragged_edge_cells_honour_the_mask(self):
+        """The ragged bottom/right cells take a separate code path from the
+        vectorized interior, so the mask has to be applied on both."""
+        rng = np.random.default_rng(7)
+        data = rng.normal(10.0, 1.0, size=(150, 150)).astype(np.float32)
+        mask = np.zeros(data.shape, dtype=bool)
+        mask[130:150, 130:150] = True       # entirely inside the ragged corner
+        kept = classify_background_pixels(data, box_size=64, mask=mask)
+        assert not kept[130:150, 130:150].any()

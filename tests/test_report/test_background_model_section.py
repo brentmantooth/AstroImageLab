@@ -171,7 +171,29 @@ class TestSectionSnrBackgroundBlocks:
         assert "<h3>3f. Background Gradient Analysis</h3>" in section_html_both
 
     def test_background_model_caption_present(self, section_html_both):
-        assert "Interpolated background model" in section_html_both
+        # Source masking is on by default, so 3e presents the fitted surface
+        # rather than photutils' interpolated mesh.
+        assert "fitted to the mesh cells that survived the source mask" in section_html_both
+
+    def test_states_which_model_is_in_use(self, section_html_both):
+        """3e's numbers change materially with the flag, so the report must say
+        which estimate produced them rather than leaving it to be inferred."""
+        assert "Model in use: <strong>source-masked</strong>" in section_html_both
+
+    def test_warns_that_global_snr_is_not_comparable_across_the_setting(
+            self, section_html_both):
+        """The most confusing consequence of adopting the masked background, and
+        the one most likely to be read as a catastrophe.
+
+        Global SNR is median(pixels >3 sigma)/sigma. Once the background stops
+        absorbing the nebula, the nebula joins that population — measured on a
+        gradient+nebula frame the qualifying pixels went 1.5% -> 11.4% and the
+        median fell from 30.3 to 3.7, while recovered signal rose from 46% to 84%
+        of truth. Without this paragraph a user flipping the checkbox sees the
+        headline number drop 8x and concludes the feature is broken.
+        """
+        assert "Expect the global SNR number to move" in section_html_both
+        assert "never across this setting" in section_html_both
 
     def test_pixel_classification_caption_present(self, section_html_both):
         assert "sigma-clip" in section_html_both
@@ -237,6 +259,11 @@ class TestWriteInspectorFileBackgroundEntries:
         assert opts == {
             "Background A": "bg_model_a", "RMS A": "bg_rms_a",
             "Background B": "bg_model_b", "RMS B": "bg_rms_b",
+            # Present only because source masking was applied — the plain estimate
+            # that would otherwise have been used, so the wipe has something to
+            # compare the adopted model against.
+            "Background A (unmasked)": "bg_model_unmasked_a",
+            "Background B (unmasked)": "bg_model_unmasked_b",
         }
 
     def test_fitted_surface_aligned_with_background_model(self, npz_and_catalog):
@@ -294,9 +321,19 @@ class TestSectionSnrSourceMaskBlock:
         assert "Detection thresholds" in section_html
         assert "Threshold (ADU, smoothed)" in section_html
 
-    def test_states_it_is_diagnostic_only(self, section_html):
-        """The section must not imply it changed any reported SNR."""
-        assert "diagnostic only" in section_html.lower()
+    def test_states_that_this_is_the_background_in_use(self, section_html):
+        """The inverse of the old claim, and the reason the old one had to go:
+        this estimate now feeds every SNR above it, so saying otherwise would be
+        false rather than merely stale."""
+        assert "This is the background in use" in section_html
+        assert "diagnostic only" not in section_html.lower()
+
+    def test_plane_quadric_agreement_is_reported(self, section_html):
+        """Whether a fitted quadric is extrapolating cannot be judged from the
+        cell count alone at every image scale, so the divergence is a number the
+        reader gets rather than a decision made silently."""
+        assert "Plane vs quadric — max divergence" in section_html
+        assert "of which beyond the measured cells" in section_html
 
     def test_methodology_box_present(self, section_html):
         assert "Understanding the source-masked check" in section_html
@@ -319,28 +356,44 @@ class TestSectionSnrSourceMaskBlock:
             AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, None)
         assert "<h3>3g. Source-Masked Background Check</h3>" in html
 
-    def test_3e_limitation_text_points_at_3g(self, section_html):
-        """Removing a documented limitation must update the text describing it."""
-        assert "see <strong>3g</strong> below" in section_html
+    def test_3e_points_at_3g_for_the_audit_trail(self, section_html):
+        """Removing a documented limitation must update the text describing it.
+
+        3e used to describe source masking as a limitation it did not address and
+        send the reader to 3g to see what it would be worth; now 3e *is* masked,
+        so the pointer has to be to the evidence rather than to the shortfall.
+        """
+        assert "see <strong>3g</strong> for the detection thresholds" in section_html
+        assert "Known limitation" not in section_html
 
 
 class TestSourceMaskFallbackReporting:
-    def test_fallback_reason_renders_as_a_warning(self, image_pair, monkeypatch):
-        """An aborted estimate must surface visibly, not vanish silently."""
-        import report.report_builder as rb
+    def test_fallback_reason_renders_as_a_warning(self, image_pair):
+        """An aborted estimate must surface visibly, not vanish silently.
+
+        Patched onto the image rather than onto report_builder's import of
+        source_masked_background: estimate_background() stores its result there
+        even when it failed, precisely so a fallback stays reportable, and the
+        report reads that attribute rather than recomputing.
+        """
         from analysis.source_mask import MaskedBackgroundResult
 
-        def _fake(*_args, **_kwargs):
-            return MaskedBackgroundResult(
-                surface=None, rms_median=None, background_median=None, fit=None,
-                n_cells=0, n_cells_total=64, order_cap=None, coverage=0.99,
-                fallback_reason="source mask covers 99.0% of the frame",
-                source_mask=None, scaffold=None)
+        failed = MaskedBackgroundResult(
+            surface=None, rms_median=None, background_median=None, fit=None,
+            n_cells=0, n_cells_total=64, order_cap=None, coverage=0.99,
+            fallback_reason="source mask covers 99.0% of the frame",
+            source_mask=None, scaffold=None)
 
-        monkeypatch.setattr(rb, "source_masked_background", _fake)
         img_a, img_b = image_pair
-        html = ReportBuilder()._section_snr(
-            AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+        saved = [img.source_mask_result for img in (img_a, img_b)]
+        try:
+            for img in (img_a, img_b):
+                img.source_mask_result = failed
+            html = ReportBuilder()._section_snr(
+                AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
+        finally:
+            for img, prev in zip((img_a, img_b), saved):
+                img.source_mask_result = prev
         assert "<h3>3g. Source-Masked Background Check</h3>" in html
         assert "source mask covers 99.0% of the frame" in html
         assert "warn-box" in html
@@ -375,10 +428,15 @@ class TestWriteInspectorFileSourceMaskEntries:
         assert npz["bgmask_delta_a"].shape == npz["bg_model_a"].shape
         assert npz["bgmask_mask_a"].shape == npz["bg_model_a"].shape
 
-    def test_delta_equals_masked_minus_current(self, npz_and_catalog):
+    def test_delta_equals_masked_minus_unmasked(self, npz_and_catalog):
+        """Against the unmasked model, not bg_model_a. Once the masked estimate
+        is adopted the two are the same array, so a delta computed against
+        bg_model_a would be identically zero and the panel useless."""
         npz, _ = npz_and_catalog
         assert np.allclose(npz["bgmask_delta_a"],
-                           npz["bgmask_surface_a"] - npz["bg_model_a"], atol=1e-4)
+                           npz["bgmask_surface_a"] - npz["bg_model_unmasked_a"],
+                           atol=1e-4)
+        assert not np.allclose(npz["bgmask_delta_a"], 0.0)
 
     def test_catalog_entry_present_with_concept(self, npz_and_catalog):
         _, catalog = npz_and_catalog
@@ -386,10 +444,10 @@ class TestWriteInspectorFileSourceMaskEntries:
         assert "Source-masked background" in entries
         entry = entries["Source-masked background"]
         assert entry.get("concept")
-        assert "diagnostic only" in entry["concept"].lower()
+        assert "is</b> the background used" in entry["concept"]
         assert set(entry["options"]) == {
-            "Masked background A", "Change vs current A", "Source mask A",
-            "Masked background B", "Change vs current B", "Source mask B"}
+            "Masked background A", "Change vs unmasked A", "Source mask A",
+            "Masked background B", "Change vs unmasked B", "Source mask B"}
 
     def test_mask_is_binary(self, npz_and_catalog):
         npz, _ = npz_and_catalog
@@ -405,17 +463,30 @@ class TestSectionSnrUserExclusionRegions:
     @pytest.fixture(scope="class")
     @classmethod
     def html_with_regions(cls, image_pair):
+        """Rebuilds the background with the regions attached, which is the only
+        transport that works now that the masked estimate IS the background.
+
+        AnalysisThread does exactly this, and specifically does it *before* the
+        pre-pass: attaching regions to an image whose background already exists
+        cannot retroactively change it, so set_background_exclusion_mask()
+        invalidates rather than letting the report show a mask the subtracted
+        model never saw.
+        """
+        from analysis.inspector_regions import exclusion_mask
         img_a, img_b = image_pair
-        # The transport the GUI uses: AnalysisThread assigns onto the images,
-        # because the settings dict never reaches ReportBuilder.
         for img in (img_a, img_b):
             img.bg_exclusion_regions = cls.REGION
+            img.set_background_exclusion_mask(
+                exclusion_mask(img.data.shape[:2], cls.REGION))
+            img.estimate_background()
         try:
             yield ReportBuilder()._section_snr(
                 AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
         finally:
             for img in (img_a, img_b):
                 img.bg_exclusion_regions = []
+                img.set_background_exclusion_mask(None)
+                img.estimate_background()
 
     def test_regions_are_reported_as_the_users(self, html_with_regions):
         assert "of which you excluded by hand" in html_with_regions
@@ -429,11 +500,18 @@ class TestSectionSnrUserExclusionRegions:
         # Sets its own state rather than relying on the sibling fixture's
         # teardown: `image_pair` is class-scoped and shared, so a generator
         # fixture that mutates it has not torn down yet when this test runs.
+        #
+        # Clearing bg_exclusion_regions is no longer enough on its own — the
+        # sibling fixture rebuilds the *background* with the regions applied, and
+        # the report reads the mask off that result. The background has to be
+        # rebuilt too, which is exactly the invalidation contract.
         img_a, img_b = image_pair
         saved = [getattr(i, "bg_exclusion_regions", []) for i in (img_a, img_b)]
         try:
             for img in (img_a, img_b):
                 img.bg_exclusion_regions = []
+                img.set_background_exclusion_mask(None)
+                img.estimate_background()
             html = ReportBuilder()._section_snr(
                 AnalysisResult(label="A"), AnalysisResult(label="B"), img_a, img_b)
             assert "<h3>3g. Source-Masked Background Check</h3>" in html

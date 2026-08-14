@@ -36,7 +36,8 @@ from core.models import (AnalysisResult, HALO_FIT_RADIUS_PX, XS_LINE_ALPHA, GLAS
                           REPORT_OUTPUT_SUBFOLDER, REPORT_OUTPUT_SINGLE_FILE)
 from core.astro_image import AstroImage, decimation_step
 from core.inspector_catalog import panel_display_name, panel_concept
-from analysis.background_fit import compare_fits, evaluate_surface, fit_background_surface
+from analysis.background_fit import (compare_fits, evaluate_surface,
+                                     evaluate_surface_at, fit_background_surface)
 from analysis.background_mask import classify_background_pixels
 from analysis.inspector_regions import exclusion_mask
 from analysis.source_mask import source_masked_background
@@ -68,29 +69,87 @@ def _sourcemask_fwhm(result: AnalysisResult, fallback: float = 4.0) -> float:
 
 
 def _sourcemask_for(cache: dict, img: AstroImage, fwhm_px: float = 4.0):
-    """Section 3g's estimate for one image, computed at most once per report.
+    """The source-masked estimate for one image, computed at most once per report.
 
-    Section 3g's HTML block and _write_inspector_file both need the same result,
-    and the four-scale detection is the most expensive thing in either. Threading
-    the computed value through a per-build cache rather than calling twice —
-    the same reasoning that removed the duplicated _psf_retention_table call.
-    Keyed by id() because AstroImage is not hashable and one build only ever
+    Normally this is already done: `estimate_background()` runs the masked pass
+    and keeps the result on the image, because the report's background model *is*
+    that result. Reading it back rather than recomputing is what guarantees
+    Section 3g audits the same numbers Section 3e presents.
+
+    The fallback path recomputes, for an AstroImage built outside the GUI (tests,
+    tools) or one whose source-masking was switched off. Section 3g's HTML block
+    and _write_inspector_file both need the same result, and the four-scale
+    detection is the most expensive thing in either, so that path is cached —
+    keyed by id() because AstroImage is not hashable and one build only ever
     holds a handful of live image objects.
     """
     if img is None or img.background is None:
         return None
+    existing = getattr(img, "source_mask_result", None)
+    if existing is not None:
+        return existing
     key = id(img)
     if key not in cache:
-        # getattr rather than attribute access: an AstroImage built outside the
-        # GUI (tests, tools) never has regions assigned.
-        regions = getattr(img, "bg_exclusion_regions", None)
-        user = exclusion_mask(img.data.shape[:2], regions) if regions else None
+        # The rasterised mask on the image is the single source of truth, since
+        # that is what estimate_background() would have been given. Rasterising
+        # the region dicts is only the fallback, for an AstroImage built outside
+        # the GUI that set regions but never called set_background_exclusion_mask.
+        user = getattr(img, "bg_exclusion_mask", None)
+        if user is None:
+            regions = getattr(img, "bg_exclusion_regions", None)
+            user = exclusion_mask(img.data.shape[:2], regions) if regions else None
         cache[key] = source_masked_background(
             img.data, box_size=int(img.background.box_size[0]), fwhm_px=fwhm_px,
             user_exclusion=user if (user is not None and user.any()) else None,
             mesh=img.background.background_mesh,
             rms_mesh=img.background.background_rms_mesh)
     return cache[key]
+
+
+def _agreement_divergence_str(res) -> str:
+    """The plane-vs-quadric divergence cell for Section 3g's table.
+
+    Reads "—" whenever no quadric was ever on the table, which is the common,
+    healthy case: the cell-count gate already ruled curvature out, so there is
+    nothing to second-guess.
+    """
+    ag = getattr(res, "agreement", None)
+    if not ag:
+        return "not applicable (no quadric considered)"
+    adu = _val(ag.get("max_divergence_adu"), ".3g")
+    sig = ag.get("max_divergence_sigma")
+    sig_txt = f" ({sig:.2f}&nbsp;&sigma;<sub>sky</sub>)" if sig is not None else ""
+    return f"{adu} ADU{sig_txt}"
+
+
+def _agreement_ratio_str(res) -> str:
+    """Whole-frame divergence as a multiple of the divergence at measured cells,
+    plus the verdict that follows from it."""
+    ag = getattr(res, "agreement", None)
+    if not ag:
+        return "—"
+    ratio = ag.get("extrapolation_ratio")
+    ratio_txt = "—" if ratio is None else f"{ratio:.2f}&times;"
+    if ag.get("demoted"):
+        return f"{ratio_txt} — extrapolating, so the plane was used instead"
+    if ag.get("verdict") == "diverge":
+        return f"{ratio_txt} — extrapolating (demotion disabled)"
+    return f"{ratio_txt} — agree, curvature is supported by the data"
+
+
+def _adopted_sourcemask(img: AstroImage):
+    """The source-masked result only when it is the background actually in use.
+
+    Distinct from _sourcemask_for, which will happily compute a *diagnostic*
+    estimate for an image whose background was left unmasked. Section 3e must
+    describe what was really subtracted, so it asks this question instead: the
+    result has to be attached to the image by estimate_background() (rather than
+    computed here) and to have succeeded.
+    """
+    if img is None or not getattr(img, "use_source_masked_background", False):
+        return None
+    res = getattr(img, "source_mask_result", None)
+    return res if (res is not None and res.ok) else None
 
 
 def _sourcemask_cell_fraction(img: AstroImage, res) -> np.ndarray | None:
@@ -1481,6 +1540,9 @@ class ReportBuilder:
             _add("bg_rms_a", image_a.background_display(kind="rms"))
             bg_opts["Background A"] = "bg_model_a"
             bg_opts["RMS A"] = "bg_rms_a"
+            if _adopted_sourcemask(image_a) is not None:
+                _add("bg_model_unmasked_a", image_a.background_display(kind="unmasked_model"))
+                bg_opts["Background A (unmasked)"] = "bg_model_unmasked_a"
 
             fit_a = fit_background_surface(
                 image_a.background.background_mesh, image_a.background.background_rms_mesh,
@@ -1498,6 +1560,9 @@ class ReportBuilder:
             _add("bg_rms_b", image_b.background_display(kind="rms"))
             bg_opts["Background B"] = "bg_model_b"
             bg_opts["RMS B"] = "bg_rms_b"
+            if _adopted_sourcemask(image_b) is not None:
+                _add("bg_model_unmasked_b", image_b.background_display(kind="unmasked_model"))
+                bg_opts["Background B (unmasked)"] = "bg_model_unmasked_b"
 
             fit_b = fit_background_surface(
                 image_b.background.background_mesh, image_b.background.background_rms_mesh,
@@ -1523,28 +1588,34 @@ class ReportBuilder:
                 continue
             step = decimation_step(*img.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
             _add(f"bgmask_surface_{suffix}", sm.surface[::step, ::step])
+            # Against the unmasked model: once the masked estimate is adopted,
+            # background_display("model") IS this surface and the delta would be
+            # identically zero.
             _add(f"bgmask_delta_{suffix}",
-                 (sm.surface[::step, ::step] - img.background_display(kind="model")).astype(np.float32))
+                 (sm.surface[::step, ::step]
+                  - img.background_display(kind="unmasked_model")).astype(np.float32))
             _add(f"bgmask_mask_{suffix}", sm.source_mask.mask[::step, ::step].astype(np.uint8))
             smask_opts[f"Masked background {label}"] = f"bgmask_surface_{suffix}"
-            smask_opts[f"Change vs current {label}"] = f"bgmask_delta_{suffix}"
+            smask_opts[f"Change vs unmasked {label}"] = f"bgmask_delta_{suffix}"
             smask_opts[f"Source mask {label}"] = f"bgmask_mask_{suffix}"
 
         if bg_opts:
             _add_options_entry(
                 "Background Model", "Background / RMS", bg_opts,
-                concept="Background model / RMS from photutils <code>Background2D</code> "
-                        "(64&times;64 px grid, sigma-clipped per cell, then interpolated) "
-                        "&mdash; the same background subtracted throughout this report and "
-                        "the noise floor behind every SNR map. <b>Background</b> = smooth "
-                        "sky level in ADU (gradients indicate light pollution, vignetting, "
-                        "or flat-field residuals). <b>RMS</b> = per-pixel noise floor "
-                        "(elevated at edges/corners typically indicates amp glow or uneven "
-                        "stacking coverage). No source segmentation mask is used here, only "
-                        "per-cell 3&sigma; clipping, so extended nebulosity can still bias "
-                        "a cell's estimate &mdash; report section 3g re-estimates the same "
-                        "background with the sources masked out and quantifies how much "
-                        "that bias is worth in this field.")
+                concept="The background subtracted throughout this report and the noise "
+                        "floor behind every SNR map. The image is split into a 64&times;64 "
+                        "px grid and each cell sigma-clipped independently "
+                        "(photutils <code>Background2D</code>); where source masking is "
+                        "enabled, stars and extended nebulosity are excluded first and the "
+                        "level is a low-order surface fitted to the surviving cells. "
+                        "<b>Background</b> = smooth sky level in ADU (gradients indicate "
+                        "light pollution, vignetting, or flat-field residuals). <b>RMS</b> "
+                        "= per-pixel noise floor (elevated at edges/corners typically "
+                        "indicates amp glow or uneven stacking coverage). "
+                        "<b>Background (unmasked)</b>, present only when masking was "
+                        "applied, is the plain per-cell estimate that would otherwise have "
+                        "been used &mdash; wipe between the two to see what the mask "
+                        "changed. Report section 3g carries the full audit trail.")
         if surf_opts:
             _add_options_entry(
                 "Background Model", "Fitted surface / Residual", surf_opts,
@@ -1563,12 +1634,14 @@ class ReportBuilder:
                         "detected at four scales, masked out, and a low-order surface is "
                         "fitted to the mesh cells that remain genuinely measured. "
                         "<b>Masked background</b> = the re-estimated sky level in ADU. "
-                        "<b>Change vs current</b> = that estimate minus the 3e model; "
-                        "negative values are where nebulosity was inflating the sky "
-                        "estimate and therefore suppressing every reported SNR. "
-                        "<b>Source mask</b> = 1 where a pixel was excluded. This is "
-                        "<b>diagnostic only</b> &mdash; the background actually subtracted "
-                        "everywhere else in this report is still the unmasked 3e model.")
+                        "<b>Change vs unmasked</b> = that estimate minus the plain "
+                        "per-cell one; negative values are where nebulosity was inflating "
+                        "the sky estimate and therefore suppressing every reported SNR. "
+                        "<b>Source mask</b> = 1 where a pixel was excluded. When "
+                        "&ldquo;Source-masked background&rdquo; is enabled this estimate "
+                        "<b>is</b> the background used throughout the report; with it "
+                        "disabled the same panels are shown as a diagnostic preview of "
+                        "what enabling it would change.")
 
         # ── Edge Detection ────────────────────────────────────────────────────
         ea_m = result_a.edge_metrics or {}
@@ -5387,9 +5460,15 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
 
     def _plot_background_map_pair(self, disp_a, label_a, disp_b, label_b,
                                    vmin: float, vmax: float, cbar_label: str,
-                                   title_prefix: str, cmap: str = "plasma") -> plt.Figure | None:
+                                   title_prefix: str, cmap: str = "plasma",
+                                   axis_unit: str = "px") -> plt.Figure | None:
         """Shared 1xN renderer for a background-derived heatmap (model, RMS,
-        fitted surface, or residual), one panel per loaded image."""
+        fitted surface, or residual), one panel per loaded image.
+
+        `axis_unit` names what one array element spans -- native pixels for the
+        stride-decimated full-resolution maps, mesh cells for anything plotted at
+        mesh resolution.
+        """
         panels = [(d, lbl) for d, lbl in [(disp_a, label_a), (disp_b, label_b)]
                   if d is not None]
         if not panels:
@@ -5402,23 +5481,42 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                            interpolation="nearest")
             fig.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
             ax.set_title(f"{title_prefix} — {lbl}", fontsize=10)
-            ax.set_xlabel("x (px)")
-            ax.set_ylabel("y (px)")
+            ax.set_xlabel(f"x ({axis_unit})")
+            ax.set_ylabel(f"y ({axis_unit})")
         fig.tight_layout()
         return fig
 
     def _plot_bg_pixel_histogram(self, bgsub_a, mask_bg_a, label_a,
-                                  bgsub_b, mask_bg_b, label_b) -> plt.Figure | None:
+                                  bgsub_b, mask_bg_b, label_b,
+                                  src_a=None, src_b=None) -> plt.Figure | None:
         """Background-kept vs. excluded pixel value distributions
         (background-subtracted ADU), one panel per image, overlaid, with a
-        shared bin range across panels for direct comparability."""
-        panels = [(bs, m, lbl) for bs, m, lbl in
-                  [(bgsub_a, mask_bg_a, label_a), (bgsub_b, mask_bg_b, label_b)]
+        shared bin range across panels for direct comparability.
+
+        `src_*` is the source mask handed to Background2D (True = excluded). When
+        present the excluded population is split in two, because the two
+        rejections answer different questions and land in different places on this
+        axis: the source mask removes whole structures before the clip ever runs,
+        while the per-cell clip removes the residual outliers inside what is left.
+        """
+        panels = [(bs, m, lbl, sm) for bs, m, lbl, sm in
+                  [(bgsub_a, mask_bg_a, label_a, src_a),
+                   (bgsub_b, mask_bg_b, label_b, src_b)]
                   if bs is not None and m is not None]
         if not panels:
             return None
-        kept_all = np.concatenate([bs[m][np.isfinite(bs[m])] for bs, m, _ in panels])
-        excluded_all = np.concatenate([bs[~m][np.isfinite(bs[~m])] for bs, m, _ in panels])
+
+        def _classes(bs, m, sm):
+            """(kept, clip-rejected, source-masked) value populations."""
+            masked = (np.zeros(m.shape, dtype=bool) if sm is None
+                      else sm[:m.shape[0], :m.shape[1]])
+            return bs[m], bs[~m & ~masked], bs[masked]
+
+        kept_all = np.concatenate([_classes(bs, m, sm)[0] for bs, m, _, sm in panels])
+        kept_all = kept_all[np.isfinite(kept_all)]
+        excluded_all = np.concatenate(
+            [v for bs, m, _, sm in panels for v in _classes(bs, m, sm)[1:]])
+        excluded_all = excluded_all[np.isfinite(excluded_all)]
         if kept_all.size == 0 and excluded_all.size == 0:
             return None
         # Range from each population's OWN percentiles, not just the pooled
@@ -5449,57 +5547,93 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
         fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
         if len(panels) == 1:
             axes = [axes]
-        for ax, (bs, m, lbl) in zip(axes, panels):
-            kept_vals = bs[m]
-            excluded_vals = bs[~m]
-            kept_vals = kept_vals[np.isfinite(kept_vals)]
-            excluded_vals = excluded_vals[np.isfinite(excluded_vals)]
-            # density=True divides by (bin_width * n_in_range) -- guard
-            # against an empty-or-entirely-out-of-range population (e.g. a
-            # near-perfectly-clean panel with no excluded outlier pixels at
-            # all) to avoid a spurious "invalid value in divide" warning.
-            if kept_vals.size > 0 and np.any((kept_vals >= lo) & (kept_vals <= hi)):
-                ax.hist(kept_vals, bins=bins, color="steelblue", alpha=0.6,
-                        label="Background (kept)", density=True)
-            if excluded_vals.size > 0 and np.any((excluded_vals >= lo) & (excluded_vals <= hi)):
-                ax.hist(excluded_vals, bins=bins, color="tomato", alpha=0.6,
-                        label="Excluded (outlier)", density=True)
+        for ax, (bs, m, lbl, sm) in zip(axes, panels):
+            kept_vals, clip_vals, src_vals = _classes(bs, m, sm)
+            series = [(kept_vals, "steelblue", "Background (kept)"),
+                      (clip_vals, "tomato", "Excluded — per-cell 3σ clip")]
+            if sm is not None:
+                series.append((src_vals, "darkorange", "Excluded — source mask"))
+            for vals, color, lab in series:
+                vals = vals[np.isfinite(vals)]
+                # density=True divides by (bin_width * n_in_range) -- guard
+                # against an empty-or-entirely-out-of-range population (e.g. a
+                # near-perfectly-clean panel with no excluded outlier pixels at
+                # all) to avoid a spurious "invalid value in divide" warning.
+                if vals.size > 0 and np.any((vals >= lo) & (vals <= hi)):
+                    ax.hist(vals, bins=bins, color=color, alpha=0.6,
+                            label=lab, density=True)
             ax.set_title(f"Pixel classification — {lbl}", fontsize=10)
             ax.set_xlabel("Background-subtracted value (ADU)")
             ax.set_ylabel("Density")
-            ax.set_xscale("symlog", linthresh=linthresh)
+            #ax.set_xscale("symlog", linthresh=linthresh)
             ax.legend(fontsize=8)
         fig.tight_layout()
         return fig
 
     def _plot_bg_pixel_overlay(self, disp_a, mask_bg_a, label_a,
                                 disp_b, mask_bg_b, label_b,
+                                src_a=None, src_b=None, usr_a=None, usr_b=None,
                                 alpha: float = 0.45) -> plt.Figure | None:
         """Translucent steelblue/tomato overlay (Section 8's established
         nebula/background color convention) showing which pixels were kept
         as background vs. excluded, on the stride-decimated display image.
-        disp/mask are expected pre-decimated to the same pixel grid."""
-        panels = [(d, m, lbl) for d, m, lbl in
-                  [(disp_a, mask_bg_a, label_a), (disp_b, mask_bg_b, label_b)]
+        disp/mask are expected pre-decimated to the same pixel grid.
+
+        `src_*` / `usr_*` split the excluded class three ways once the
+        source-masked estimate is in use: rejected by the per-cell clip, removed
+        by the detector, and removed by the user's own drawn regions. The user's
+        pixels are reported separately and drawn last so the algorithm is never
+        credited with a judgement the user made.
+        """
+        from matplotlib.patches import Patch
+        panels = [(d, m, lbl, sm, um) for d, m, lbl, sm, um in
+                  [(disp_a, mask_bg_a, label_a, src_a, usr_a),
+                   (disp_b, mask_bg_b, label_b, src_b, usr_b)]
                   if d is not None and m is not None]
         if not panels:
             return None
         fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
         if len(panels) == 1:
             axes = [axes]
-        bg_color = np.array(mcolors.to_rgb("steelblue"))
-        ex_color = np.array(mcolors.to_rgb("tomato"))
-        for ax, (disp, mask_bg, lbl) in zip(axes, panels):
+        bg_color = np.array(mcolors.to_rgb("steelblue"))     # kept as background
+        ex_color = np.array(mcolors.to_rgb("tomato"))        # per-cell clip
+        src_color = np.array(mcolors.to_rgb("gold"))         # detector's source mask
+        usr_color = np.array(mcolors.to_rgb("darkorange"))   # user-drawn regions
+        any_src = any_usr = False
+        for ax, (disp, mask_bg, lbl, sm, um) in zip(axes, panels):
             h = min(disp.shape[0], mask_bg.shape[0])
             w = min(disp.shape[1], mask_bg.shape[1])
             gray = disp[:h, :w].astype(np.float32) / 255.0
             mask_bg = mask_bg[:h, :w]
+            sm = None if sm is None else sm[:h, :w]
+            um = None if um is None else um[:h, :w]
             rgb = np.stack([gray, gray, gray], axis=-1)
-            rgb[mask_bg] = (1 - alpha) * rgb[mask_bg] + alpha * bg_color
-            rgb[~mask_bg] = (1 - alpha) * rgb[~mask_bg] + alpha * ex_color
+            # The clip class is whatever the clip rejected that the mask had not
+            # already removed -- classify_background_pixels withholds masked pixels
+            # from the clip entirely, so they must not be counted twice.
+            masked = np.zeros((h, w), dtype=bool) if sm is None else sm
+            layers = [(mask_bg, bg_color), (~mask_bg & ~masked, ex_color)]
+            if sm is not None:
+                detector = sm & ~um if um is not None else sm
+                layers.append((detector, src_color))
+                any_src = any_src or bool(detector.any())
+            if um is not None:
+                layers.append((um, usr_color))
+                any_usr = any_usr or bool(um.any())
+            for sel, color in layers:
+                if sel.any():
+                    rgb[sel] = (1 - alpha) * rgb[sel] + alpha * color
             ax.imshow(np.clip(rgb, 0, 1), origin="upper", interpolation="nearest")
             ax.axis("off")
             ax.set_title(f"Background / excluded pixels — {lbl}", fontsize=10)
+        entries = [(bg_color, "Background (kept)"), (ex_color, "Excluded — per-cell 3σ clip")]
+        if any_src:
+            entries.append((src_color, "Excluded — source mask"))
+        if any_usr:
+            entries.append((usr_color, "Excluded — your regions"))
+        handles = [Patch(facecolor=c, label=t) for c, t in entries]
+        fig.legend(handles=handles, loc="lower center", ncol=len(entries), fontsize=8,
+                   frameon=False, bbox_to_anchor=(0.5, -0.02))
         fig.tight_layout()
         return fig
 
@@ -5650,7 +5784,10 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                  lambda r: (f"{r.source_mask.n_point} / {r.source_mask.n_extended}"
                             if r.source_mask else "—"), None),
                 ("Selected model", lambda r: _SOURCEMASK_ORDER_LABEL.get(
-                    r.fit.get("selected_order"), "—") if r.fit else "—", None)):
+                    r.fit.get("selected_order"), "—") if r.fit else "—", None),
+                ("Plane vs quadric — max divergence", _agreement_divergence_str, None),
+                ("&nbsp;&nbsp;of which beyond the measured cells",
+                 _agreement_ratio_str, None)):
             cells = []
             for res, _lbl, base in cols:
                 if not res.ok:
@@ -5909,6 +6046,10 @@ signal in the dark region produce a higher SNR.</p>
         # histogram/overlay from Part C) ---
         bg_a_ready = img_a is not None and img_a.background is not None
         bg_b_ready = img_b is not None and img_b.background is not None
+        # Whether the source-masked estimate is the background actually in use.
+        # Hoisted above the 3e block because 3f and 3g both branch on it too.
+        _masked_now = (_adopted_sourcemask(img_a) is not None
+                       or _adopted_sourcemask(img_b) is not None)
         bg_html = ""
         if bg_a_ready or bg_b_ready:
             mesh_fig = self._plot_background_mesh_pair(
@@ -5934,38 +6075,103 @@ signal in the dark region produce a higher SNR.</p>
                 "Background RMS (ADU)", "Background RMS")
 
             # Pixel classification: reproduces Background2D's own per-cell
-            # sigma-clip (which photutils never exposes as a mask itself).
-            # Full resolution for the histogram (statistical fidelity matters
-            # more than render size for a value distribution); stride-
-            # decimated to match the figures above for the spatial overlay.
+            # sigma-clip (which photutils never exposes as a mask itself), run
+            # with the same source mask the real call was given so the picture
+            # describes the estimate actually adopted rather than a hypothetical
+            # unmasked one. Full resolution for the histogram (statistical
+            # fidelity matters more than render size for a value distribution);
+            # stride-decimated to match the figures above for the spatial overlay.
             mask_full_a = mask_full_b = None
             bgsub_a_full = bgsub_b_full = None
             disp_a_dec = disp_b_dec = mask_a_dec = mask_b_dec = None
-            if bg_a_ready:
-                mask_full_a = classify_background_pixels(img_a.data, int(img_a.background.box_size[0]))
-                bgsub_a_full = img_a.background_subtracted()
-                step_a = decimation_step(*img_a.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
-                disp_a_dec = img_a.display_image(stretch=True)[::step_a, ::step_a]
-                mask_a_dec = mask_full_a[::step_a, ::step_a]
-            if bg_b_ready:
-                mask_full_b = classify_background_pixels(img_b.data, int(img_b.background.box_size[0]))
-                bgsub_b_full = img_b.background_subtracted()
-                step_b = decimation_step(*img_b.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
-                disp_b_dec = img_b.display_image(stretch=True)[::step_b, ::step_b]
-                mask_b_dec = mask_full_b[::step_b, ::step_b]
+            src_full_a = src_full_b = src_dec_a = src_dec_b = None
+            usr_dec_a = usr_dec_b = None
+            for img, ready, is_a in ((img_a, bg_a_ready, True), (img_b, bg_b_ready, False)):
+                if not ready:
+                    continue
+                adopted = _adopted_sourcemask(img)
+                src = adopted.source_mask.mask if adopted is not None else None
+                usr = (adopted.source_mask.user_mask if adopted is not None else None)
+                kept = classify_background_pixels(
+                    img.data, int(img.background.box_size[0]), mask=src)
+                bgsub = img.background_subtracted()
+                step = decimation_step(*img.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                disp = img.display_image(stretch=True)[::step, ::step]
+                if is_a:
+                    mask_full_a, bgsub_a_full, disp_a_dec = kept, bgsub, disp
+                    mask_a_dec = kept[::step, ::step]
+                    src_full_a = src
+                    src_dec_a = None if src is None else src[::step, ::step]
+                    usr_dec_a = None if usr is None else usr[::step, ::step]
+                else:
+                    mask_full_b, bgsub_b_full, disp_b_dec = kept, bgsub, disp
+                    mask_b_dec = kept[::step, ::step]
+                    src_full_b = src
+                    src_dec_b = None if src is None else src[::step, ::step]
+                    usr_dec_b = None if usr is None else usr[::step, ::step]
 
             hist_fig = self._plot_bg_pixel_histogram(
-                bgsub_a_full, mask_full_a, ra.label, bgsub_b_full, mask_full_b, rb.label)
+                bgsub_a_full, mask_full_a, ra.label, bgsub_b_full, mask_full_b, rb.label,
+                src_a=src_full_a, src_b=src_full_b)
             overlay_fig = self._plot_bg_pixel_overlay(
-                disp_a_dec, mask_a_dec, ra.label, disp_b_dec, mask_b_dec, rb.label)
+                disp_a_dec, mask_a_dec, ra.label, disp_b_dec, mask_b_dec, rb.label,
+                src_a=src_dec_a, src_b=src_dec_b, usr_a=usr_dec_a, usr_b=usr_dec_b)
+
+            _method_para = (
+                'The image is divided into 64&times;64 px cells; each cell is independently '
+                '3&sigma; sigma-clipped (<code>SExtractorBackground</code> for the level, '
+                '<code>MADStdBackgroundRMS</code> for the noise), then the per-cell results are '
+                'interpolated into smooth full-resolution surfaces. <strong>Before that runs, '
+                'stars and extended nebulosity are detected and masked out</strong>, and the '
+                'level shown here is a low-order surface fitted to the cells that survive &mdash; '
+                'see <strong>3g</strong> for the detection thresholds, the mask itself, and how '
+                'much the masking moved the answer.<br><br>'
+                'The masking matters because the per-cell clip assumes every cell is mostly sky. '
+                'For extended nebulosity that assumption fails: the clip settles on the nebula '
+                'level rather than the sky level, the background is over-estimated, and every SNR '
+                'figure in this report is correspondingly <em>under</em>-stated.<br><br>'
+                if _masked_now else
+                'The image is divided into 64&times;64 px cells; each cell is independently '
+                '3&sigma; sigma-clipped (<code>SExtractorBackground</code> for the level, '
+                '<code>MADStdBackgroundRMS</code> for the noise), then the per-cell results are '
+                'interpolated into smooth full-resolution surfaces. <strong>Source masking is '
+                'switched off for this run</strong>, so this is the plain per-cell estimate.<br><br>'
+                '<strong>Known limitation of the plain estimate:</strong> per-cell sigma-clipping '
+                'rejects only 3&sigma; outliers within each cell &mdash; there is no source '
+                'segmentation mask. Extended, low-contrast nebulosity spanning many cells biases '
+                'the estimate upward in those cells rather than being excluded outright, which in '
+                'turn <em>under</em>-states every SNR figure in this section. <strong>3g</strong> '
+                'below re-estimates the same background with the sources masked out and reports '
+                'what the difference would be worth; enabling &ldquo;Source-masked background&rdquo; '
+                'adopts it.')
+            _class_para = (
+                '<strong>Pixel classification histogram</strong> &mdash; the value distribution '
+                '(background-subtracted ADU) of pixels kept as background (steelblue), rejected '
+                'by the per-cell 3&sigma; clip (tomato), and removed by the source mask '
+                '(orange). The clip is reproduced here from the same parameters and the same '
+                'mask the real call was given, because photutils never exposes it as a '
+                'pixel-level mask &mdash; only the resulting per-cell scalar values.<br>'
+                '<strong>Pixel classification overlay</strong> &mdash; the same classification '
+                'shown spatially, with the source mask split into what the detector found and '
+                'what you excluded by hand. The orange region should follow visible structure; '
+                'an orange wash over blank sky means the detection ran too deep for this field.'
+                if _masked_now else
+                '<strong>Pixel classification histogram</strong> &mdash; the value distribution '
+                '(background-subtracted ADU) of pixels the sigma-clip kept as background '
+                '(steelblue) versus rejected as outliers (tomato). This reproduces the exact '
+                'per-cell clip <code>Background2D</code> itself runs internally &mdash; photutils '
+                'never exposes this as a pixel-level mask, only the resulting per-cell scalar '
+                'values, so it is recomputed here purely for this diagnostic.<br>'
+                '<strong>Pixel classification overlay</strong> &mdash; the same classification '
+                'shown spatially. A whole region of excluded (tomato) pixels sitting over real '
+                'extended nebulosity, rather than scattered individual pixels, is the visual '
+                'signature of the limitation described above.')
 
             bg_info_text = (
-                'The photutils <code>Background2D</code> model already subtracted throughout this '
-                'report, and the RMS map behind every SNR calculation above, shown directly rather '
-                'than only as summary numbers. The image is divided into 64&times;64 px cells; each '
-                'cell is independently 3&sigma; sigma-clipped (<code>SExtractorBackground</code> for '
-                'the level, <code>MADStdBackgroundRMS</code> for the noise), then the per-cell results '
-                'are interpolated into smooth full-resolution surfaces.<br><br>'
+                'The sky model already subtracted throughout this report, and the RMS map behind '
+                'every SNR calculation above, shown directly rather than only as summary '
+                'numbers.<br><br>'
+                + _method_para + '<br><br>'
                 '<strong>Mesh grid</strong> &mdash; the 64&times;64 px cells overlaid on the actual '
                 'image, showing box placement relative to real structure.<br>'
                 '<strong>Background model</strong> &mdash; the smooth sky level in ADU. A flat, '
@@ -5974,72 +6180,102 @@ signal in the dark region produce a higher SNR.</p>
                 '<strong>Background RMS</strong> &mdash; the per-pixel noise floor used throughout '
                 'this report&rsquo;s SNR maps. Elevated RMS at the corners/edges typically indicates '
                 'amp glow, vignetting, or uneven multi-session stacking coverage.<br><br>'
-                '<strong>Pixel classification histogram</strong> &mdash; the value distribution '
-                '(background-subtracted ADU) of pixels the sigma-clip kept as background (steelblue) '
-                'versus rejected as outliers (tomato). This reproduces the exact per-cell clip '
-                '<code>Background2D</code> itself runs internally &mdash; photutils never exposes '
-                'this as a pixel-level mask, only the resulting per-cell scalar values, so it is '
-                'recomputed here purely for this diagnostic.<br>'
-                '<strong>Pixel classification overlay</strong> &mdash; the same classification shown '
-                'spatially. A whole region of excluded (tomato) pixels sitting over real extended '
-                'nebulosity, rather than scattered individual pixels, is the visual signature of this '
-                'method&rsquo;s known limitation described below.<br><br>'
-                '<strong>Known limitation:</strong> per-cell sigma-clipping rejects only 3&sigma; '
-                'outliers within each cell &mdash; there is no source segmentation mask. Extended, '
-                'low-contrast nebulosity spanning many cells can still bias the estimate upward in '
-                'those cells rather than being excluded outright, which in turn '
-                '<em>under</em>-states every SNR figure in this section. Use these panels to judge '
-                'whether that is happening in your field, not as proof that it is not &mdash; and '
-                'see <strong>3g</strong> below, which re-estimates this same background with the '
-                'sources masked out and reports how much the difference is worth here.'
+                + _class_para
             )
+
+            _model_kind = ("source-masked" if _masked_now else "plain per-cell")
+            _model_cap = (
+                "Low-order surface fitted to the mesh cells that survived the source mask, "
+                "in ADU (plasma colourmap, shared scale). A flat surface is ideal; gradients "
+                "indicate light pollution, vignetting, or flat-field residuals."
+                if _masked_now else
+                "Interpolated background model in ADU (plasma colourmap, shared scale). "
+                "A flat surface is ideal; gradients indicate light pollution, vignetting, "
+                "or flat-field residuals.")
+            _hist_cap = (
+                "Background-subtracted value distribution of pixels kept as background "
+                "(steelblue), rejected by the per-cell 3σ clip (tomato), and removed by the "
+                "source mask (orange)."
+                if _masked_now else
+                "Background-subtracted value distribution of pixels kept as background "
+                "(steelblue) versus excluded as outliers (tomato) by the per-cell 3σ sigma-clip.")
+            _overlay_cap = (
+                "Spatial view of the same classification — kept (steelblue), clip-rejected "
+                "(tomato), source-masked (gold), and your own drawn regions (orange) where "
+                "any were used."
+                if _masked_now else
+                "Spatial view of the same classification — where the sigma-clip kept "
+                "(steelblue) versus excluded (tomato) pixels.")
 
             bg_html = f"""
 <h3>3e. Background Model</h3>
 {_info_box(bg_info_text, title="Understanding the background model")}
+<p>Model in use: <strong>{_model_kind}</strong>.</p>
 {_hires_img_tag(mesh_fig, "Background mesh grid")}
 <p class="caption">The 64&times;64 px background estimation grid (cyan outlines) over
 the actual image. Cells straddling bright extended structure can bias that cell's
 sky estimate upward.</p>
 {_img_tag(model_fig, "Background model")}
-<p class="caption">Interpolated background model in ADU (plasma colourmap, shared scale).
-A flat surface is ideal; gradients indicate light pollution, vignetting, or flat-field
-residuals.</p>
+<p class="caption">{_model_cap}</p>
 {_img_tag(rms_fig, "Background RMS")}
 <p class="caption">Per-pixel sky noise floor in ADU (plasma colourmap, shared scale) —
 the same map used to compute every SNR value in this section. Elevated corners/edges
 suggest amp glow or uneven stacking coverage.</p>
 {_img_tag(hist_fig, "Background pixel classification histogram")}
-<p class="caption">Background-subtracted value distribution of pixels kept as background
-(steelblue) versus excluded as outliers (tomato) by the per-cell 3σ sigma-clip.</p>
+<p class="caption">{_hist_cap}</p>
 {_img_tag(overlay_fig, "Background pixel classification overlay")}
-<p class="caption">Spatial view of the same classification — where the sigma-clip kept
-(steelblue) versus excluded (tomato) pixels.</p>"""
+<p class="caption">{_overlay_cap}</p>"""
 
         # --- Background Gradient Analysis sub-section (3f) ---
+        # Fits the mesh cells the background estimate actually rested on. When the
+        # source-masked estimate was adopted that fit already exists (it *is* the
+        # adopted model), so it is reused rather than refitted -- refitting a
+        # polynomial to a polynomial would report the surface's own coefficients
+        # back with a residual of exactly zero.
         bgfit_html = ""
         fit_a = fit_b = None
-        if bg_a_ready:
-            fit_a = fit_background_surface(
-                img_a.background.background_mesh, img_a.background.background_rms_mesh,
-                int(img_a.background.box_size[0]), img_a.data.shape[:2])
-        if bg_b_ready:
-            fit_b = fit_background_surface(
-                img_b.background.background_mesh, img_b.background.background_rms_mesh,
-                int(img_b.background.box_size[0]), img_b.data.shape[:2])
+        for img, ready, is_a in ((img_a, bg_a_ready, True), (img_b, bg_b_ready, False)):
+            if not ready:
+                continue
+            adopted = _adopted_sourcemask(img)
+            fit = (adopted.fit if adopted is not None else fit_background_surface(
+                img.background.background_mesh, img.background.background_rms_mesh,
+                int(img.background.box_size[0]), img.data.shape[:2]))
+            if is_a:
+                fit_a = fit
+            else:
+                fit_b = fit
         fit_a_ok = fit_a is not None and not fit_a.get("insufficient_data")
         fit_b_ok = fit_b is not None and not fit_b.get("insufficient_data")
         if fit_a_ok or fit_b_ok:
             surf_a = surf_b = None
             resid_a = resid_b = None
-            if fit_a_ok:
-                step_a = decimation_step(*img_a.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
-                surf_a = evaluate_surface(fit_a, img_a.data.shape[:2], step_a)
-                resid_a = img_a.background_display(kind="model") - surf_a
-            if fit_b_ok:
-                step_b = decimation_step(*img_b.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
-                surf_b = evaluate_surface(fit_b, img_b.data.shape[:2], step_b)
-                resid_b = img_b.background_display(kind="model") - surf_b
+            for img, fit, ok, is_a in ((img_a, fit_a, fit_a_ok, True),
+                                       (img_b, fit_b, fit_b_ok, False)):
+                if not ok:
+                    continue
+                step = decimation_step(*img.data.shape[:2], BACKGROUND_DISPLAY_MAX_DIM)
+                surf = evaluate_surface(fit, img.data.shape[:2], step)
+                # Residual against the MESH CELLS, which are the actual independent
+                # measurements, not against the interpolated full-resolution model.
+                # Cells the mask removed are left NaN so they read as "no data"
+                # rather than as a zero residual the fit never earned.
+                box = int(img.background.box_size[0])
+                mesh = np.asarray(img.background.background_mesh, dtype=np.float64)
+                cy, cx = np.mgrid[0:mesh.shape[0], 0:mesh.shape[1]]
+                cx = (cx + 0.5) * box
+                cy = (cy + 0.5) * box
+                resid = mesh - evaluate_surface_at(fit, cx, cy)
+                adopted = _adopted_sourcemask(img)
+                if adopted is not None:
+                    frac = _sourcemask_cell_fraction(img, adopted)
+                    if frac is not None:
+                        resid = np.where(frac >= SOURCEMASK_MIN_CELL_UNMASKED_FRAC,
+                                         resid, np.nan)
+                if is_a:
+                    surf_a, resid_a = surf, resid
+                else:
+                    surf_b, resid_b = surf, resid
 
             surf_vals = [v for v in (surf_a, surf_b) if v is not None]
             s_vmin = min(float(np.percentile(v, 2)) for v in surf_vals)
@@ -6048,11 +6284,14 @@ suggest amp glow or uneven stacking coverage.</p>
                 surf_a, ra.label, surf_b, rb.label, s_vmin, s_vmax,
                 "Fitted background (ADU)", "Fitted surface")
 
-            resid_vals = [v for v in (resid_a, resid_b) if v is not None]
-            resid_absmax = max(float(np.percentile(np.abs(v), 98)) for v in resid_vals)
+            resid_vals = [v for v in (resid_a, resid_b)
+                          if v is not None and np.any(np.isfinite(v))]
+            resid_absmax = (max(float(np.nanpercentile(np.abs(v), 98)) for v in resid_vals)
+                            if resid_vals else 1.0)
+            resid_absmax = resid_absmax if resid_absmax > 0 else 1.0
             resid_fig = self._plot_background_map_pair(
                 resid_a, ra.label, resid_b, rb.label, -resid_absmax, resid_absmax,
-                "Residual (ADU)", "Fit residual", cmap="bwr")
+                "Residual (ADU)", "Fit residual", cmap="bwr", axis_unit="mesh cells")
 
             bgfit_table = _bgfit_table_html(
                 fit_a if fit_a_ok else {}, fit_b if fit_b_ok else {}, ra.label, rb.label)
@@ -6063,6 +6302,12 @@ suggest amp glow or uneven stacking coverage.</p>
             order_a_txt = _order_label.get(fit_a["selected_order"], "—") if fit_a_ok else "—"
             order_b_txt = _order_label.get(fit_b["selected_order"], "—") if fit_b_ok else "—"
 
+            _fit_source = (
+                'This is the same fit the background model in 3e is built from &mdash; the cells '
+                'that survived the source mask &mdash; not a second, separate one, so the terms '
+                'below describe the surface actually subtracted.<br><br>'
+                if _masked_now else
+                'Every mesh cell is used, since source masking is switched off for this run.<br><br>')
             bgfit_info_text = (
                 'Fits a low-order 2D polynomial to the background mesh cells (not the interpolated '
                 'full-resolution image, since the mesh cells are the actual independent measurements) '
@@ -6071,6 +6316,7 @@ suggest amp glow or uneven stacking coverage.</p>
                 '&mdash; are compared by Bayesian Information Criterion (BIC); the simplest model that '
                 'the data actually justifies is selected, so a genuinely flat background is reported as '
                 'such rather than over-fit to noise.<br><br>'
+                + _fit_source +
                 '<strong>Gradient magnitude</strong> &mdash; the linear term&rsquo;s size (ADU/px), '
                 'with the direction and total corner-to-corner ADU swing across the frame. Candidate '
                 'cause: light pollution or moon glow, typically strongest near the horizon.<br>'
@@ -6097,14 +6343,15 @@ suggest amp glow or uneven stacking coverage.</p>
 <p class="caption">The fitted plane/quadric surface, in ADU (shared scale with the
 Background model panel above).</p>
 {_img_tag(resid_fig, "Fit residual")}
-<p class="caption">Background model minus fitted surface (ADU, diverging colourmap,
-symmetric scale). Structure remaining here is not captured by a low-order polynomial —
-expected for genuinely patchy backgrounds, e.g. flat-field residuals or extended
-nebulosity leaking into the background estimate.</p>"""
+<p class="caption">Measured mesh cell minus fitted surface, one element per 64×64 px
+cell (ADU, diverging colourmap, symmetric scale). Blank cells were removed by the source
+mask and carry no measurement. Structure remaining here is not captured by a low-order
+polynomial — expected for genuinely patchy backgrounds, e.g. flat-field residuals or
+extended nebulosity leaking into the background estimate.</p>"""
 
         # --- Source-Masked Background Check sub-section (3g) ---
-        # Diagnostic only: nothing here feeds AstroImage.background, so every
-        # SNR number above is unchanged by this block's presence.
+        # The audit trail for 3e's model when source masking is on, and a preview
+        # of what it would be worth when it is off.
         smres_a = _sourcemask_for(self._sourcemask_cache, img_a if bg_a_ready else None,
                                   _sourcemask_fwhm(ra))
         smres_b = _sourcemask_for(self._sourcemask_cache, img_b if bg_b_ready else None,
@@ -6112,10 +6359,15 @@ nebulosity leaking into the background estimate.</p>"""
 
         smask_html = ""
         if smres_a is not None or smres_b is not None:
+            # The "before" column is always the UNMASKED phase-1 estimate, whether or
+            # not the masked one was adopted -- that comparison is the whole point of
+            # the section, so it must not silently become masked-vs-masked.
             base_a = ((float(np.median(img_a.background.background)),
-                       float(np.median(img_a.background_rms))) if bg_a_ready else None)
+                       float(np.median(img_a.background.background_rms)))
+                      if bg_a_ready else None)
             base_b = ((float(np.median(img_b.background.background)),
-                       float(np.median(img_b.background_rms))) if bg_b_ready else None)
+                       float(np.median(img_b.background.background_rms)))
+                      if bg_b_ready else None)
 
             # Overlay + surface panels, decimated onto the same grid every other
             # Section 3e/3f figure uses so they can be compared side by side.
@@ -6135,7 +6387,10 @@ nebulosity leaking into the background estimate.</p>"""
                          res.source_mask.extended_mask[::step, ::step],
                          None if _um is None else _um[::step, ::step])
                 surf = res.surface[::step, ::step]
-                diff = surf - img.background_display(kind="model")
+                # Against the UNMASKED model, not background_display("model") --
+                # once the masked estimate is adopted the latter IS this surface,
+                # and the difference map would be identically zero.
+                diff = surf - img.background_display(kind="unmasked_model")
                 if img is img_a:
                     disp_a_sm, ov_a, surf_sm_a, diff_sm_a = disp, masks, surf, diff
                     frac_a = _sourcemask_cell_fraction(img, res)
@@ -6196,14 +6451,22 @@ nebulosity leaking into the background estimate.</p>"""
                 'real measurements the fit would otherwise use.<br><br>'
             ) if _user_drawn else ''
 
+            _adoption_para = (
+                '<strong>This is the background in use.</strong> The estimate built here '
+                'is the model shown in 3e and subtracted throughout this report, so every '
+                'SNR value, star measurement and comparison above rests on it. The '
+                '&ldquo;Current&rdquo; column below is the plain unmasked estimate that '
+                '<em>would</em> have been used, kept so you can see exactly what the '
+                'masking changed.<br><br>'
+                if _masked_now else
+                '<strong>This section is diagnostic only for this run.</strong> Source '
+                'masking is switched off, so every SNR value and star measurement above '
+                'uses the plain unmasked estimate shown in 3e. The comparison below is '
+                'what adopting the masked estimate would be worth &mdash; enable '
+                '&ldquo;Source-masked background&rdquo; to act on it.<br><br>')
             smask_info_text = (
-                _user_para +
-                '<strong>This section is diagnostic only.</strong> Every SNR value, star '
-                'measurement and comparison elsewhere in this report still uses the '
-                'unmasked <code>Background2D</code> estimate shown in 3e. Nothing here '
-                'changes those numbers &mdash; it exists so you can judge how much they '
-                'are affected before the masked estimate is adopted.<br><br>'
-                'The 3e model sigma-clips each 64&times;64 cell independently, which '
+                _user_para + _adoption_para +
+                'The plain estimate sigma-clips each 64&times;64 cell independently, which '
                 'assumes every cell is mostly sky. Over extended nebulosity that '
                 'assumption fails: the clip settles on the nebula level instead of the '
                 'sky level and the background is over-estimated, which then '
@@ -6247,16 +6510,24 @@ nebulosity leaking into the background estimate.</p>"""
                 'genuinely measured. A fitted surface is used rather than the interpolated '
                 'mesh because at high mask coverage most cells hold no data, and '
                 'interpolating across them is less accurate than the bias being removed. '
-                'The polynomial order is capped by how many cells survived, so a handful '
-                'of cells can never produce a curved surface that swings wildly across '
-                'the masked region.<br><br>'
+                'The polynomial order is capped by what <em>fraction</em> of the mesh '
+                'survived rather than by a raw cell count, so the cap means the same thing '
+                'on a 2 MP frame as on a 50 MP one. Curvature is additionally checked by '
+                'fitting the surviving cells both as a plane and as a quadric and measuring '
+                'where the two part company. A large disagreement is not by itself a fault '
+                '&mdash; on a genuinely vignetted frame the plane simply cannot fit, so the '
+                'two differ everywhere and the quadric is right. What marks curvature as '
+                'invented is the two models agreeing where cells survive and diverging only '
+                'out across the mask, which is the ratio reported in the table; when that '
+                'happens the simpler plane is used.<br><br>'
                 '<strong>How to read it:</strong> if the &Delta; column is near zero your '
-                'field is sky-dominated and the 3e numbers are sound. A large negative '
+                'field is sky-dominated and the masking changed nothing. A large negative '
                 '&Delta; on the background median means nebulosity was inflating the sky '
-                'estimate, and the true SNR of this image is <em>higher</em> than reported '
-                'above. Check the mask overlay before trusting a large &Delta;: the '
-                'masked region should follow visible structure, and the cells outlined in '
-                'the audit map are the only measurements the new surface rests on.'
+                'estimate, and the true SNR of this image is <em>higher</em> than the plain '
+                'estimate would have reported. Check the mask overlay before trusting a '
+                'large &Delta;: the masked region should follow visible structure, and the '
+                'cells outlined in the audit map are the only measurements the surface '
+                'rests on.'
             )
 
             smask_html = f"""
@@ -6272,10 +6543,10 @@ over blank sky means the detection ran too deep for this field.</p>
 {_img_tag(surf_sm_fig, "Source-masked background surface")}
 <p class="caption">The re-estimated background in ADU (plasma colourmap, shared
 scale), fitted only to mesh cells that survived the mask.</p>
-{_img_tag(diff_sm_fig, "Change versus current background model")}
-<p class="caption">Source-masked estimate minus the current 3e model (ADU, diverging
-colourmap, symmetric scale). Blue regions are where the current model reads high —
-i.e. where nebulosity is inflating the sky estimate and suppressing reported SNR.</p>
+{_img_tag(diff_sm_fig, "Change versus the unmasked background model")}
+<p class="caption">Source-masked estimate minus the plain unmasked estimate (ADU, diverging
+colourmap, symmetric scale). Blue regions are where the unmasked model reads high —
+i.e. where nebulosity was inflating the sky estimate and suppressing reported SNR.</p>
 {_img_tag(audit_fig, "Mesh cell audit")}
 <p class="caption">Fraction of each mesh cell left unmasked. Only the outlined cells
 were treated as measurements; the rest hold too little sky to be trusted, and a cell
@@ -6448,7 +6719,7 @@ the only way to see what the fit actually rests on.</p>
 </table>
 
 {snr_pair_html}
-<p class="caption">Per-pixel SNR map: signal / sky RMS at each location (plasma colourmap).
+<p class="caption">Per-pixel SNR map: (signal-background) / sky RMS at each location (plasma colourmap).
 Both images share the same color scale (P2&ndash;P98 of the higher-SNR image) for direct
 comparison. Bright regions have high SNR; blank sky clusters near zero.
 A uniformly brighter map indicates deeper, more signal-rich data.</p>

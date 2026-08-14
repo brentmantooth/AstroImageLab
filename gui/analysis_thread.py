@@ -20,6 +20,7 @@ from analysis.halo_analyzer import HaloAnalyzer
 from analysis.edge_analyzer import EdgeAnalyzer
 from analysis.power_spectrum import PowerSpectrumAnalyzer
 from analysis.image_filters import SpatialDetailAnalyzer
+from analysis.inspector_regions import exclusion_mask
 from report.report_builder import ReportBuilder
 
 
@@ -122,7 +123,29 @@ class AnalysisThread(QThread):
         _bg_images = {id(im): im for im in
                       (img_a, img_b, self._starless_a, self._starless_b)
                       if im is not None}
+
+        # Everything the background estimate depends on must be attached BEFORE the
+        # pre-pass runs — the idempotency guard would otherwise hand every later
+        # caller a background computed without the user's regions, which is a silent
+        # wrong answer rather than an error. Starless companions get the same
+        # treatment so the starless-vs-normal SNR comparison stays like-for-like.
+        _bg_regions = list(s.get("bg_exclusion_regions") or [])
+        _use_masked = bool(s.get("use_source_masked_background", True))
+        # PSF analysis cannot supply a measured FWHM here (it needs the background
+        # first), so the reference-seeing setting stands in for it.
+        _ref_seeing = float(s.get("ref_seeing_arcsec", 2.0) or 0.0)
+        for _im in _bg_images.values():
+            _im.use_source_masked_background = _use_masked
+            _im.bg_exclusion_regions = _bg_regions
+            if _ref_seeing > 0 and _im.pixel_scale > 0:
+                _im.psf_fwhm_hint_px = max(1.0, _ref_seeing / _im.pixel_scale)
+            _im.set_background_exclusion_mask(
+                exclusion_mask(_im.data.shape[:2], _bg_regions) if _bg_regions else None)
+
         if _bg_images:
+            self.progress.emit(
+                3, "Estimating background (source-masked)…" if _use_masked
+                else "Estimating background…")
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(_bg_images)) as ex:
                 list(ex.map(lambda im: im.estimate_background(), _bg_images.values()))
 
@@ -295,16 +318,6 @@ class AnalysisThread(QThread):
             self._run_parallel(tasks, result_a, result_b)
         else:
             self._run_serial(tasks, result_a, result_b)
-
-        # Hand the user's drawn background-exclusion regions to the images so
-        # Section 3g's diagnostic can pick them up. Attached here rather than
-        # passed to generate(): the settings dict never reaches ReportBuilder,
-        # and the images do. Nothing else reads this — the background actually
-        # subtracted everywhere else in the report is unaffected.
-        _bg_regions = list(s.get("bg_exclusion_regions") or [])
-        for _im in (img_a, img_b):
-            if _im is not None:
-                _im.bg_exclusion_regions = _bg_regions
 
         # Report generation (always serial — needs all results)
         self.progress.emit(96, "Generating HTML report…")
