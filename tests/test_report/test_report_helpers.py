@@ -19,6 +19,8 @@ from report.report_builder import (
     _format_significance_html,
     _sig_td,
     _power_ratio_db,
+    _db_ratio_at,
+    _spectral_mtf50_row,
     _nc_ratio_rows,
     _panel_display_name,
     _bgfit_value_td,
@@ -263,6 +265,58 @@ class TestPowerRatioDb:
         rp = np.ones(5)
         assert _power_ratio_db(None, rp, freq, rp) is None
         assert _power_ratio_db(freq, None, freq, rp) is None
+
+
+class TestDbRatioAt:
+    def test_known_value_interpolated(self):
+        freq = np.linspace(0.0, 0.5, 11)
+        rp_b = np.full(11, 1.0)
+        rp_a = rp_b * 2.0
+        db = _db_ratio_at(freq, rp_a, freq, rp_b, ref_freq=0.25)
+        assert db == pytest.approx(10.0 * np.log10(2.0), abs=1e-6)
+
+    def test_none_ref_freq_returns_none(self):
+        freq = np.linspace(0.0, 0.5, 5)
+        rp = np.ones(5)
+        assert _db_ratio_at(freq, rp, freq, rp, ref_freq=None) is None
+
+    def test_misaligned_bins_return_none(self):
+        freq_a = np.linspace(0.0, 0.5, 5)
+        freq_b = np.linspace(0.0, 0.5, 7)
+        rp_a = np.ones(5)
+        rp_b = np.ones(7)
+        assert _db_ratio_at(freq_a, rp_a, freq_b, rp_b, ref_freq=0.2) is None
+
+    def test_missing_inputs_return_none(self):
+        freq = np.linspace(0.0, 0.5, 5)
+        rp = np.ones(5)
+        assert _db_ratio_at(None, rp, freq, rp, ref_freq=0.2) is None
+
+
+class TestSpectralMtf50Row:
+    def test_contains_label_and_values(self):
+        freq = np.linspace(0.0, 0.5, 11)
+        rp_b = np.full(11, 1.0)
+        rp_a = rp_b * 2.0
+        html = _spectral_mtf50_row("MTF50 — power spectrum (cyc/px)",
+                                    0.20, 0.25, freq, rp_a, freq, rp_b)
+        assert "MTF50 — power spectrum (cyc/px)" in html
+        assert "0.2000" in html
+        assert "0.2500" in html
+        assert "dB" in html
+        assert html.startswith("<tr>") and html.endswith("</tr>")
+
+    def test_both_mtf50_none_falls_back_to_dash(self):
+        html = _spectral_mtf50_row("MTF50 (cyc/px)", None, None, None, None, None, None)
+        assert html.count(EM_DASH) == 3   # A column, B column, ratio column
+        assert "dB" not in html
+
+    def test_one_defined_uses_it_as_reference(self):
+        freq = np.linspace(0.0, 0.5, 11)
+        rp = np.ones(11)
+        html = _spectral_mtf50_row("MTF50 (cyc/px)", 0.3, None, freq, rp, freq, rp)
+        assert "0.3000" in html
+        assert EM_DASH in html   # B column has no value
         assert _power_ratio_db(freq, rp, None, rp) is None
         assert _power_ratio_db(freq, rp, freq, None) is None
 

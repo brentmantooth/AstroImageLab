@@ -251,6 +251,8 @@ class AnalysisThread(QThread):
                             "radial_power":   sm.get("radial_power"),
                             "freq_axis":      sm.get("freq_axis"),
                             "mid_high_ratio": sm.get("mid_high_ratio"),
+                            "spectral_mtf_curve":          sm.get("spectral_mtf_curve"),
+                            "spectral_mtf50_cycles_per_px": sm.get("spectral_mtf50_cycles_per_px"),
                         }
                 else:
                     result_a.power_metrics = PowerSpectrumAnalyzer().analyze(ps_a, roi=roi)

@@ -138,7 +138,8 @@ class PSFAnalyzer:
         # Empirical PSF and MTF — use clean_psf_stars (same set as metric statistics)
         epsf, freq, mtf = self._build_epsf_and_mtf(image, clean_psf_stars, median_fwhm)
         if epsf is not None:
-            mtf50 = self._find_mtf50(freq, mtf)
+            from core.stats_utils import find_level_crossing
+            mtf50 = find_level_crossing(freq, mtf)
             mtf_nyq = float(np.interp(0.5, freq, mtf))
             result["mtf50_cycles_per_px"] = mtf50
             result["mtf_nyquist"] = mtf_nyq
@@ -428,15 +429,6 @@ class PSFAnalyzer:
         ])
 
         return freq_axis, mtf
-
-    def _find_mtf50(self, freq: np.ndarray, mtf: np.ndarray) -> float | None:
-        if len(freq) < 2:
-            return None
-        for i in range(len(mtf) - 1):
-            if mtf[i] >= 0.5 >= mtf[i + 1]:
-                slope = (mtf[i + 1] - mtf[i]) / (freq[i + 1] - freq[i])
-                return float(freq[i] + (0.5 - mtf[i]) / slope)
-        return None
 
     # ------------------------------------------------------------------
     # Figures

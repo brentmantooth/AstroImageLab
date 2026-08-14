@@ -31,6 +31,8 @@ class PowerSpectrumAnalyzer:
             "power_spectrum_2d": None,
             "radial_power": None,
             "freq_axis": None,
+            "spectral_mtf_curve": None,
+            "spectral_mtf50_cycles_per_px": None,
         }
 
         region = self._extract_roi(bgsub, image, roi)
@@ -45,12 +47,15 @@ class PowerSpectrumAnalyzer:
         ps2d = self._compute_ps2d(windowed)
         freq, radial = self._radial_average(ps2d)
         ratio = self._compute_mid_high_ratio(freq, radial)
+        spectral_mtf_curve, spectral_mtf50 = self._spectral_mtf(freq, radial)
 
         result.update({
             "mid_high_ratio": ratio,
             "power_spectrum_2d": ps2d,
             "radial_power": radial,
             "freq_axis": freq,
+            "spectral_mtf_curve": spectral_mtf_curve,
+            "spectral_mtf50_cycles_per_px": spectral_mtf50,
         })
         result["figures"] = figs_to_b64({
             "power_spectrum": self._plot_results(ps2d, freq, radial, ratio, image.label)
@@ -183,6 +188,39 @@ class PowerSpectrumAnalyzer:
         if low_sum <= 0:
             return None
         return high_sum / low_sum
+
+    def _spectral_mtf(self, freq_axis: np.ndarray, radial_power: np.ndarray
+                       ) -> tuple[np.ndarray | None, float | None]:
+        """Per-image 'relative MTF' proxy derived from the radial power spectrum.
+
+        Not an absolute MTF: a true MTF needs a *known* input signal (point/edge/
+        sinusoid) to isolate system response from scene content, whereas a nebula's
+        own power spectrum entangles both (P_image(f) ~ |H(f)|^2 * P_scene(f), with
+        P_scene(f) unknown). What this gives instead: normalise to the mean power in
+        the low-frequency reference band (freq <= LOW_FREQ_MAX, the same boundary
+        _compute_mid_high_ratio uses), then take the square root (power -> an
+        amplitude-like quantity) so a 50%-crossing carries the same meaning as a true
+        MTF50. The result is only a same-target, same-session A-vs-B comparator, not
+        comparable in isolation to PSFAnalyzer's ePSF-derived MTF50 -- see the
+        Section 7 report text for the full caveat.
+
+        Unsmoothed (unlike the ePSF-derived MTF curve, which comes from a stacked
+        many-star fit): this is a single noisy realisation's radial-averaged FFT
+        power, so a None crossing result on a noisy or very smooth spectrum is
+        expected, not a bug. Also not guaranteed to start at exactly 1.0 (unlike the
+        ePSF MTF, explicitly clamped via otf /= otf.max()) -- this is normalised to
+        the low band's *mean*, not a peak.
+        """
+        from core.stats_utils import find_level_crossing
+        ref_mask = freq_axis <= LOW_FREQ_MAX
+        if not np.any(ref_mask):
+            return None, None
+        ref_power = float(np.mean(radial_power[ref_mask]))
+        if ref_power <= 0:
+            return None, None
+        curve = np.sqrt(np.clip(radial_power / ref_power, 0.0, None))
+        mtf50 = find_level_crossing(freq_axis, curve, level=0.5)
+        return curve, mtf50
 
     # ------------------------------------------------------------------
     # Figure

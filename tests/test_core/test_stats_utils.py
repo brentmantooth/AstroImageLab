@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from core.stats_utils import combined_se_z_test, mannwhitney_effect
+from core.stats_utils import combined_se_z_test, find_level_crossing, mannwhitney_effect
 
 
 class TestMannwhitneyEffect:
@@ -46,6 +46,33 @@ class TestMannwhitneyEffect:
         assert p is not None
         assert delta is not None
         assert abs(delta - ref_delta) < 1e-9
+
+
+class TestFindLevelCrossing:
+    def test_exact_linear_crossing(self):
+        x = [0.0, 1.0, 2.0, 3.0]
+        y = [1.0, 0.8, 0.4, 0.0]
+        # Crosses between x=1 (0.8) and x=2 (0.4): 1 + (0.5-0.8)/((0.4-0.8)/1) = 1.75
+        assert find_level_crossing(x, y) == pytest.approx(1.75)
+
+    def test_never_crosses_returns_none(self):
+        x = [0.0, 1.0, 2.0, 3.0]
+        y = [1.0, 0.9, 0.8, 0.7]
+        assert find_level_crossing(x, y) is None
+
+    def test_starts_below_level_returns_none(self):
+        x = [0.0, 1.0, 2.0, 3.0]
+        y = [0.4, 0.3, 0.2, 0.1]
+        assert find_level_crossing(x, y) is None
+
+    def test_custom_level(self):
+        x = [0.0, 1.0, 2.0]
+        y = [10.0, 6.0, 2.0]
+        assert find_level_crossing(x, y, level=8.0) == pytest.approx(0.5)
+
+    def test_too_few_points_returns_none(self):
+        assert find_level_crossing([0.0], [1.0]) is None
+        assert find_level_crossing([], []) is None
 
 
 class TestCombinedSeZTest:

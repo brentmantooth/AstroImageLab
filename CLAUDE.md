@@ -21,7 +21,9 @@ analysis/              Metric engines — each returns a plain dict
   halo_analyzer.py     Radial halo profiles, two-component Moffat fit
   snr_analyzer.py      Global/per-star/local SNR, noise factor, sky electrons
   edge_analyzer.py     ESF/LSF edge analysis via Sobel
-  power_spectrum.py    Signal-normalised 2D FFT power spectrum
+  power_spectrum.py    Signal-normalised 2D FFT power spectrum; per-image relative
+                       "spectral MTF50" proxy from the radial curve — NOT a true MTF,
+                       see the MTF-source-labeling convention below
   image_filters.py     Local σ maps, Laplacian of Gaussian, wavelet decomposition
   star_catalog.py      DAOStarFinder star detection and isolation filtering
   inspector_regions.py Headless array maths for the Data Inspector — display ranges,
@@ -131,6 +133,8 @@ tools/
 | `_sourcemask_for(cache, img, fwhm_px)` / `_adopted_sourcemask(img)` | `report_builder.py` | `_sourcemask_for` returns `img.source_mask_result` when present — reading back what `estimate_background()` actually used is what guarantees 3g audits the numbers 3e presents — and only falls back to computing (memoised per build; `generate()` resets the cache, same rule `_export_ctx` follows) for an `AstroImage` built outside the GUI. `_adopted_sourcemask` is the stricter question 3e/3f must ask: is this the background *in use*, i.e. attached by `estimate_background()` **and** `.ok` **and** the flag on. Don't use the first where you mean the second — it will happily hand back a diagnostic estimate for an image whose background was left unmasked |
 | `combined_se_z_test(val_a, se_a, val_b, se_b)` | `core/stats_utils.py` | Generic two-sided z-test for comparing two *independent* point estimates with known SEs (`z = (val_a-val_b)/sqrt(se_a²+se_b²)`, normal not Student-t — no shared `df` between two separately-fit models). Sibling of `mannwhitney_effect`: same "generic primitive in `core/`, domain-specific call site in `analysis/`" layering. Used by `analysis/background_fit.py::compare_fits` for Section 3f's A-vs-B column; reach for this (not a paired test) whenever the two things being compared are separate fits/estimates rather than a pixel-paired population |
 | `_bgfit_value_td(value, se, p_term, css_class, fmt=".3g")` / `_bgfit_table_html(fit_a, fit_b, label_a, label_b)` | `report_builder.py` | Section 3f's table-cell/table builder — composes `_sig_td` (per-term significance: is this specific magnitude distinguishable from zero) around a `_better_worse_class`-colored `<span>` (A-vs-B judgement). Deliberately **not** built on `_format_significance_html`/`_psf_stat_test` — those are shaped around Mann-Whitney U + Cliff's delta for two *distributions* of values, a different statistical object from a parametric regression coefficient's t-test against zero |
+| `find_level_crossing(x, y, level=0.5)` | `core/stats_utils.py` | Linear-interpolated first *descending* crossing of `level` in a `(x, y)` curve; `None` if `y` never crosses (starts below `level`, or never drops below it). Extracted from `PSFAnalyzer`'s original ePSF-MTF50 search so `PowerSpectrumAnalyzer._spectral_mtf` (`analysis/power_spectrum.py`) can reuse the identical algorithm for its own, differently-sourced MTF50 proxy instead of re-deriving it — see the MTF-source-labeling convention below |
+| `_db_ratio_at(freq_a, rp_a, freq_b, rp_b, ref_freq)` | `report_builder.py` | Interpolates `_power_ratio_db`'s dB curve at a single reference frequency; `None` on missing input, misaligned bins, or `ref_freq=None`. Used to collapse a whole ratio *curve* into one table-cell scalar wherever a report row needs "the dB ratio at the point this row's own headline number sits," rather than requiring the reader to eyeball it off an adjacent figure |
 
 ---
 
@@ -374,6 +378,46 @@ When adding a new A-vs-B ratio curve to a report figure (precedent: `_power_rati
   curves onto a shared `np.interp`-built grid before dividing instead (precedented
   on this exact data: `mtf_nyq = float(np.interp(0.5, freq, mtf))`,
   `psf_analyzer.py:142`).
+
+### MTF/MTF50 values must state their source — a natural scene's power spectrum is not directly an MTF
+
+Two pipelines each produce a number called "MTF50," and they measure genuinely
+different things. `PSFAnalyzer` (Section 4) builds an ePSF from the with-stars
+image's own stars — a *known* point-source input — FFTs it, and reports the true
+system MTF: this is the only one of the two that is an MTF in the optical-engineering
+sense. `PowerSpectrumAnalyzer._spectral_mtf` (Section 7, `analysis/power_spectrum.py`)
+instead FFTs a real, unknown nebula scene: `P_image(f) ≈ |H(f)|² · P_scene(f)`, where
+`P_scene(f)` — the nebula's own true spatial-frequency content — is unknown and
+cannot be separated from the system response `H(f)` using a single image alone. No
+absolute MTF is recoverable this way, full stop.
+
+What *is* recoverable: normalise each image's own radial power to the mean power in
+its low-frequency band (`freq <= LOW_FREQ_MAX`, 0.10 cyc/px — the same boundary
+`_compute_mid_high_ratio` already uses), then take the square root (power → an
+amplitude-like quantity) so a 50%-crossing (via the shared `find_level_crossing`,
+see the utilities table above) carries the same *meaning* as a true MTF50. This is
+valid only as a same-target, same-session A-vs-B comparator. It is not comparable in
+isolation to `PSFAnalyzer`'s ePSF-based MTF50 (different physical quantity, not a
+second measurement of the same one), is unsmoothed (a single noisy realisation's
+radial-averaged FFT power, unlike the ePSF curve's stacked many-star fit — so a `None`
+crossing on a noisy or very smooth spectrum is expected, not a bug), and is not
+guaranteed to start near 1.0 the way the ePSF MTF is explicitly clamped to be via
+`otf /= otf.max()` in `_compute_mtf` — it is normalised to the low band's *mean*, not
+a peak.
+
+**Every MTF/MTF50 value the report shows must say which of the two it is.** Table row
+labels use the pattern `"MTF50 — <source> (cyc/px)"` (`"— ePSF"` / `"— power
+spectrum"` / `"— power spectrum, with stars"`), never a bare `"MTF50 (cyc/px)"` —
+Section 4, Section 7, and Section 9's summary table all follow this, and Section 4's
+"How the MTF is derived" info box explicitly cross-references Section 7's number as a
+different, complementary quantity so a reader who notices the two disagree doesn't
+conclude one is broken. Apply the same reasoning before adding a third source of an
+MTF-shaped number: if it comes from a known calibration input (point/edge/sinusoid),
+it's a real MTF; if it comes from an arbitrary scene, it's at best a same-target
+relative proxy and must be labelled and caveated as such. The dB "ratio of the
+difference" column for the power-spectrum MTF50 table reuses the existing
+power-quantity dB convention above (`10·log10`, via `_db_ratio_at`), sampled at the
+mean of the two images' MTF50 frequencies — not a fresh ad hoc ratio formula.
 
 ### `AstroImage`'s three background attributes mean three different things
 

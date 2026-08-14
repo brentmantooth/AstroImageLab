@@ -1167,6 +1167,38 @@ def _mtf_ratio_db(freq_a, mtf_a, freq_b, mtf_b) -> tuple[np.ndarray, np.ndarray]
     return freq_common, ratio_db
 
 
+def _db_ratio_at(freq_a, rp_a, freq_b, rp_b, ref_freq: float | None) -> float | None:
+    """Interpolate _power_ratio_db's dB curve at a single reference frequency.
+    None if either input is missing, the two frequency axes aren't bin-for-bin
+    aligned (see _power_ratio_db), or ref_freq itself is None."""
+    if ref_freq is None:
+        return None
+    result = _power_ratio_db(freq_a, rp_a, freq_b, rp_b)
+    if result is None:
+        return None
+    freq_common, ratio_db = result
+    return float(np.interp(ref_freq, freq_common, ratio_db))
+
+
+def _spectral_mtf50_row(label: str, mtf50_a: float | None, mtf50_b: float | None,
+                         freq_a, rp_a, freq_b, rp_b) -> str:
+    """One <tr> for the Section 7 power-spectrum MTF50 table: Metric | A | B |
+    radial power ratio in dB, evaluated at the mean of the two MTF50 frequencies
+    (whichever are defined). Mirrors _nc_ratio_rows' shape (scale/A/B/ratio) but the
+    'ratio' column is a dB value rather than a plain A/B multiple, since MTF50 here
+    is derived from a power quantity (see the dB-convention rule in CLAUDE.md)."""
+    ca, cb = _better_worse_class(mtf50_a, mtf50_b)
+    defined = [v for v in (mtf50_a, mtf50_b) if v is not None]
+    ref_freq = float(np.mean(defined)) if defined else None
+    db = _db_ratio_at(freq_a, rp_a, freq_b, rp_b, ref_freq)
+    cr, _ = _better_worse_class(db, 0.0) if db is not None else ("", "")
+    db_str = f"{_val(db, '.2f')} dB" if db is not None else "—"
+    return (f"<tr><td>{label}</td>"
+            f"<td class='{ca}'>{_val(mtf50_a, '.4f')}</td>"
+            f"<td class='{cb}'>{_val(mtf50_b, '.4f')}</td>"
+            f"<td class='{cr}'>{db_str}</td></tr>")
+
+
 def _symlog_bin_edges(lo: float, hi: float, linthresh: float, n_bins: int = 80) -> np.ndarray:
     """Histogram bin edges evenly spaced in symlog-transformed x (matplotlib's
     own default-linscale=1 symlog transform), not in raw linear ADU. Linear
@@ -2049,8 +2081,8 @@ class ReportBuilder:
   <tr><td>Moffat &beta; <small style="color:#555">↑ higher = tighter wings</small></td><td>{_val_pm(pa.get("beta"), pa.get("beta_mad"))}</td><td>{_val_pm(pb.get("beta"), pb.get("beta_mad"))}</td>{_sig_td(sig_beta, p_beta)}</tr>
   <tr><td>Ellipticity <small style="color:#555">↓ lower = rounder stars</small></td><td>{_val_pm(pa.get("ellipticity"), pa.get("ellipticity_mad"))}</td><td>{_val_pm(pb.get("ellipticity"), pb.get("ellipticity_mad"))}</td>{_sig_td(sig_ell, p_ell)}</tr>
   <tr><td>Eccentricity <small style="color:#555">↓ lower = rounder stars</small></td><td>{_val_pm(pa.get("eccentricity"), pa.get("eccentricity_mad"))}</td><td>{_val_pm(pb.get("eccentricity"), pb.get("eccentricity_mad"))}</td>{_sig_td(sig_ecc, p_ecc)}</tr>
-  <tr><td>MTF50 (cyc/px) <small style="color:#555">↑ higher = sharper</small></td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td><td></td></tr>
-  <tr><td>MTF @ Nyquist <small style="color:#555">ideal ≈ 0</small></td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td><td></td></tr>
+  <tr><td>MTF50 — ePSF (cyc/px) <small style="color:#555">↑ higher = sharper</small></td><td class="{ma}">{_val(pa.get("mtf50_cycles_per_px"), ".4f")}</td><td class="{mb}">{_val(pb.get("mtf50_cycles_per_px"), ".4f")}</td><td></td></tr>
+  <tr><td>MTF @ Nyquist — ePSF <small style="color:#555">ideal ≈ 0</small></td><td>{_val(pa.get("mtf_nyquist"), ".4f")}</td><td>{_val(pb.get("mtf_nyquist"), ".4f")}</td><td></td></tr>
   <tr><td>Stars used in ePSF</td><td>{_epsf_stars_cell(pa)}</td><td>{_epsf_stars_cell(pb)}</td><td></td></tr>
 </table>
 <p class="footnote">&#9733;&nbsp;small (|&delta;|&ge;0.147),&nbsp;&nbsp;&#9733;&#9733;&nbsp;medium (|&delta;|&ge;0.33),&nbsp;&nbsp;&#9733;&#9733;&#9733;&nbsp;large (|&delta;|&ge;0.474);&nbsp;&nbsp;n.s.&nbsp;= p&ge;0.05;&nbsp;&nbsp;&delta;&gt;0 means {ra.label} values tend higher.</p>
@@ -2196,7 +2228,14 @@ Higher curve = better contrast preservation at fine scales.</p>
     'contrast at all spatial scales. If the curves cross, one filter is sharper at fine detail while '
     'the other preserves broader structures better. '
     '<strong>Common causes of a lower MTF curve:</strong> poor seeing, focus offset, filter tilt, or '
-    'optical aberrations in the filter glass.',
+    'optical aberrations in the filter glass.<br><br>'
+    '<strong>Every MTF50 in this report is labelled with its source.</strong> The values above are '
+    '&ldquo;&mdash; ePSF&rdquo;: derived from the stars in the with-stars image, as described here. '
+    'Section 7 (Micro-contrast / Power Spectrum) reports a second, differently-derived '
+    '&ldquo;&mdash; power spectrum&rdquo; MTF50 from the nebula region&rsquo;s own FFT &mdash; a '
+    'different, complementary quantity, not a second measurement of this one. The two need not agree '
+    'and should not be compared to each other directly; see Section 7 for what that number does and '
+    'does not mean.',
     title="How the MTF is derived")}
 
 {mtf_ratio_html}
@@ -2735,7 +2774,8 @@ Higher curve = better contrast preservation at fine scales.</p>
                       freq_b: "np.ndarray | None", mtf_b: "np.ndarray | None",
                       label_a: str, label_b: str,
                       freq_ref=None, mtf_ref=None,
-                      label_ref: str = "Reference") -> plt.Figure:
+                      label_ref: str = "Reference",
+                      title: str = "MTF comparison") -> plt.Figure:
         fig, ax = plt.subplots(figsize=(7, 4))
         if freq_a is not None and mtf_a is not None:
             ax.plot(freq_a, mtf_a, color="steelblue", linewidth=2, label=label_a)
@@ -2751,7 +2791,7 @@ Higher curve = better contrast preservation at fine scales.</p>
         ax.set_xlim(0, 0.5)
         ax.set_yscale("log")
         ax.set_ylim(1e-3, 1.05)
-        ax.set_title("MTF comparison")
+        ax.set_title(title)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
@@ -4537,6 +4577,64 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                 open=True,
             )
 
+        # Power-spectrum-derived MTF50 table (see analysis/power_spectrum.py's
+        # _spectral_mtf for the methodology; pre-computed here per the "Long
+        # f-string HTML blocks" convention).
+        mtf_rows = _spectral_mtf50_row(
+            "MTF50 — power spectrum (cyc/px)",
+            pa.get("spectral_mtf50_cycles_per_px"), pb.get("spectral_mtf50_cycles_per_px"),
+            pa.get("freq_axis"), pa.get("radial_power"),
+            pb.get("freq_axis"), pb.get("radial_power"),
+        )
+        if star_pa or star_pb:
+            mtf_rows += _spectral_mtf50_row(
+                "MTF50 — power spectrum, with stars (cyc/px)",
+                star_pa.get("spectral_mtf50_cycles_per_px"), star_pb.get("spectral_mtf50_cycles_per_px"),
+                star_pa.get("freq_axis"), star_pa.get("radial_power"),
+                star_pb.get("freq_axis"), star_pb.get("radial_power"),
+            )
+        img_spectral_mtf = _img_tag(
+            self._overlay_mtf(pa.get("freq_axis"), pa.get("spectral_mtf_curve"),
+                              pb.get("freq_axis"), pb.get("spectral_mtf_curve"),
+                              ra.label, rb.label,
+                              title="Relative spectral MTF (power spectrum)"),
+            "Spectral MTF",
+        )
+        mtf_info_box = _info_box(
+            'Not as an absolute quantity. A true MTF is the system&rsquo;s response to a '
+            '<em>known</em> input &mdash; a point source, a slit, or a calibrated sinusoidal target. '
+            'Section 4&rsquo;s ePSF-based MTF is exactly this, built from the stars&rsquo; own '
+            'point-source response. The power spectrum here, by contrast, is the FFT of a real, '
+            'unknown nebula scene: P<sub>image</sub>(f) &asymp; |H(f)|&sup2;&thinsp;&times;&thinsp;'
+            'P<sub>scene</sub>(f), where H(f) is the system&rsquo;s optical/detector response and '
+            'P<sub>scene</sub>(f) is the (unknown) true spatial-frequency content of the nebula '
+            'itself. Without knowing P<sub>scene</sub>(f) independently, the two cannot be '
+            'separated, so no absolute MTF can be recovered from a single image&rsquo;s power '
+            'spectrum alone.<br><br>'
+            'What <em>can</em> be recovered: because this comparison already requires both images '
+            'to cover the same target region, P<sub>scene</sub>(f) is approximately shared between '
+            'them and cancels in a ratio &mdash; the radial power ratio (dB) curve shown below is, '
+            'in effect, already a relative MTF-ratio curve.<br><br>'
+            '<strong>MTF50 (power spectrum), below:</strong> each image&rsquo;s own radial power is '
+            'normalised to the mean power in its low-frequency band (&le;0.10 cyc/px, the same '
+            'boundary used for the mid/high ratio above), then square-rooted to move from a power '
+            'quantity to an amplitude-like one. The frequency at which this normalised curve falls '
+            'to 0.5 is reported as MTF50. Because the normalisation is per-image rather than a true '
+            'zero-scene-content reference, this number mixes system response with the scene&rsquo;s '
+            'own large-vs-small-scale structure &mdash; it is meaningful only as a same-target, '
+            'same-session A-vs-B comparator, never as an absolute sharpness figure, and should not '
+            'be compared in isolation to Section 4&rsquo;s ePSF-based MTF50, which measures a '
+            'genuinely different, scene-independent quantity from the same target&rsquo;s own stars. '
+            'It is also unsmoothed and can be noisier bin-to-bin than the ePSF curve, and is not '
+            'guaranteed to start near 1.0 the way the ePSF MTF is &mdash; a very smooth or very '
+            'noisy spectrum may never cross 0.5, in which case the value shown is &ldquo;&mdash;&rdquo;. '
+            'The &ldquo;Radial power ratio (dB)&rdquo; column reuses the same raw ratio curve as the '
+            'figure below, read off at the frequency where the two images&rsquo; MTF50 values sit '
+            '(their mean, when both are defined): how many dB more or less power A has vs B at the '
+            'spatial frequency where each image&rsquo;s own contrast has dropped to half.',
+            title="Can the power spectrum be expressed as an MTF?",
+        )
+
         # Star-image comparison row (only when starless was the primary input)
         star_row_html = ""
         if star_pa or star_pb:
@@ -4582,6 +4680,18 @@ power through their profiles, halos, and diffraction spikes.</p>"""
   <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th></tr>
   <tr><td>Mid/high ratio</td><td class="{ca}">{_val(pa.get("mid_high_ratio"), ".4f")}</td><td class="{cb}">{_val(pb.get("mid_high_ratio"), ".4f")}</td></tr>
 </table>
+
+{mtf_info_box}
+
+<table>
+  <tr><th>Metric</th><th>{ra.label}</th><th>{rb.label}</th><th>Radial power ratio (dB)</th></tr>
+  {mtf_rows}
+</table>
+
+{img_spectral_mtf}
+<p class="caption">Relative spectral MTF curves (see info box above for what this does and does not
+mean), one per image, each normalised to its own low-frequency band. The 0.5 crossing gives the
+MTF50 values in the table above; "—" means the curve never crossed 0.5 in the measured range.</p>
 
 {img_overlay}
 <p class="caption">Radial power spectra overlaid (log scale). Solid curves = starless; dashed curves = with stars (when starless images were provided). Curves that diverge at
@@ -6806,8 +6916,10 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
             row_pm("Eccentricity", psf_a.get("eccentricity"), psf_b.get("eccentricity"),
                    psf_a.get("eccentricity_mad"), psf_b.get("eccentricity_mad"),
                    higher_is_better=False),
-            row("MTF50 (cyc/px)", psf_a.get("mtf50_cycles_per_px"),
+            row("MTF50 — ePSF (cyc/px)", psf_a.get("mtf50_cycles_per_px"),
                 psf_b.get("mtf50_cycles_per_px"), fmt=".4f"),
+            row("MTF50 — power spectrum (cyc/px)", pw_a.get("spectral_mtf50_cycles_per_px"),
+                pw_b.get("spectral_mtf50_cycles_per_px"), fmt=".4f"),
             row("Halo/core ratio", halo_a.get("halo_to_core_ratio"),
                 halo_b.get("halo_to_core_ratio"), fmt=".5f", higher_is_better=False),
             row("Edge width 10–90% (px)", edge_a.get("edge_width_10_90_px"),
