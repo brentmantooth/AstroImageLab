@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 from astropy.stats import SigmaClip
@@ -892,6 +893,7 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
                              user_exclusion: np.ndarray | None = None,
                              mesh: np.ndarray | None = None,
                              rms_mesh: np.ndarray | None = None,
+                             progress_callback: Callable[[str], None] | None = None,
                              ) -> MaskedBackgroundResult:
     """Full 4-stage source-masked background estimate — the single entry point.
 
@@ -911,11 +913,25 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
     lower pedestal detects more, which grows the mask, which leaves fewer and
     more spatially-clustered cells, which pushes the estimate lower again. See
     SOURCEMASK_N_PASSES for the measured numbers.
+
+    `progress_callback`, if given, is called with a short human-readable string
+    at each of the four stage boundaries named in this module's own docstring
+    -- this is a ~seconds-to-tens-of-seconds call on a large frame, and a caller
+    driving a GUI progress indicator (gui/bg_region_dialog.py's preview thread,
+    AstroImage.estimate_background()) needs something to show besides a static
+    "please wait". Never called from more than one thread at a time by this
+    function itself, so a plain Qt signal .emit passed in as the callback is
+    safe without extra locking.
     """
     data = np.asarray(data)
     h, w = data.shape[:2]
 
+    def _report(msg: str) -> None:
+        if progress_callback is not None:
+            progress_callback(msg)
+
     if mesh is None or rms_mesh is None:
+        _report("Computing background mesh…")
         try:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=AstropyUserWarning)
@@ -949,6 +965,7 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
         excluded_cells = frac < SOURCEMASK_MIN_CELL_UNMASKED_FRAC
 
     # --- Stage 1: gradient-robust scaffold, no segmentation involved ---
+    _report("Fitting sky scaffold…")
     scaffold = fit_sky_scaffold(mesh, rms_mesh, box_size, (h, w),
                                 excluded_cells=excluded_cells)
     if scaffold.get("insufficient_data"):
@@ -967,14 +984,17 @@ def source_masked_background(data: np.ndarray, *, box_size: int = 64,
     reason: str | None = None
     surface: np.ndarray | None = None
 
-    for _ in range(max(1, n_passes)):
+    for i in range(max(1, n_passes)):
+        pass_suffix = f" (pass {i + 1}/{n_passes})" if n_passes > 1 else ""
         # --- Stages 2+3 ---
         # Passed *into* build_source_mask rather than merged afterwards: this
         # loop re-invokes it each pass, so a post-merge would be dropped on
         # every pass after the first.
+        _report(f"Detecting sources{pass_suffix}…")
         smask = build_source_mask(data, pedestal, sky_sigma, fwhm_px, step=step,
                                   user_exclusion=user_mask)
         # --- Stage 4 ---
+        _report(f"Fitting masked background{pass_suffix}…")
         payload, reason = masked_background_estimate(
             data, smask.mask, box_size, exclude_percentile=exclude_percentile,
             sky_sigma=sky_sigma)

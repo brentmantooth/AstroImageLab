@@ -30,11 +30,12 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QListWidget,
-                             QMainWindow, QMessageBox, QPushButton, QSplitter,
-                             QVBoxLayout, QWidget)
+                             QMainWindow, QMessageBox, QProgressBar, QPushButton,
+                             QSplitter, QVBoxLayout, QWidget)
 
 from analysis.inspector_regions import exclusion_mask
-from core.models import BACKGROUND_DISPLAY_MAX_DIM
+from core.astro_image import decimation_step
+from core.stretch import normalize_for_display
 from gui.inspector_widgets import LinkedImageView, theme_colors
 
 TOOL_PAN = "pan"
@@ -46,16 +47,24 @@ _HINTS = {
                "of the background fit.",
 }
 
+# Lower than inspector_widgets.OVERLAY_DEFAULT_ALPHA (~45%) -- this dialog's whole
+# purpose is judging drawn regions against the image underneath them, so a heavier
+# tint here specifically (not the shared default other dialogs use) works against
+# that.
+_DIALOG_OVERLAY_ALPHA = 60
+
 
 class _PreviewThread(QThread):
     """Runs the Section 3g estimate off the GUI thread.
 
     Pure array work from analysis/; the request carries its own copies so a
     control changing mid-run cannot alter what this run is computing, and
-    `token` is echoed back so a superseded result can be dropped.
+    `token` is echoed back on both signals so a superseded run's messages and
+    result can both be dropped.
     """
 
     done = pyqtSignal(object)
+    progress = pyqtSignal(int, str)      # (token, status_text)
 
     def __init__(self, req: dict, parent=None):
         super().__init__(parent)
@@ -64,6 +73,7 @@ class _PreviewThread(QThread):
     def run(self) -> None:
         from analysis.source_mask import source_masked_background
         r = self._req
+        token = r["token"]
         try:
             image = r["image"]
             user = exclusion_mask(image.data.shape[:2], r["regions"])
@@ -73,10 +83,11 @@ class _PreviewThread(QThread):
                 fwhm_px=r["fwhm_px"],
                 user_exclusion=user if user.any() else None,
                 mesh=image.background.background_mesh,
-                rms_mesh=image.background.background_rms_mesh)
-            self.done.emit({"token": r["token"], "result": result, "user": user})
+                rms_mesh=image.background.background_rms_mesh,
+                progress_callback=lambda msg: self.progress.emit(token, msg))
+            self.done.emit({"token": token, "result": result, "user": user})
         except Exception as exc:                      # noqa: BLE001 - surfaced in the UI
-            self.done.emit({"token": r["token"], "error": str(exc)})
+            self.done.emit({"token": token, "error": str(exc)})
 
 
 class BackgroundRegionDialog(QMainWindow):
@@ -97,11 +108,16 @@ class BackgroundRegionDialog(QMainWindow):
         self._regions: list[dict] = [dict(r) for r in (regions or [])]
         self._dark = dark_mode
         self._fwhm_px = float(fwhm_px)
-        self._tool = TOOL_PAN
+        self._tool = TOOL_DRAW
         self._token = 0
         self._thread: _PreviewThread | None = None
 
         self._build_ui()
+        # Fires _on_tool_changed, which applies TOOL_DRAW to every view -- done here
+        # (after _views exists) rather than by reordering the combo's own default,
+        # so the visible selection always matches self._tool.
+        if self._tool_combo.currentData() != TOOL_DRAW:
+            self._tool_combo.setCurrentIndex(self._tool_combo.findData(TOOL_DRAW))
         self._refresh_list()
         self._apply_tool()
         self._show_images()
@@ -114,6 +130,19 @@ class BackgroundRegionDialog(QMainWindow):
         root = QVBoxLayout(central)
 
         tools = QHBoxLayout()
+        # Only meaningful with both images loaded; a single image has nothing to
+        # switch to. Connected only after both items exist, mirroring the tool combo
+        # below -- adding the first item to an empty QComboBox already fires
+        # currentIndexChanged once, before self._views exists.
+        self._image_combo: QComboBox | None = None
+        if len(self._images) > 1:
+            tools.addWidget(QLabel("Image:"))
+            self._image_combo = QComboBox()
+            for i, (_img, label) in enumerate(self._images):
+                self._image_combo.addItem(label, i)
+            self._image_combo.currentIndexChanged.connect(self._on_image_changed)
+            tools.addWidget(self._image_combo)
+
         tools.addWidget(QLabel("Tool:"))
         self._tool_combo = QComboBox()
         self._tool_combo.addItem("Pan / zoom", TOOL_PAN)
@@ -124,6 +153,11 @@ class BackgroundRegionDialog(QMainWindow):
         self._hint.setStyleSheet("color: #888;")
         tools.addWidget(self._hint)
         tools.addStretch(1)
+        reset_btn = QPushButton("Reset")
+        reset_btn.setToolTip(
+            "Clear every drawn region and refit the view to the image")
+        reset_btn.clicked.connect(self._on_reset)
+        tools.addWidget(reset_btn)
         root.addLayout(tools)
 
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -131,13 +165,22 @@ class BackgroundRegionDialog(QMainWindow):
         panel_row = QHBoxLayout(panels)
         panel_row.setContentsMargins(0, 0, 0, 0)
         self._views: list[LinkedImageView] = []
-        for _img, label in self._images:
+        for i, (_img, label) in enumerate(self._images):
             view = LinkedImageView(label, dark=self._dark)
             view.polygon_drawn.connect(self._on_polygon_drawn)
             # The line and ROI tools of LinkedImageView are unused here; lock
             # them so a click can only ever mean "draw" or "pan".
             view.set_line_locked(True)
             view.set_roi_locked(True)
+            # Lower than the shared inspector_widgets default -- see
+            # _DIALOG_OVERLAY_ALPHA.
+            view.set_overlay_style("mask", alpha=_DIALOG_OVERLAY_ALPHA)
+            view.set_overlay_style("exclusion", alpha=_DIALOG_OVERLAY_ALPHA)
+            # Only the combo's current selection (image A, initially) is shown --
+            # Qt box layouts reclaim a hidden widget's space automatically, so the
+            # visible panel gets the full width instead of splitting it with a
+            # panel the user isn't drawing on.
+            view.setVisible(i == 0)
             panel_row.addWidget(view)
             self._views.append(view)
         split.addWidget(panels)
@@ -156,6 +199,14 @@ class BackgroundRegionDialog(QMainWindow):
         self._clear_btn.clicked.connect(self._clear_all)
         btns.addWidget(self._clear_btn)
         side_col.addLayout(btns)
+
+        # Indeterminate (range 0,0 = marquee) -- the estimate has no meaningful
+        # percent-complete, only named stages, which self._stats shows as text.
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)
+        self._progress_bar.setFixedHeight(14)
+        self._progress_bar.setVisible(False)
+        side_col.addWidget(self._progress_bar)
 
         self._stats = QLabel("")
         self._stats.setWordWrap(True)
@@ -181,10 +232,15 @@ class BackgroundRegionDialog(QMainWindow):
     # -- display ----------------------------------------------------------
 
     def _show_images(self) -> None:
+        # Decimate the raw data first, then stretch the much smaller result --
+        # stf_stretch's median/MAD scan over a full 24 MP array is most of what made
+        # this dialog slow to open, and the displayed image is decimated anyway.
         for view, (img, _label) in zip(self._views, self._images):
-            disp = img.display_image(stretch=True)
-            step = max(1, max(disp.shape[:2]) // BACKGROUND_DISPLAY_MAX_DIM)
-            view.set_image(disp[::step, ::step].astype(np.float32), "gray", None)
+            h, w = img.data.shape[:2]
+            step = decimation_step(h, w)
+            small = img.data[::step, ::step]
+            disp = normalize_for_display(small, stretch=True)
+            view.set_image(disp.astype(np.float32), "gray", None)
         self._repaint_regions()
 
     def _repaint_regions(self) -> None:
@@ -215,6 +271,10 @@ class BackgroundRegionDialog(QMainWindow):
             view.set_lasso_locked(self._tool != TOOL_DRAW)
         self._hint.setText(_HINTS.get(self._tool, ""))
 
+    def _on_image_changed(self, idx: int) -> None:
+        for i, view in enumerate(self._views):
+            view.setVisible(i == idx)
+
     # -- editing ----------------------------------------------------------
 
     def _on_polygon_drawn(self, region: dict) -> None:
@@ -241,9 +301,31 @@ class BackgroundRegionDialog(QMainWindow):
         self._repaint_regions()
         self._request_preview()
 
+    def _on_reset(self) -> None:
+        """Clear every drawn region and refit each view -- back to a clean image,
+        ready for a new selection, even if the view was only panned/zoomed and
+        nothing was actually drawn (_clear_all() alone no-ops in that case)."""
+        self._regions = []
+        self._refresh_list()
+        self._repaint_regions()
+        self._request_preview()
+        for view in self._views:
+            view.view_box.autoRange()
+
     # -- preview ----------------------------------------------------------
 
     def _request_preview(self) -> None:
+        if not self._regions:
+            # Nothing drawn yet: skip the (~seconds-to-tens-of-seconds on a large
+            # frame) source-masked background estimate entirely rather than running
+            # it just to show what the detector finds on its own -- that's what made
+            # opening this dialog slow, and there's nothing to preview yet anyway.
+            self._timer.stop()
+            self._progress_bar.setVisible(False)
+            self._stats.setText(
+                "Draw an exclusion region to preview its effect on the background fit.")
+            self._set_detector_overlay(None)
+            return
         self._stats.setText("Updating preview…")
         self._timer.start(300)
 
@@ -263,16 +345,25 @@ class BackgroundRegionDialog(QMainWindow):
             # Supersede rather than wait: never block the GUI thread.
             try:
                 old.done.disconnect()
+                old.progress.disconnect()
             except TypeError:
                 pass
             old.quit()
+        self._progress_bar.setVisible(True)
         self._thread = _PreviewThread(req, parent=self)
         self._thread.done.connect(self._on_preview_ready)
+        self._thread.progress.connect(self._on_preview_progress)
         self._thread.start()
+
+    def _on_preview_progress(self, token: int, msg: str) -> None:
+        if token != self._token:
+            return                       # superseded by a newer request
+        self._stats.setText(msg)
 
     def _on_preview_ready(self, payload: dict) -> None:
         if payload.get("token") != self._token:
             return                       # superseded by a newer request
+        self._progress_bar.setVisible(False)
         if payload.get("error"):
             self._stats.setText(f"Preview failed: {payload['error']}")
             return
@@ -306,11 +397,17 @@ class BackgroundRegionDialog(QMainWindow):
                 view.set_overlay("mask", None)
                 continue
             h, w = shape
-            step = max(1, max(mask.shape[:2]) // max(h, w))
-            small = mask[::step, ::step][:h, :w]
+            # Must be the exact same stride _show_images() used to decimate the
+            # display image. Deriving a stride from mask.shape // view.shape (the
+            # previous approach) drifts under floor/ceil rounding whenever the
+            # image dimensions aren't evenly divisible -- that's what made the
+            # detector mask visibly offset from the region it was computed against.
+            step = decimation_step(*mask.shape[:2])
+            small = mask[::step, ::step]
             if small.shape != (h, w):
                 padded = np.zeros((h, w), dtype=bool)
-                padded[:small.shape[0], :small.shape[1]] = small
+                ph, pw = min(h, small.shape[0]), min(w, small.shape[1])
+                padded[:ph, :pw] = small[:ph, :pw]
                 small = padded
             view.set_overlay("mask", small)
 

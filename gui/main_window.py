@@ -1,16 +1,47 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QUrl, QSettings
+from PyQt6.QtCore import Qt, QUrl, QSettings, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QMessageBox, QFileDialog, QPushButton,
+    QSplitter, QMessageBox, QFileDialog, QProgressDialog, QPushButton,
     QToolBar,
 )
 
 from gui.image_panel import ImagePanel
 from gui.control_panel import AnalysisControlPanel
 from gui.analysis_thread import AnalysisThread
+
+
+class _BgEstimateThread(QThread):
+    """Runs AstroImage.estimate_background() for one or more images off the GUI
+    thread, ahead of opening the Background Regions dialog.
+
+    Section 3g's source-masked estimate (see analysis/source_mask.py) can run
+    tens of seconds on a large frame; calling it inline in
+    MainWindow._open_bg_region_dialog() froze the whole application for that
+    long with no feedback at all. `progress` relays each image's own named
+    stage as it starts (see estimate_background's progress_callback), prefixed
+    with that image's label so a two-image wait is legible as two workloads
+    rather than one.
+    """
+
+    progress = pyqtSignal(str)
+    done = pyqtSignal(object)     # None on success, else an error message string
+
+    def __init__(self, images: list[tuple], parent=None):
+        super().__init__(parent)
+        self._images = images     # [(AstroImage, label), ...]
+
+    def run(self) -> None:
+        try:
+            for img, label in self._images:
+                img.estimate_background(
+                    progress_callback=lambda msg, label=label:
+                        self.progress.emit(f"{label}: {msg}"))
+            self.done.emit(None)
+        except Exception as exc:                      # noqa: BLE001 - surfaced in the UI
+            self.done.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -22,6 +53,7 @@ class MainWindow(QMainWindow):
         self.resize(1600, 900)   # control panel's 2-col Parameters needs ~1473px natural width
 
         self._thread: AnalysisThread | None = None
+        self._bg_estimate_thread: _BgEstimateThread | None = None
         self._roi: tuple | None = None
         self._crosshair: dict | None = None
         # Normalised polygon dicts; see analysis.inspector_regions.exclusion_mask.
@@ -527,11 +559,43 @@ class MainWindow(QMainWindow):
 
         # The preview needs a background estimate; computing it here also makes
         # the later analysis run's own call a no-op (estimate_background is
-        # idempotent), so nothing is wasted.
-        for img in (img_a, img_b):
-            if img is not None and img.background is None:
-                img.estimate_background()
+        # idempotent), so nothing is wasted. Section 3g's source-masked pass can
+        # run tens of seconds on a large frame, so this runs off the GUI thread
+        # with a progress dialog rather than freezing the window -- see
+        # _BgEstimateThread.
+        pending = [(img, getattr(img, "label", "Image A" if img is img_a else "Image B"))
+                   for img in (img_a, img_b) if img is not None and img.background is None]
+        if not pending:
+            self._show_bg_region_dialog(img_a, img_b)
+            return
 
+        self._act_bg_regions.setEnabled(False)
+        # cancelButtonText="" hides the cancel button -- estimate_background()
+        # isn't safely interruptible mid-Background2D-call.
+        progress = QProgressDialog("Estimating background…", "", 0, 0, self)
+        progress.setWindowTitle("Preparing Background Regions")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        thread = _BgEstimateThread(pending, parent=self)
+        thread.progress.connect(progress.setLabelText)
+
+        def _on_done(error: str | None) -> None:
+            progress.close()
+            self._act_bg_regions.setEnabled(True)
+            self._bg_estimate_thread = None
+            if error:
+                QMessageBox.warning(self, "Background estimate failed", error)
+                return
+            self._show_bg_region_dialog(img_a, img_b)
+
+        thread.done.connect(_on_done)
+        self._bg_estimate_thread = thread   # keep a reference so it isn't GC'd mid-run
+        thread.start()
+        progress.show()
+
+    def _show_bg_region_dialog(self, img_a, img_b) -> None:
+        from gui.bg_region_dialog import BackgroundRegionDialog
         settings = self._control.settings()
         self._bg_region_dialog = BackgroundRegionDialog(
             img_a, img_b, regions=self._bg_exclusions,

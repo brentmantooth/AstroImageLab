@@ -439,7 +439,8 @@ class AstroImage:
         self.background_rms = None
         self.source_mask_result = None
 
-    def estimate_background(self, box_size: int = 64) -> None:
+    def estimate_background(self, box_size: int = 64,
+                            progress_callback=None) -> None:
         """Estimate the sky background, in two phases.
 
         Phase 1 is the plain per-cell-sigma-clipped Background2D, kept on
@@ -452,11 +453,18 @@ class AstroImage:
         Falls back to phase 1 silently whenever phase 2 cannot produce a surface
         (too little sky left, too few surviving cells); `source_mask_result
         .fallback_reason` carries the explanation for the report.
+
+        `progress_callback`, if given, is a `Callable[[str], None]` called with a
+        short status string as each phase/stage starts -- phase 2 alone can run
+        tens of seconds on a large frame (see source_masked_background's own
+        docstring), which is otherwise silent. Passed straight through to it.
         """
         if self.data is None:
             raise RuntimeError("Image not loaded")
         if self.background_model is not None:
             return   # already computed; self.data and the mask both fixed by now
+        if progress_callback is not None:
+            progress_callback("Computing background mesh…")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=AstropyUserWarning)
             self.background = Background2D(
@@ -488,7 +496,8 @@ class AstroImage:
             fwhm_px=float(self.psf_fwhm_hint_px),
             user_exclusion=user if (user is not None and user.any()) else None,
             mesh=self.background.background_mesh,
-            rms_mesh=self.background.background_rms_mesh)
+            rms_mesh=self.background.background_rms_mesh,
+            progress_callback=progress_callback)
         self.source_mask_result = res
         if res.ok:
             self.background_model = np.asarray(res.surface, dtype=np.float32)
