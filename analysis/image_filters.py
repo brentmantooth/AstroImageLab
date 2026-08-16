@@ -56,8 +56,16 @@ class SpatialDetailAnalyzer:
                 localmax_prominence_percentile: float = SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                 localmax_region_fraction: float = SECTION8_LOCALMAX_REGION_FRACTION,
                 localmax_presmooth_fraction: float = SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
-                localmax_top_percent: float = SECTION8_LOCALMAX_TOP_PERCENT) -> dict:
+                localmax_top_percent: float = SECTION8_LOCALMAX_TOP_PERCENT,
+                make_figures: bool = True) -> dict:
+        """Multi-scale spatial detail comparison.
 
+        make_figures=False skips every matplotlib call (~30 figures at dpi=150,
+        the dominant cost of this analyzer) and omits the "figures" key. Every
+        metric key -- panels, nc scores, localmax entries, acutance scalars,
+        xs_snr -- is produced identically either way, so a headless sweep
+        (tools/sensitivity_sweep.py) gets the same numbers the report does.
+        """
         image_a.estimate_background()
         if image_b is not None:
             image_b.estimate_background()
@@ -197,7 +205,7 @@ class SpatialDetailAnalyzer:
             "diff": original_diff,
         }
         # Mask illustration: only meaningful in two-image mode.
-        if mask_neb_shared is not None:
+        if mask_neb_shared is not None and make_figures:
             mask_fig = self._plot_mask_illustration(
                 result["panels"]["original"]["a"], mask_neb_shared, mask_bg_shared)
             figures["mask_illustration"] = fig_to_b64(mask_fig, dpi=150)
@@ -209,7 +217,7 @@ class SpatialDetailAnalyzer:
         # every derived metric below — not a filter, just the input they all share.
         xs_raw_orig = None
         xs_line_orig = None
-        if crosshair_roi is not None and analysis_b is not None:
+        if crosshair_roi is not None and analysis_b is not None and make_figures:
             pos, pa = self._sample_line(analysis_a, **crosshair_roi)
             _, pb = self._sample_line(analysis_b, **crosshair_roi)
             xs_raw_orig = (pos, pa, pb, image_a.label, _label_b,
@@ -217,27 +225,28 @@ class SpatialDetailAnalyzer:
             xs_line_orig = self._crosshair_to_cropped_px(
                 crosshair_roi, analysis_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-        if analysis_b is not None:
-            orig_fig = self._plot_side_by_side(
-                self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
-                self._crop_border(analysis_b, SECTION8_BORDER_CROP_FRACTION),
-                f"Original (normalised) — {image_a.label}",
-                f"Original (normalised) — {_label_b}",
-                diff_title="Log ratio (A/B), original image",
-                cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
-                display_roi=None,
-                xs_data=xs_raw_orig,
-                xs_line=xs_line_orig,
-            )
-        else:
-            orig_fig = self._plot_single(
-                self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
-                f"Original (normalised) — {image_a.label}",
-                cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
-            )
-        figures["original"] = fig_to_b64(orig_fig, dpi=150)
+        if make_figures:
+            if analysis_b is not None:
+                orig_fig = self._plot_side_by_side(
+                    self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
+                    self._crop_border(analysis_b, SECTION8_BORDER_CROP_FRACTION),
+                    f"Original (normalised) — {image_a.label}",
+                    f"Original (normalised) — {_label_b}",
+                    diff_title="Log ratio (A/B), original image",
+                    cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
+                    display_roi=None,
+                    xs_data=xs_raw_orig,
+                    xs_line=xs_line_orig,
+                )
+            else:
+                orig_fig = self._plot_single(
+                    self._crop_border(analysis_a, SECTION8_BORDER_CROP_FRACTION),
+                    f"Original (normalised) — {image_a.label}",
+                    cmap="gray",   # source image is shown as-is, not a derived metric — keep it greyscale
+                )
+            figures["original"] = fig_to_b64(orig_fig, dpi=150)
 
-        if mask_neb_shared is not None:
+        if mask_neb_shared is not None and make_figures:
             orig_corr_fig = self._plot_metric_correlation(
                 analysis_a, analysis_b, original_diff, mask_neb_shared, mask_bg_shared,
                 image_a.label, _label_b, "Original (normalised image)", rng)
@@ -263,6 +272,7 @@ class SpatialDetailAnalyzer:
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
+                make_figures=make_figures,
             )
             _f_log = _ex.submit(self._log_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -276,6 +286,7 @@ class SpatialDetailAnalyzer:
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
+                make_figures=make_figures,
             )
             _f_wav = _ex.submit(self._wavelet_analysis,
                 analysis_a, analysis_b, wavelet, levels,
@@ -289,6 +300,7 @@ class SpatialDetailAnalyzer:
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
+                make_figures=make_figures,
             )
             _f_ent = _ex.submit(self._entropy_analysis,
                 analysis_a, analysis_b,
@@ -305,6 +317,7 @@ class SpatialDetailAnalyzer:
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
+                make_figures=make_figures,
             )
             _f_grad = _ex.submit(self._gradient_analysis,
                 analysis_a, analysis_b, log_sigmas,
@@ -318,6 +331,7 @@ class SpatialDetailAnalyzer:
                 localmax_region_fraction=localmax_region_fraction,
                 localmax_presmooth_fraction=localmax_presmooth_fraction,
                 localmax_top_percent=localmax_top_percent,
+                make_figures=make_figures,
             )
             # Retrieve in actual-completion order (not submission order) so that,
             # if a run ever stalls again, the printed timings show exactly which
@@ -403,17 +417,18 @@ class SpatialDetailAnalyzer:
                 "local_grad_energy": result["localgrad_nc_ratio_err"],
                 "local_lap_variance": result["loclap_nc_ratio_err"],
             }
-            nc_fig = self._plot_nc_ratio_overview({
-                "std": result["std_nc_ratio"],
-                "log": result["log_nc_ratio"],
-                "wavelet": result["wavelet_nc_ratio"],
-                "entropy": result["entropy_nc_ratio"],
-                "gradient": result["gm_nc_ratio"],
-                "local_grad_energy": result["localgrad_nc_ratio"],
-                "local_lap_variance": result["loclap_nc_ratio"],
-            }, nc_errors_by_method)
-            if nc_fig is not None:
-                figures["nc_ratio_overview"] = fig_to_b64(nc_fig, dpi=150)
+            if make_figures:
+                nc_fig = self._plot_nc_ratio_overview({
+                    "std": result["std_nc_ratio"],
+                    "log": result["log_nc_ratio"],
+                    "wavelet": result["wavelet_nc_ratio"],
+                    "entropy": result["entropy_nc_ratio"],
+                    "gradient": result["gm_nc_ratio"],
+                    "local_grad_energy": result["localgrad_nc_ratio"],
+                    "local_lap_variance": result["loclap_nc_ratio"],
+                }, nc_errors_by_method)
+                if nc_fig is not None:
+                    figures["nc_ratio_overview"] = fig_to_b64(nc_fig, dpi=150)
 
             localmax_log_ratios_by_method = {
                 "std": std_partial["localmax_log_ratio"],
@@ -433,10 +448,11 @@ class SpatialDetailAnalyzer:
                 "local_grad_energy": grad_partial["localgrad_localmax_log_ratio_err"],
                 "local_lap_variance": log_partial["loclap_localmax_log_ratio_err"],
             }
-            lm_ratio_fig = self._plot_localmax_ratio_overview(
-                localmax_log_ratios_by_method, localmax_log_ratio_errors_by_method)
-            if lm_ratio_fig is not None:
-                figures["localmax_ratio_overview"] = fig_to_b64(lm_ratio_fig, dpi=150)
+            if make_figures:
+                lm_ratio_fig = self._plot_localmax_ratio_overview(
+                    localmax_log_ratios_by_method, localmax_log_ratio_errors_by_method)
+                if lm_ratio_fig is not None:
+                    figures["localmax_ratio_overview"] = fig_to_b64(lm_ratio_fig, dpi=150)
 
             # Local-maxima mask grid: one row per metric family, columns = kernel/scale
             # sizes smallest -> largest. Every panel's mask is computed with the same
@@ -444,64 +460,69 @@ class SpatialDetailAnalyzer:
             # table statistics -- this reuses panels already cached in
             # result["panels"], no new map computation. Wavelet has only 2 display
             # scales, so its 3rd column is left blank.
-            _grid_families = [
-                ("Local σ",        [(f"std_{ks}px",    float(ks),      f"Local σ — {ks} px")       for ks in kernel_sizes]),
-                ("|LoG|",          [(f"log_{s}",        float(s),       f"|LoG| — σ={s} px")        for s in log_sigmas]),
-                ("Gradient |G|",   [(f"gradient_{s}",   float(s),       f"Gradient |G| — σ={s} px") for s in log_sigmas]),
-                ("Wavelet",        [(f"wavelet_{lvl}",  float(2 ** lvl), f"Wavelet — level {lvl}")   for lvl in (2, 3)]),
-                ("Local entropy",  [(f"entropy_{ks}px", float(ks),      f"Entropy — {ks} px")       for ks in entropy_kernel_sizes]),
-                ("Local grad. energy", [(f"localgrad_{s}", float(s),   f"Local gradient energy — σ={s} px") for s in log_sigmas]),
-                ("Local Laplacian var.", [(f"loclap_{s}", float(s),    f"Local Laplacian variance — σ={s} px") for s in log_sigmas]),
-            ]
-            grid_rows = []
-            for family_label, entries in _grid_families:
-                cells = []
-                for key, scale_px, panel_title in entries:
-                    panel = result["panels"].get(key)
-                    if panel is None or panel["a"] is None or panel["b"] is None:
-                        continue
-                    h_g = min(panel["a"].shape[0], panel["b"].shape[0])
-                    w_g = min(panel["a"].shape[1], panel["b"].shape[1])
-                    abs_a = np.abs(panel["a"][:h_g, :w_g])
-                    abs_b = np.abs(panel["b"][:h_g, :w_g])
-                    footprint_px = max(3, int(round(localmax_footprint_mult * scale_px)) | 1)
-                    region_px = max(1, int(round(localmax_region_fraction * footprint_px)))
-                    presmooth_sigma = max(0.5, localmax_presmooth_fraction * scale_px)
-                    mask = self._combined_localmax_mask(abs_a, abs_b, footprint_px,
-                                                          localmax_prominence_percentile,
-                                                          region_px, presmooth_sigma,
-                                                          localmax_top_percent)
-                    cells.append((abs_a, mask, panel_title))
-                grid_rows.append((family_label, cells))
-            grid_fig = self._plot_localmax_mask_grid(grid_rows)
-            if grid_fig is not None:
-                figures["localmax_mask_illustration"] = fig_to_b64(grid_fig, dpi=150)
+            if make_figures:
+                _grid_families = [
+                    ("Local σ",        [(f"std_{ks}px",    float(ks),      f"Local σ — {ks} px")       for ks in kernel_sizes]),
+                    ("|LoG|",          [(f"log_{s}",        float(s),       f"|LoG| — σ={s} px")        for s in log_sigmas]),
+                    ("Gradient |G|",   [(f"gradient_{s}",   float(s),       f"Gradient |G| — σ={s} px") for s in log_sigmas]),
+                    ("Wavelet",        [(f"wavelet_{lvl}",  float(2 ** lvl), f"Wavelet — level {lvl}")   for lvl in (2, 3)]),
+                    ("Local entropy",  [(f"entropy_{ks}px", float(ks),      f"Entropy — {ks} px")       for ks in entropy_kernel_sizes]),
+                    ("Local grad. energy", [(f"localgrad_{s}", float(s),   f"Local gradient energy — σ={s} px") for s in log_sigmas]),
+                    ("Local Laplacian var.", [(f"loclap_{s}", float(s),    f"Local Laplacian variance — σ={s} px") for s in log_sigmas]),
+                ]
+                grid_rows = []
+                for family_label, entries in _grid_families:
+                    cells = []
+                    for key, scale_px, panel_title in entries:
+                        panel = result["panels"].get(key)
+                        if panel is None or panel["a"] is None or panel["b"] is None:
+                            continue
+                        h_g = min(panel["a"].shape[0], panel["b"].shape[0])
+                        w_g = min(panel["a"].shape[1], panel["b"].shape[1])
+                        abs_a = np.abs(panel["a"][:h_g, :w_g])
+                        abs_b = np.abs(panel["b"][:h_g, :w_g])
+                        footprint_px = max(3, int(round(localmax_footprint_mult * scale_px)) | 1)
+                        region_px = max(1, int(round(localmax_region_fraction * footprint_px)))
+                        presmooth_sigma = max(0.5, localmax_presmooth_fraction * scale_px)
+                        mask = self._combined_localmax_mask(abs_a, abs_b, footprint_px,
+                                                              localmax_prominence_percentile,
+                                                              region_px, presmooth_sigma,
+                                                              localmax_top_percent)
+                        cells.append((abs_a, mask, panel_title))
+                    grid_rows.append((family_label, cells))
+                grid_fig = self._plot_localmax_mask_grid(grid_rows)
+                if grid_fig is not None:
+                    figures["localmax_mask_illustration"] = fig_to_b64(grid_fig, dpi=150)
 
         if crosshair is not None:
             pos_a, prof_a = self._sample_line(norm_a, **crosshair)
             pos_a_raw, prof_a_raw = self._sample_line(image_a.data, **crosshair)
             if image_b is not None and norm_b is not None:
-                figures["xs_context"] = fig_to_b64(self._plot_context_figure(
-                    image_a, image_b, image_a.label, image_b.label, crosshair), dpi=150)
-                pos_b, prof_b = self._sample_line(norm_b, **crosshair)
-                figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile(
-                    pos_a, prof_a, pos_b, prof_b, image_a.label, image_b.label), dpi=150)
+                # xs_snr below is a real metric, not a figure, so it is computed
+                # either way -- only its rendering is gated on make_figures.
                 pos_b_raw, prof_b_raw = self._sample_line(image_b.data, **crosshair)
-                figures["xs_image_profile_raw"] = fig_to_b64(self._plot_image_profile(
-                    pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
-                    image_a.label, image_b.label,
-                    title="Cross-section brightness profile (raw counts)",
-                    ylabel="Pixel value (raw ADU)",
-                ), dpi=150)
+                if make_figures:
+                    figures["xs_context"] = fig_to_b64(self._plot_context_figure(
+                        image_a, image_b, image_a.label, image_b.label, crosshair), dpi=150)
+                    pos_b, prof_b = self._sample_line(norm_b, **crosshair)
+                    figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile(
+                        pos_a, prof_a, pos_b, prof_b, image_a.label, image_b.label), dpi=150)
+                    figures["xs_image_profile_raw"] = fig_to_b64(self._plot_image_profile(
+                        pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
+                        image_a.label, image_b.label,
+                        title="Cross-section brightness profile (raw counts)",
+                        ylabel="Pixel value (raw ADU)",
+                    ), dpi=150)
                 _width = xs_snr_width if xs_snr_width is not None else XS_SNR_REGION_WIDTH
                 xs_snr = self._compute_xs_snr(
                     pos_a_raw, prof_a_raw, pos_b_raw, prof_b_raw,
                     image_a.label, image_b.label, _width)
                 if xs_snr:
                     result["xs_snr"] = {k: v for k, v in xs_snr.items() if k != "fig"}
-                    figures["xs_snr_profile"] = fig_to_b64(xs_snr["fig"], dpi=150)
-                    plt.close(xs_snr["fig"])
-            else:
+                    if make_figures:
+                        figures["xs_snr_profile"] = fig_to_b64(xs_snr["fig"], dpi=150)
+                    plt.close(xs_snr["fig"])   # always close, or the figure leaks
+            elif make_figures:
                 # Single-image: produce cross-section profile for image A only
                 figures["xs_image_profile"] = fig_to_b64(self._plot_image_profile_single(
                     pos_a, prof_a, image_a.label), dpi=150)
@@ -512,7 +533,8 @@ class SpatialDetailAnalyzer:
                 ), dpi=150)
 
         result["crosshair"] = crosshair
-        result["figures"] = figures
+        if make_figures:
+            result["figures"] = figures
         return result
 
     # ------------------------------------------------------------------
@@ -786,7 +808,8 @@ class SpatialDetailAnalyzer:
                        localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                        localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                        localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
-                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
+                       localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
+                       make_figures: bool = True) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "contrast_ratios_a": {}, "contrast_ratios_b": {},
@@ -836,7 +859,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"std_{ks}px"] = lm_entry
                 partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
                 partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
                     std_a, std_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Local σ (kernel {ks}px)", rng)
@@ -848,6 +871,9 @@ class SpatialDetailAnalyzer:
                     "b": (std_b / noise_b).astype(np.float32),
                     "diff": None,
                 }
+
+            if not make_figures:
+                continue   # everything below this point is display-only
 
             xs_raw = None
             xs_line = None
@@ -1108,7 +1134,8 @@ class SpatialDetailAnalyzer:
                        localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                        localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
                        localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
-                       local_energy_window_mult=SECTION8_LOCAL_ENERGY_WINDOW_MULT) -> tuple[dict, dict]:
+                       local_energy_window_mult=SECTION8_LOCAL_ENERGY_WINDOW_MULT,
+                       make_figures: bool = True) -> tuple[dict, dict]:
         """|LoG| detail map at Gaussian scale sigma. Also builds the Section 8m
         "Local Variance of Laplacian" map (windowed var(signed Laplacian), prefix
         "loclap") in the same per-sigma loop, reusing lap_a/lap_b so no extra
@@ -1179,7 +1206,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"log_{sigma}"] = lm_entry
                 partial["localmax_log_ratio"][sigma] = lm_entry["log_ratio_mean"]
                 partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
                     log_a, log_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"|LoG| (σ={sigma}px)", rng)
@@ -1194,36 +1221,37 @@ class SpatialDetailAnalyzer:
 
             xs_raw = None
             xs_line = None
-            if crosshair is not None and not single:
+            if crosshair is not None and not single and make_figures:
                 pos, pa = self._sample_line(log_a, **crosshair)
                 _, pb = self._sample_line(log_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — |LoG|, σ={sigma}px")
                 xs_line = self._crosshair_to_cropped_px(crosshair, log_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-            if not single:
-                fig = self._plot_side_by_side(
-                    self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"|LoG| σ={sigma}px — {label_a}",
-                    f"|LoG| σ={sigma}px — {label_b}",
-                    diff_title=f"|LoG| log-ratio (A/B), σ={sigma}px",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                    display_roi=None,
-                    xs_data=xs_raw,
-                    xs_line=xs_line,
-                )
-            else:
-                fig = self._plot_single(
-                    self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"|LoG| σ={sigma}px — {label_a}",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                )
-            figures[f"log_sigma{sigma}"] = fig
+            if make_figures:
+                if not single:
+                    fig = self._plot_side_by_side(
+                        self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
+                        self._crop_border(log_b, SECTION8_BORDER_CROP_FRACTION),
+                        f"|LoG| σ={sigma}px — {label_a}",
+                        f"|LoG| σ={sigma}px — {label_b}",
+                        diff_title=f"|LoG| log-ratio (A/B), σ={sigma}px",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                        display_roi=None,
+                        xs_data=xs_raw,
+                        xs_line=xs_line,
+                    )
+                else:
+                    fig = self._plot_single(
+                        self._crop_border(log_a, SECTION8_BORDER_CROP_FRACTION),
+                        f"|LoG| σ={sigma}px — {label_a}",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                    )
+                figures[f"log_sigma{sigma}"] = fig
 
-            if not single and noise_a and noise_b:
+            if not single and noise_a and noise_b and make_figures:
                 xs_nrm = None
                 if crosshair is not None:
                     pos_n, pa_n = self._sample_line(log_a / noise_a, **crosshair)
@@ -1276,7 +1304,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"loclap_{sigma}"] = lv_lm_entry
                 partial["loclap_localmax_log_ratio"][sigma] = lv_lm_entry["log_ratio_mean"]
                 partial["loclap_localmax_log_ratio_err"][sigma] = lv_lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 lv_corr_fig = self._plot_metric_correlation(
                     lv_a, lv_b, lv_diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Local Laplacian variance (σ={sigma}px, window={window_px}px)", rng)
@@ -1291,36 +1319,37 @@ class SpatialDetailAnalyzer:
 
             lv_xs_raw = None
             lv_xs_line = None
-            if crosshair is not None and not single:
+            if crosshair is not None and not single and make_figures:
                 lv_pos, lv_pa = self._sample_line(lv_a, **crosshair)
                 _, lv_pb = self._sample_line(lv_b, **crosshair)
                 lv_xs_raw = (lv_pos, lv_pa, lv_pb, label_a, label_b,
                              f"Cross-section — Local Laplacian Variance, σ={sigma}px")
                 lv_xs_line = self._crosshair_to_cropped_px(crosshair, lv_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-            if not single:
-                lv_fig = self._plot_side_by_side(
-                    self._crop_border(lv_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(lv_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_a}",
-                    f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_b}",
-                    diff_title=f"Local Laplacian variance log-ratio (A/B), σ={sigma}px",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                    display_roi=None,
-                    xs_data=lv_xs_raw,
-                    xs_line=lv_xs_line,
-                )
-            else:
-                lv_fig = self._plot_single(
-                    self._crop_border(lv_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_a}",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                )
-            figures[f"loclap_{sigma}"] = lv_fig
+            if make_figures:
+                if not single:
+                    lv_fig = self._plot_side_by_side(
+                        self._crop_border(lv_a, SECTION8_BORDER_CROP_FRACTION),
+                        self._crop_border(lv_b, SECTION8_BORDER_CROP_FRACTION),
+                        f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_a}",
+                        f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_b}",
+                        diff_title=f"Local Laplacian variance log-ratio (A/B), σ={sigma}px",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                        display_roi=None,
+                        xs_data=lv_xs_raw,
+                        xs_line=lv_xs_line,
+                    )
+                else:
+                    lv_fig = self._plot_single(
+                        self._crop_border(lv_a, SECTION8_BORDER_CROP_FRACTION),
+                        f"Local Laplacian Variance σ={sigma}px (window={window_px}px) — {label_a}",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                    )
+                figures[f"loclap_{sigma}"] = lv_fig
 
-            if not single and lv_noise_a and lv_noise_b:
+            if not single and lv_noise_a and lv_noise_b and make_figures:
                 lv_xs_nrm = None
                 if crosshair is not None:
                     lv_pos_n, lv_pa_n = self._sample_line(lv_a / lv_noise_a, **crosshair)
@@ -1355,7 +1384,8 @@ class SpatialDetailAnalyzer:
                             localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                             localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
                             localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
-                            local_energy_window_mult=SECTION8_LOCAL_ENERGY_WINDOW_MULT) -> tuple[dict, dict]:
+                            local_energy_window_mult=SECTION8_LOCAL_ENERGY_WINDOW_MULT,
+                            make_figures: bool = True) -> tuple[dict, dict]:
         """G = |gradient| at Gaussian scale sigma (first spatial derivative magnitude).
         Reuses the LOG_SIGMAS scale set so gradient and |LoG| are directly comparable
         at identical spatial scales. Structured identically to _log_analysis.
@@ -1427,7 +1457,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"gradient_{sigma}"] = lm_entry
                 partial["localmax_log_ratio"][sigma] = lm_entry["log_ratio_mean"]
                 partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
                     gm_a, gm_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Gradient |G| (σ={sigma}px)", rng)
@@ -1442,36 +1472,37 @@ class SpatialDetailAnalyzer:
 
             xs_raw = None
             xs_line = None
-            if crosshair is not None and not single:
+            if crosshair is not None and not single and make_figures:
                 pos, pa = self._sample_line(gm_a, **crosshair)
                 _, pb = self._sample_line(gm_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Gradient, σ={sigma}px")
                 xs_line = self._crosshair_to_cropped_px(crosshair, gm_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-            if not single:
-                fig = self._plot_side_by_side(
-                    self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(gm_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Gradient |G| σ={sigma}px — {label_a}",
-                    f"Gradient |G| σ={sigma}px — {label_b}",
-                    diff_title=f"Gradient log-ratio (A/B), σ={sigma}px",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                    display_roi=None,
-                    xs_data=xs_raw,
-                    xs_line=xs_line,
-                )
-            else:
-                fig = self._plot_single(
-                    self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Gradient |G| σ={sigma}px — {label_a}",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                )
-            figures[f"gradient_{sigma}"] = fig
+            if make_figures:
+                if not single:
+                    fig = self._plot_side_by_side(
+                        self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
+                        self._crop_border(gm_b, SECTION8_BORDER_CROP_FRACTION),
+                        f"Gradient |G| σ={sigma}px — {label_a}",
+                        f"Gradient |G| σ={sigma}px — {label_b}",
+                        diff_title=f"Gradient log-ratio (A/B), σ={sigma}px",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                        display_roi=None,
+                        xs_data=xs_raw,
+                        xs_line=xs_line,
+                    )
+                else:
+                    fig = self._plot_single(
+                        self._crop_border(gm_a, SECTION8_BORDER_CROP_FRACTION),
+                        f"Gradient |G| σ={sigma}px — {label_a}",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                    )
+                figures[f"gradient_{sigma}"] = fig
 
-            if not single and noise_a and noise_b:
+            if not single and noise_a and noise_b and make_figures:
                 xs_nrm = None
                 if crosshair is not None:
                     pos_n, pa_n = self._sample_line(gm_a / noise_a, **crosshair)
@@ -1525,7 +1556,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"localgrad_{sigma}"] = le_lm_entry
                 partial["localgrad_localmax_log_ratio"][sigma] = le_lm_entry["log_ratio_mean"]
                 partial["localgrad_localmax_log_ratio_err"][sigma] = le_lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 le_corr_fig = self._plot_metric_correlation(
                     le_a, le_b, le_diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Local gradient energy (σ={sigma}px, window={window_px}px)", rng)
@@ -1540,36 +1571,37 @@ class SpatialDetailAnalyzer:
 
             le_xs_raw = None
             le_xs_line = None
-            if crosshair is not None and not single:
+            if crosshair is not None and not single and make_figures:
                 le_pos, le_pa = self._sample_line(le_a, **crosshair)
                 _, le_pb = self._sample_line(le_b, **crosshair)
                 le_xs_raw = (le_pos, le_pa, le_pb, label_a, label_b,
                              f"Cross-section — Local Gradient Energy, σ={sigma}px")
                 le_xs_line = self._crosshair_to_cropped_px(crosshair, le_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-            if not single:
-                le_fig = self._plot_side_by_side(
-                    self._crop_border(le_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(le_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_a}",
-                    f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_b}",
-                    diff_title=f"Local gradient energy log-ratio (A/B), σ={sigma}px",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                    display_roi=None,
-                    xs_data=le_xs_raw,
-                    xs_line=le_xs_line,
-                )
-            else:
-                le_fig = self._plot_single(
-                    self._crop_border(le_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_a}",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                )
-            figures[f"localgrad_{sigma}"] = le_fig
+            if make_figures:
+                if not single:
+                    le_fig = self._plot_side_by_side(
+                        self._crop_border(le_a, SECTION8_BORDER_CROP_FRACTION),
+                        self._crop_border(le_b, SECTION8_BORDER_CROP_FRACTION),
+                        f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_a}",
+                        f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_b}",
+                        diff_title=f"Local gradient energy log-ratio (A/B), σ={sigma}px",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                        display_roi=None,
+                        xs_data=le_xs_raw,
+                        xs_line=le_xs_line,
+                    )
+                else:
+                    le_fig = self._plot_single(
+                        self._crop_border(le_a, SECTION8_BORDER_CROP_FRACTION),
+                        f"Local Gradient Energy σ={sigma}px (window={window_px}px) — {label_a}",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                    )
+                figures[f"localgrad_{sigma}"] = le_fig
 
-            if not single and le_noise_a and le_noise_b:
+            if not single and le_noise_a and le_noise_b and make_figures:
                 le_xs_nrm = None
                 if crosshair is not None:
                     le_pos_n, le_pa_n = self._sample_line(le_a / le_noise_a, **crosshair)
@@ -1603,7 +1635,8 @@ class SpatialDetailAnalyzer:
                            localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                            localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                            localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
-                           localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
+                           localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
+                           make_figures: bool = True) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "sigma_noise_a": None, "sigma_noise_b": None,
@@ -1635,8 +1668,9 @@ class SpatialDetailAnalyzer:
             partial["wavelet_snr_b"][lvl_idx] = snr_b
 
         # SNR bar chart
-        figures["wavelet_snr"] = self._plot_snr_bars(
-            partial["wavelet_snr_a"], partial["wavelet_snr_b"], label_a, label_b, levels)
+        if make_figures:
+            figures["wavelet_snr"] = self._plot_snr_bars(
+                partial["wavelet_snr_a"], partial["wavelet_snr_b"], label_a, label_b, levels)
 
         # Reconstruct every level for noise-corrected scoring (raw subband coefficients
         # live at reduced spatial resolution and don't align pixel-for-pixel with the
@@ -1677,7 +1711,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"wavelet_{display_level}"] = lm_entry
                 partial["localmax_log_ratio"][display_level] = lm_entry["log_ratio_mean"]
                 partial["localmax_log_ratio_err"][display_level] = lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 # Raw signed reconstructions (not abs()) — complementary to the
                 # sign-discarding log-ratio map, shows whether band-pass detail
                 # flips sign between the two filters at a given pixel.
@@ -1694,34 +1728,35 @@ class SpatialDetailAnalyzer:
                 }
             xs_raw = None
             xs_line = None
-            if crosshair is not None and not single:
+            if crosshair is not None and not single and make_figures:
                 pos, pa = self._sample_line(rec_a, **crosshair)
                 _, pb = self._sample_line(rec_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Wavelet level {display_level}")
                 xs_line = self._crosshair_to_cropped_px(crosshair, rec_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-            if not single:
-                fig = self._plot_side_by_side(
-                    self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Wavelet level {display_level} — {label_a}",
-                    f"Wavelet level {display_level} — {label_b}",
-                    diff_title=f"Level {display_level} log-ratio (A/B)",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    display_roi=None,
-                    xs_data=xs_raw,
-                    xs_line=xs_line,
-                )
-            else:
-                fig = self._plot_single(
-                    self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Wavelet level {display_level} — {label_a}",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                )
-            figures[f"wavelet_level{display_level}"] = fig
+            if make_figures:
+                if not single:
+                    fig = self._plot_side_by_side(
+                        self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
+                        self._crop_border(rec_b, SECTION8_BORDER_CROP_FRACTION),
+                        f"Wavelet level {display_level} — {label_a}",
+                        f"Wavelet level {display_level} — {label_b}",
+                        diff_title=f"Level {display_level} log-ratio (A/B)",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        display_roi=None,
+                        xs_data=xs_raw,
+                        xs_line=xs_line,
+                    )
+                else:
+                    fig = self._plot_single(
+                        self._crop_border(rec_a, SECTION8_BORDER_CROP_FRACTION),
+                        f"Wavelet level {display_level} — {label_a}",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                    )
+                figures[f"wavelet_level{display_level}"] = fig
 
-            if not single and noise_a and noise_b:
+            if not single and noise_a and noise_b and make_figures:
                 xs_nrm = None
                 if crosshair is not None:
                     pos_n, pa_n = self._sample_line(rec_a / noise_a, **crosshair)
@@ -1790,7 +1825,8 @@ class SpatialDetailAnalyzer:
                         localmax_prominence_percentile=SECTION8_LOCALMAX_PROMINENCE_PERCENTILE,
                         localmax_region_fraction=SECTION8_LOCALMAX_REGION_FRACTION,
                         localmax_presmooth_fraction=SECTION8_LOCALMAX_PRESMOOTH_FRACTION,
-                        localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT) -> tuple[dict, dict]:
+                        localmax_top_percent=SECTION8_LOCALMAX_TOP_PERCENT,
+                        make_figures: bool = True) -> tuple[dict, dict]:
         figures = {}
         partial: dict = {
             "entropy_contrast_ratio_a": {}, "entropy_contrast_ratio_b": {},
@@ -1840,7 +1876,7 @@ class SpatialDetailAnalyzer:
                 partial["localmax"][f"entropy_{ks}px"] = lm_entry
                 partial["localmax_log_ratio"][ks] = lm_entry["log_ratio_mean"]
                 partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
-            if not single:
+            if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
                     ent_a, ent_b, diff, mask_neb_shared, mask_bg_shared,
                     label_a, label_b, f"Local entropy (kernel {ks}px)", rng)
@@ -1855,36 +1891,37 @@ class SpatialDetailAnalyzer:
 
             xs_raw = None
             xs_line = None
-            if crosshair is not None and not single:
+            if crosshair is not None and not single and make_figures:
                 pos, pa = self._sample_line(ent_a, **crosshair)
                 _, pb = self._sample_line(ent_b, **crosshair)
                 xs_raw = (pos, pa, pb, label_a, label_b,
                           f"Cross-section — Local entropy, kernel {ks}px")
                 xs_line = self._crosshair_to_cropped_px(crosshair, ent_a.shape, SECTION8_BORDER_CROP_FRACTION)
 
-            if not single:
-                fig = self._plot_side_by_side(
-                    self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
-                    self._crop_border(ent_b, SECTION8_BORDER_CROP_FRACTION),
-                    f"Local entropy — kernel {ks}px — {label_a}",
-                    f"Local entropy — kernel {ks}px — {label_b}",
-                    diff_title=f"Log ratio (A/B), kernel {ks}px",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                    display_roi=None,       # _crop_border already applied
-                    xs_data=xs_raw,
-                    xs_line=xs_line,
-                )
-            else:
-                fig = self._plot_single(
-                    self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
-                    f"Local entropy — kernel {ks}px — {label_a}",
-                    cmap=SECTION8_ANALYSIS_CMAP,
-                    nonlinear_norm=True,
-                )
-            figures[f"entropy_{ks}px"] = fig
+            if make_figures:
+                if not single:
+                    fig = self._plot_side_by_side(
+                        self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
+                        self._crop_border(ent_b, SECTION8_BORDER_CROP_FRACTION),
+                        f"Local entropy — kernel {ks}px — {label_a}",
+                        f"Local entropy — kernel {ks}px — {label_b}",
+                        diff_title=f"Log ratio (A/B), kernel {ks}px",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                        display_roi=None,       # _crop_border already applied
+                        xs_data=xs_raw,
+                        xs_line=xs_line,
+                    )
+                else:
+                    fig = self._plot_single(
+                        self._crop_border(ent_a, SECTION8_BORDER_CROP_FRACTION),
+                        f"Local entropy — kernel {ks}px — {label_a}",
+                        cmap=SECTION8_ANALYSIS_CMAP,
+                        nonlinear_norm=True,
+                    )
+                figures[f"entropy_{ks}px"] = fig
 
-            if not single and noise_a and noise_b:
+            if not single and noise_a and noise_b and make_figures:
                 xs_nrm = None
                 if crosshair is not None:
                     pos_n, pa_n = self._sample_line(ent_a / noise_a, **crosshair)

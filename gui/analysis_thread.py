@@ -480,6 +480,11 @@ class AnalysisThread(QThread):
                 np.ascontiguousarray(img_a.data, dtype=np.float64),
                 np.ascontiguousarray(img_b.data, dtype=np.float64),
             )
+            # Keep the unresampled pixels before overwriting. Only Image A is
+            # warped, so its own sharpness metrics are measured on interpolated
+            # data while B's are not; retaining the original makes that asymmetry
+            # measurable (see AstroImage.unaligned_data for the measured size).
+            img_a.unaligned_data = img_a.data
             img_a.data = aligned_data
             return True
         except Exception as e:

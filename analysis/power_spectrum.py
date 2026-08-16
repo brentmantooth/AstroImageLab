@@ -22,7 +22,15 @@ class PowerSpectrumAnalyzer:
     """
 
     def analyze(self, image: AstroImage,
-                roi: tuple[int, int, int, int] | None = None) -> dict:
+                roi: tuple[int, int, int, int] | None = None,
+                make_figures: bool = True) -> dict:
+        """Power-spectrum metrics for one image.
+
+        make_figures=False skips matplotlib entirely and omits the "figures"
+        key — for headless sweeps that want the numbers across many images
+        without paying the render cost. The early-return paths below already
+        omit "figures", so callers must treat it as optional regardless.
+        """
         image.estimate_background()
         bgsub = image.background_subtracted()
 
@@ -57,9 +65,10 @@ class PowerSpectrumAnalyzer:
             "spectral_mtf_curve": spectral_mtf_curve,
             "spectral_mtf50_cycles_per_px": spectral_mtf50,
         })
-        result["figures"] = figs_to_b64({
-            "power_spectrum": self._plot_results(ps2d, freq, radial, ratio, image.label)
-        })
+        if make_figures:
+            result["figures"] = figs_to_b64({
+                "power_spectrum": self._plot_results(ps2d, freq, radial, ratio, image.label)
+            })
         return result
 
     # ------------------------------------------------------------------

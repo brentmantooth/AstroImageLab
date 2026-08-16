@@ -49,6 +49,12 @@ core/
   stretch.py           STF stretch + normalize_for_display() for 8-bit display output
   stats_utils.py       mannwhitney_effect() / combined_se_z_test() — significance/
                        comparison primitives shared by analysis/ and report/
+  spatial_stats.py     Spatial block bootstrap for autocorrelated per-pixel maps —
+                       honest CIs where the per-pixel p-values are saturated. Reports
+                       non-convergence rather than hiding it
+  practical_significance.py  The four practical labels + the FWHM/SNR currency they
+                       anchor to. Returns label=None for an uncalibrated metric rather
+                       than guessing
   inspector_catalog.py _inspector.npz catalog reader + panel display names/descriptions,
                        shared by report_builder (writer) and both inspectors (readers)
 gui/
@@ -73,6 +79,17 @@ synthetic/
 tools/
   generate_icon.py         One-off dev script: regenerates resources/icon.ico
   generate_screenshots.py  One-off dev script: regenerates resources/*.png screenshots used by README.md/QuickStart.md
+  sensitivity_sweep.py     Metric sensitivity / calibration harness. Subcommands:
+                           validate (label the six reports in AstroLabTestData/
+                           FilterCompare), null-ensemble (repeated disjoint-partition
+                           null floors + mask sweep), signal-grid, blur-grid,
+                           recalibrate, add-null-floors, health, m31-factorial.
+                           Runs headless with make_figures=False
+  metric_atlas.py          Renders the Metric Atlas: 1:1 filmstrip, response curves,
+                           and the monotone/sign scorecard deciding which metrics may
+                           carry a practical label
+  make_starless_stacks.py  Builds outlier-rejected stacks + their SyQon Axiom starless
+                           counterparts, the image class Section 8 actually analyses
 ```
 
 ---
@@ -135,6 +152,14 @@ tools/
 | `_bgfit_value_td(value, se, p_term, css_class, fmt=".3g")` / `_bgfit_table_html(fit_a, fit_b, label_a, label_b)` | `report_builder.py` | Section 3f's table-cell/table builder — composes `_sig_td` (per-term significance: is this specific magnitude distinguishable from zero) around a `_better_worse_class`-colored `<span>` (A-vs-B judgement). Deliberately **not** built on `_format_significance_html`/`_psf_stat_test` — those are shaped around Mann-Whitney U + Cliff's delta for two *distributions* of values, a different statistical object from a parametric regression coefficient's t-test against zero |
 | `find_level_crossing(x, y, level=0.5)` | `core/stats_utils.py` | Linear-interpolated first *descending* crossing of `level` in a `(x, y)` curve; `None` if `y` never crosses (starts below `level`, or never drops below it). Extracted from `PSFAnalyzer`'s original ePSF-MTF50 search so `PowerSpectrumAnalyzer._spectral_mtf` (`analysis/power_spectrum.py`) can reuse the identical algorithm for its own, differently-sourced MTF50 proxy instead of re-deriving it — see the MTF-source-labeling convention below |
 | `_db_ratio_at(freq_a, rp_a, freq_b, rp_b, ref_freq)` | `report_builder.py` | Interpolates `_power_ratio_db`'s dB curve at a single reference frequency; `None` on missing input, misaligned bins, or `ref_freq=None`. Used to collapse a whole ratio *curve* into one table-cell scalar wherever a report row needs "the dB ratio at the point this row's own headline number sits," rather than requiring the reader to eyeball it off an adjacent figure |
+| `block_bootstrap_ci(field, mask, block_px, n_boot, ci, seed, fn)` | `core/spatial_stats.py` | Spatial block bootstrap of a masked mean → `BootstrapResult` (point, lo/hi, se, `block_px`, `n_blocks`, `converged`, `naive_se_understatement`). Feed it `panels[key]["diff"]` — the per-pixel log-ratio map Section 8 already builds — so a CI costs no metric recomputation. **Always check `.converged`**: on this project's real maps it is often False, and the interval is then a lower bound on the true uncertainty, not the uncertainty |
+| `se_ladder(field, mask, ...)` / `auto_block_size(...)` | `core/spatial_stats.py` | Bootstrap SE at a geometric ladder of block sizes, and the block choice derived from it. The block size **must** come from where the SE plateaus, never from the correlation length — see the long-range-dependence convention below |
+| `tile_reduce(field, mask, block_px, fn)` | `core/spatial_stats.py` | Field → one value per tile, plus per-tile valid-pixel weights. The weighted mean of the tile values reproduces the plain masked mean exactly, which is what keeps the bootstrap's point estimate equal to the number the report's table shows. Tile acceptance scales with the mask's own density (see the sparse-mask pitfall) |
+| `verdict_for_fwhm(a, b)` / `verdict_for_snr(a, b)` / `verdict_for_metric(key, log_ratio, cal)` | `core/practical_significance.py` | A measured change → `PracticalVerdict` (label, currency, equivalent, calibrated). FWHM and SNR need no calibration — they *are* the currency. A Section 8 metric returns `label=None` with `calibrated=False` unless `resources/metric_calibration.json` covers it; never guess a label |
+| `consensus_label(verdicts)` vs `overall_label(verdicts)` | `core/practical_significance.py` | **Median** within one family of correlated estimates, **max** across independent axes. Using the wrong one is a real failure mode, not a style choice — see the aggregation convention below |
+| `starless(arr, tag)` / `_maybe_starless(...)` | `tools/sensitivity_sweep.py` | SyQon Axiom v2.1 star removal on an in-memory array via the CLI at `D:\Astro\SyQon\starless_cli\starless_cli.exe`. `--use-mtf` is mandatory (stacks are linear, the model expects display-stretched input). Mandatory before any spatial-detail calibration — see the star-contamination convention |
+| `_blur_preserving_noise(arr, sigma, rng)` | `tools/sensitivity_sweep.py` | Gaussian blur that adds back the noise the blur removed, so detail loss is not confounded with noise reduction. Survival fraction is measured by blurring actual white noise, never from the asymptotic `σ/sqrt(4π σ_k²)` closed form |
+| `_reject_outlier_frames(cache, paths, hi, lo)` | `tools/sensitivity_sweep.py` | Per-frame fine-scale-structure screen. **Run before any null floor is measured** — one bad sub inflated a floor 26× |
 
 ---
 
@@ -481,6 +506,20 @@ the checkbox reasonably concludes the feature is broken. **When a change alters 
 population a summary statistic is computed over, "did the number go up?" is the wrong
 acceptance test** — check the quantity the statistic stands in for (here, recovered flux
 against a known truth) and say so in the report.
+
+### Headless analysis — `make_figures=False`, and it is not a small saving
+
+`SNRAnalyzer`, `PSFAnalyzer`, `PowerSpectrumAnalyzer` and `SpatialDetailAnalyzer` all take
+`make_figures: bool = True`. Passing `False` skips every matplotlib call and omits the `figures`
+key; every other returned key is byte-identical (verified: 621/621 metric keys on
+`SpatialDetailAnalyzer`). The saving is **25×** on that analyzer (53.2 s → 2.1 s), because ~30
+figures at dpi=150 dominate its runtime — which is what makes a 400-point sweep practical at all.
+
+Default stays `True` so the GUI and every existing call site are unchanged. Note the early-return
+paths already omit `figures`, so callers must treat it as optional regardless.
+
+Two things that must stay outside the flag because they are metrics, not pictures: `xs_snr`
+(computed, then only its rendering skipped) and the local-maxima table statistics.
 
 ### Background estimation — compute once via the pre-pass, never redundantly
 
@@ -954,6 +993,150 @@ single-pixel impulse at the target column in a same-shaped zero array, apply the
 then backward — regardless of the library's sign convention, and generalizes to any
 "where did this rotated-frame coordinate come from" problem.
 
+### Statistical significance is saturated in this report — magnitude is what discriminates
+
+Every per-pixel Mann-Whitney in Section 8 runs over 10⁴–10⁶ spatially autocorrelated pixels.
+Measured against a spatial block bootstrap on the project's own maps, the naive per-pixel SE
+is understated by **6–46×** (`std_3px` 38×, `std_10px` 46×, `log_1.5` 18×), so every p-value
+in those tables saturates at p < 0.001 regardless of effect size and the `n.s.` branch of
+`_format_significance_html` essentially never fires.
+
+**Fixing the interval does not fix the question.** The decisive test: two disjoint 20-frame
+stacks of the *same* M31 sub-frames — an image pair whose correct answer is exactly zero —
+still produced bootstrap intervals excluding zero on every metric. A correct CI cannot say
+"no visible difference"; only a magnitude threshold can. `core/spatial_stats.py` gives the
+honest interval, `core/practical_significance.py` gives the label, and both are needed.
+
+### Block size comes from the SE ladder, never from the correlation length
+
+The textbook rule (block > 2× the integral autocorrelation length) is wrong on these fields.
+Section 8's `std_3px` difference map has an integral length of ~7 px yet its bootstrap SE keeps
+growing out to 224 px blocks, with the growth per doubling *accelerating*: 1.13, 1.14, 1.26,
+1.53, 1.78, 1.86. The autocorrelation explains it — ρ falls to 0.01 by lag 4 then sits at ~0.008
+out to lag 256 without reaching zero. A long, weak tail contributes almost nothing to the
+correlation length and dominates the variance of a whole-frame mean.
+
+Two consequences. `auto_block_size` walks `se_ladder` and picks the rung past the **last**
+violation, not the first rung that passes — on an accelerating curve the smallest rung always
+passes a local check, which is how an earlier version declared a badly non-converged field
+converged. And `converged=False` is a *result*: it means no valid block size exists for that
+field, and the caller must say so rather than quote a still-growing interval.
+
+### Aggregating labels: median within a family, max across axes
+
+`consensus_label` (median) and `overall_label` (max) are not interchangeable.
+
+Section 8's metrics are ~11 strongly-correlated estimates of one quantity, and the maximum of a
+set of correlated noisy estimates is just its noisiest member. Measured on the SCT Ha6/Ha12 pair:
+ten of eleven calibrated metrics reported "no visible difference" and one reading only 2× its own
+null floor reported "noticeable" — taking the max made that single weak detection the report's
+headline verdict on a filter pair its owner expects to be indistinguishable.
+
+Across *independent* axes (sharpness / noise / detail) use the max, for the opposite reason: a
+difference material on any one axis is material to the viewer. This two-level structure is what
+recovers the deconvolution-sharpen case — Section 8's own consensus reports nothing on it, and
+the headline reaches "material" through the FWHM axis.
+
+### Practical labels anchor to FWHM and SNR; the detail axis needs a per-comparison reference
+
+FWHM and global SNR are direct physical measurements needing no reference, and together they rank
+all six real comparisons the way their owner reads them. They can always carry a label.
+
+The Section 8 detail metrics cannot. Their null floor — the reading between two stacks of
+identical data — spans **15× across 14 filter sets** (58× for the acutance scalars), and nothing
+measurable predicts it: pixel fraction above 3σ r²=0.35, detail-map contrast 0.20, global SNR
+0.19, SNR×√N 0.16, sub count 0.14, sky σ 0.04. It does not split by binning, plate scale, or
+broadband-vs-narrowband either.
+
+So **do not ship a floor constant.** For a same-conditions A/B comparison the floor is obtainable
+from the comparison's own data — split A's sub-frames into disjoint halves, and B's likewise —
+and that is the only defensible source. Absent one, report the detail magnitude with no practical
+reading rather than a borrowed number.
+
+### Reject outlier sub-frames before measuring anything about a floor
+
+A single bad sub does not raise a floor slightly; it *becomes* the floor, in a way that looks
+exactly like a real measurement. Dumbbell/Ha6 initially measured 0.46 log units (a 2.9× apparent
+difference between identical data). The null pairs read −0.462, −0.458, −0.449, **+0.429** —
+near-identical magnitude with the sign flipping according to which half the bad frame landed in.
+One frame carried 9.0× the set's median fine-scale structure; three more sat at 1.5–1.7×; the
+remaining ten at 0.91–1.07×. After rejection the floor fell **26×** (`std_3px` 0.5007 → 0.0192).
+
+Taking a max or upper quantile over partitions therefore writes a data-quality defect straight
+into the floor and suppresses every real difference beneath it. `_reject_outlier_frames` runs
+first, and the same reasoning explains an earlier unexplained spike at 3-frame depth.
+
+### Stars dominate the detail mask — remove them before any spatial-detail calibration
+
+`gui/analysis_thread.py` hands Section 8 `self._starless_a or img_a`, so the report analyses the
+**starless** image whenever one is attached. Any calibration run on star-containing stacks is
+therefore fitting the wrong image class — and stars are the sharpest features in a frame and the
+most affected by blur, so the "signal" being calibrated is largely star response.
+
+Measured: the top-5% detail mask is **56% star pixels on M31** against 8.8% star coverage (6.4×
+enrichment), and 14.8× enrichment on IC1179. After SyQon Axiom removal the enrichment falls to
+**0.4×** — the mask actively avoids former star sites, so no residual artefacts re-enter it.
+
+Star removal is applied to the **stack**, never to individual subs. It is a non-linear,
+content-dependent CNN operation: run per-sub it does something different to each of N noisy
+frames, plausibly removing noise peaks as stars and altering the noise realisation differently in
+every sub, which corrupts the very quantity a null pair measures. Applied to a block-stack it runs
+once, on input inside the model's trained SNR regime. Never let a block fall below ~3 subs.
+
+### Degradation studies must preserve the noise floor
+
+A plain post-stack Gaussian blur lowers detail *and* noise together: measured on a real frame,
+σ=2 px drops the noise floor to 0.46× and *raises* `snr_global` from 17.4 to 20.5. Calibrating
+against that conflates two independent things, since real filter differences change detail and
+noise for unrelated physical reasons. A softer optical system instead blurs the photon
+distribution before shot and read noise are realised.
+
+`_blur_preserving_noise` adds back the missing variance; the same blurs then give 17.3 / 16.3 /
+16.0, falling as they should, and it holds the noise floor to within 1.6% on a frame of known σ.
+Two ways of sizing the compensation were wrong first: a MAD-of-high-pass noise estimate counts
+pervasive nebula texture as noise and over-added enough to *invert* the sign of bulk `std_3px`;
+and `_smoothed_sigma`'s asymptotic `σ/sqrt(4π σ_k²)` predicts 0.318 survival at σ_b=0.5 where a
+discrete half-pixel Gaussian is nearly a delta. Measure the kernel's response on actual white
+noise instead — signal-free by construction and exact for the discrete kernel.
+
+### Acutance: the best detail metric, and an absolute value that is not a quality score
+
+Discriminability (signal from a known 1.0 px blur ÷ null floor) across three nebula targets:
+
+| metric | population | M31 Lum | Horsehead Ha | Dumbbell Ha6 |
+| --- | --- | --- | --- | --- |
+| `loclap_1.5` | top 5% | **7.9** | 2.2 | 2.3 |
+| `lap_var_1.5` | nebula mask | 3.1 | **3.1** | 1.7 |
+| `std_3px` | top 5% | 0.6 | 1.5 | **4.4** |
+| `grad_energy_1.5` | nebula mask | 0.3 | 1.4 | 0.5 |
+| `grad_energy_3.0` | nebula mask | 0.1 | 0.9 | 1.4 |
+
+The two best are the *same quantity* at different aggregation — variance of the Laplacian,
+localised (8j `loclap`) or whole-nebula (8m `lap_var`). **`grad_energy` mostly cannot separate a
+real 1 px blur from sampling noise** despite Section 8m presenting it as `lap_var`'s equal.
+σ=1.5 dominates σ=3.0 for both. `lap_var` takes no `top_percent` parameter, which makes it immune
+to the unresolved question below.
+
+**But its absolute value is a content measure, not a sharpness measure.** Correlated across 14
+filter sets: `lap_var_1.5` vs pixel-fraction-above-3σ **r = −0.94**, vs global SNR r = −0.77.
+Targets that fill the frame with smooth structure have low Laplacian variance *because they are
+smooth*; a star field with stars removed has high variance from residual point structure. It is
+valid only as an A-vs-B ratio on the same target — never as an absolute quality score across
+images. (`lap_var_1.5` vs `lap_var_3.0` is r = 0.98, so the acutance scalars are near-redundant
+with each other; the ratio-based `nc_score` metrics instead track SNR *positively* at r = 0.92.)
+
+### `SECTION8_LOCALMAX_TOP_PERCENT` has no universal optimum
+
+Sweeping it 1–100% and scoring by discriminability gives a trimodal answer across 15
+(set × metric) combinations: `1,1,1,1,1, 5,5, 10,10,10, 50, 100,100,100,100`. Some metrics want
+the brightest 1%, others the whole frame, and it flips by target. The shipped 5% is a reasonable
+middle choice that no single constant improves on; setting it *per metric* is defensible, guessing
+a better global value is not.
+
+`SECTION8_LOCALMAX_REGION_FRACTION` (the dilation) is settled: mean discriminability 2.37 at 0.5
+versus 2.34 at 1.0 across 105 combinations. It makes no material difference and does not need
+exposing as a user control.
+
 ---
 
 ## Collaboration Rules
@@ -1031,6 +1214,7 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 
 - **Headless only** — no PyQt6 dependency in tests. Covers `analysis/`, `core/`, `synthetic/`, `report/`. **`gui/` is therefore untested, which is a design constraint, not an oversight**: any logic a GUI feature needs must be pushed down into `analysis/` or `core/` to be verifiable at all. `analysis/inspector_regions.py` and `core/inspector_catalog.py` exist for exactly that reason — see the pyqtgraph convention above for the bug that motivated the split.
 - **Generated fixtures** — `tests/conftest.py` writes a 512×512 hand-crafted FITS (30 Gaussian stars, ~1 s) as the session fixture for all analysis tests. No binary fixtures committed to git. `tests/bg_frames.py` is the ground-truth variant for background work — it returns the true sky surface alongside the data so assertions can be quantitative; see the "Ground-truth fixtures" convention above.
+- **Acceptance against known answers** — `tests/test_core/test_practical_acceptance.py` pins the six real comparisons in `AstroLabTestData/FilterCompare/` against the reading their owner gives each pair. It runs against the *shipped* `resources/metric_calibration.json`, so regenerating the calibration cannot silently break the known answers, and it skips (rather than fails) when no calibration exists so a fresh checkout stays green. When a labelling rule changes, this is the test that decides whether the change was an improvement.
 - **Slow marker** — `@pytest.mark.slow` gates tests that call `SyntheticGenerator.generate(preview=False)` (full 1920×1080 FITS, ~30 s). CI runs with `-m "not slow"`.
 - **Smallest camera for generator tests** — `"Player One — Mercury-M"` (1920×1080 full-res; 480×270 in preview mode) is the lightest camera in `synthetic/cameras.py`.
 - **Share identical-input analyzer/generator calls via a fixture** — if two or more tests in a file call `SomeAnalyzer().analyze(astro_image_a)` (or `StarCatalogBuilder().build(...)`, `SyntheticGenerator().generate(...)`) with the exact same arguments, that result must come from a class- or module-scoped fixture, not a fresh call in each test body. `SpatialDetailAnalyzer.analyze()` in particular runs LoG/wavelet/local-sigma/entropy/local-maxima detection across every configured scale — cheap to assert against, expensive to recompute. Only call it fresh when the test genuinely needs different arguments (a different ROI, crosshair, monkeypatch, or a second call specifically to test determinism/parameter-wiring, e.g. `test_second_run_consistent` / `test_higher_top_percent_does_not_shrink_masked_pixel_count`). A class-scoped fixture that wraps a value (not just computes one) still needs the `@pytest.fixture(scope="class") @classmethod def name(cls, ...):` form — a plain `def name(self, ...):` class-scoped fixture is deprecated in pytest 9 and breaks in pytest 10.
@@ -1133,6 +1317,12 @@ pytest tests/ --cov=analysis,core,synthetic,report --cov-report=html
 | Thresholding a smoothed image with the per-pixel sigma | Noise drops to `σ/sqrt(4π σ_k²)` after a sum-normalised Gaussian — a factor of ~28 at σ_k = 8 px. Use `_smoothed_sigma`; the raw σ detects essentially nothing and looks like a broken detector rather than a wrong constant. |
 | Judging a fitted 2D surface by median error alone | A fit through edge-clustered cells can sit on the truth at centre and diverge at the corners: measured +0.09 σ median while carrying 3.9 σ worst-case. Assert `median`, `rms` **and** `max(\|err\|)`, and compare a plane's recovered *tilt* (lstsq through the output surface) rather than the fit's own linear coefficients, which are the centre tangent when BIC picks the quadric. |
 | A per-source full-image `exp()` in a test frame generator | O(n_stars × H × W) is invisible at 512×512 and takes >10 min at 24 MP with 600 stars — and reads as a hang in the code under test. Stamp into a `4σ` bounded slice (`tests/bg_frames.py`). |
+| Enumerating Section 8 metrics from the `panels` dict | It silently omits Section 8m. `lap_var_*` / `grad_energy_*` are **scalars** in the result dict, not panels, so a `METRIC_KEYS` list built by iterating `panels` covered 20 metrics and missed the six acutance ones entirely — through an entire calibration study, and acutance turned out to be among the most sensitive metrics in the suite. Enumerate from what the *report* reports, not from one container. |
+| Selecting a bootstrap block size from the correlation length | Fails on long-range-dependent fields: integral length ~7 px while the SE still grows at 224 px blocks. Use `se_ladder`, take the rung past the **last** violation, and treat `converged=False` as a reportable result. |
+| Sorting calibration points by ratio before fitting the curve | It *manufactures* monotonicity out of a non-monotone response and lets exactly the broken metrics through the screen. Judge monotonicity in **blur order**, and reject on wrong sign or on a response range too flat to invert (`gradient_3.0` spanned 0.0085 log units across a 0–141% FWHM range, so a noise-sized reading mapped to "material"). |
+| A fraction-of-tile-area rule in `tile_reduce` | Section 8l's local-maxima mask selects ~5–12% of the frame, and a flat 25%-of-area requirement rejects essentially every tile — silently disabling the bootstrap for the population that best tracks perceived sharpness. Scale the requirement by the mask's own density, with an absolute pixel floor underneath. |
+| Assuming star removal parallelises | It is GPU-bound via DirectML: 2 concurrent Axiom calls give 1.17×, **4 give 0.63× — slower than sequential**. The lever is doing less work, not more at once. Block-level removal (star-remove each block once, assemble pairs from already-starless blocks) cut a 14-set run from 4.4 h to 52 min; `--jobs` only became worthwhile *after* that flipped the balance toward the CPU-bound analysis half. |
+| A `str.replace` patch script matching identical boilerplate in two functions | `cmd_null_ensemble` and `cmd_signal_grid` open with byte-identical `rng = ...` / `rows = []` / `mask_metrics = ...` blocks, so a single-target patch spliced itself into both and the second definition shadowed the first (`NameError: SNRAnalyzer`). When patching by literal text in this file, assert the match count or use the Edit tool, which fails loudly on ambiguity. |
 | `ax.hist(..., density=True)` on percentile-clipped bins can silently divide by zero when a population's whole range falls outside those bins | Section 3e's background-vs-excluded pixel histogram originally computed bin range from the *pooled* (kept + excluded) data's 0.5–99.5th percentile. The excluded population is by construction the outlier tail (e.g. >3σ pixels), so on realistic data its values can fall almost entirely *outside* the pooled 99.5th-percentile cutoff — `numpy`'s `density=True` normalization then divides by a zero bin-count sum for that population, throwing `RuntimeWarning: invalid value encountered in divide` silently (no crash, no visible symptom besides the warning — the histogram bar for that population just doesn't render). A `size > 0` guard on the input array does **not** catch this, since the array is non-empty, just entirely out of the chosen bin range. Fixed by computing the bin range from *each* population's own percentiles (kept ∪ excluded, unioned), not the pooled percentile — so a minority outlier population's own bulk always lands inside the shared range. When a figure shows two populations with very different scales/tails on shared bins, derive the bin range from each population's own spread, not from percentiles of the combination. |
 
 ---

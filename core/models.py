@@ -23,6 +23,15 @@ PSF_FWHM_CLIP_NSIGMA = 3.0   # MAD multiplier for FWHM outlier sigma-clipping
 HALO_FIT_RADIUS_PX = 80
 SATURATION_FRACTION = 0.90
 DEFAULT_PIXEL_SCALE = 1.0       # arcsec/px fallback
+# Plausibility bounds on a pixel scale read from a FITS header. Outside this range
+# the header value is a placeholder, not a measurement, and must be rejected rather
+# than propagated: a bare CDELT1 = 1.0 (the common "no WCS" sentinel, 1 degree/px)
+# parses to 3600 "/px, which silently turned every FWHM(arcsec) into nonsense --
+# observed as 4224.167" in a real report, with the summary table then colour-coding
+# Image A green on the arcsec row and red on the px row for the same quantity.
+# 0.01 covers long-focal-length/space-telescope sampling, 60 a very wide-field lens.
+PIXEL_SCALE_MIN_ARCSEC = 0.01
+PIXEL_SCALE_MAX_ARCSEC = 60.0
 SEEING_WARN_FWHM_ARCS = 3.0
 EDGE_ROI_HALF_WIDTH = 30
 EDGE_ROI_MAP_INDICATOR_PX = 500   # px; full width of the ROI indicator box drawn on the gradient magnitude map

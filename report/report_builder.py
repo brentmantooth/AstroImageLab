@@ -1355,7 +1355,11 @@ class ReportBuilder:
             self._section_edge(result_a, result_b, bw_differ),
             self._section_power(result_a, result_b),
             self._section_spatial(result_a, result_b),
-            self._section_summary(result_a, result_b, bw_differ),
+            self._section_summary(
+                result_a, result_b, bw_differ,
+                scale_known=not (image_a.pixel_scale_is_estimated
+                                 or (image_b is not None
+                                     and image_b.pixel_scale_is_estimated))),
         ]
 
         title = (f"Filter Analysis: {result_a.label}" if self._single_image
@@ -6849,7 +6853,15 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
     # ── Section 10: Summary ───────────────────────────────────────────────────
 
     def _section_summary(self, ra: AnalysisResult, rb: AnalysisResult,
-                          bw_differ: bool) -> str:
+                          bw_differ: bool, scale_known: bool = True) -> str:
+        """Section 9 summary table.
+
+        scale_known=False when either image's pixel scale is a fallback rather
+        than a header measurement; the arcsec rows are then omitted entirely
+        instead of being shown with a better/worse colour. Two images on
+        different assumed scales make the arcsec comparison meaningless, and
+        colouring it contradicted the px row directly above it.
+        """
         if getattr(self, "_single_image", False):
             return ""
         sm_a = ra.spatial_metrics or {}
@@ -6883,6 +6895,10 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 
         ecr_flag = "⚠" if bw_differ else "✓"
 
+        # Largest local-σ kernel this run actually produced, so the summary row
+        # tracks STD_KERNEL_SIZES instead of assuming a fixed value.
+        _std_row_ks = max(cr_a) if cr_a else None
+
         def row_pm(metric, val_a, val_b, spread_a, spread_b, fmt=".3f",
                    higher_is_better=True, bw_flag="✓"):
             ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
@@ -6913,7 +6929,7 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                    higher_is_better=False),
             row_pm("FWHM (arcsec)", psf_a.get("fwhm_arcsec"), psf_b.get("fwhm_arcsec"),
                    psf_a.get("fwhm_arcsec_mad"), psf_b.get("fwhm_arcsec_mad"),
-                   higher_is_better=False),
+                   higher_is_better=False) if scale_known else "",
             row_pm("Moffat β", psf_a.get("beta"), psf_b.get("beta"),
                    psf_a.get("beta_mad"), psf_b.get("beta_mad")),
             row_pm("Ellipticity", psf_a.get("ellipticity"), psf_b.get("ellipticity"),
@@ -6934,7 +6950,11 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                 edge_b.get("edge_contrast_ratio"), bw_flag=ecr_flag),
             row("Power mid/high ratio", pw_a.get("mid_high_ratio"),
                 pw_b.get("mid_high_ratio"), fmt=".4f"),
-            row("Std contrast ratio (15px)", cr_a.get(15), cr_b.get(15)),
+            # Read the largest kernel actually configured rather than a literal 15:
+            # STD_KERNEL_SIZES was retuned (5,10,15) -> (3,5,10), so a hardcoded 15
+            # silently rendered "—" in every report from that change onward.
+            row(f"Std contrast ratio ({_std_row_ks}px)" if _std_row_ks else "Std contrast ratio",
+                cr_a.get(_std_row_ks), cr_b.get(_std_row_ks)),
             row("Wavelet SNR level 2", snr_wav_a.get(2), snr_wav_b.get(2)),
             row("Wavelet SNR level 3", snr_wav_a.get(3), snr_wav_b.get(3)),
             row("Entropy contrast ratio (9px)", ecr_a_s.get(9), ecr_b_s.get(9)),

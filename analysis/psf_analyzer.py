@@ -29,7 +29,15 @@ class PSFAnalyzer:
         self._catalog_builder = StarCatalogBuilder()
         self._epsf_max_stars = epsf_max_stars
 
-    def analyze(self, image: AstroImage) -> dict:
+    def analyze(self, image: AstroImage, make_figures: bool = True) -> dict:
+        """PSF / MTF metrics for one image.
+
+        make_figures=False skips the ePSF and MTF plots and omits the
+        "figures" key — for headless sweeps. The ePSF itself is still built
+        (mtf50/mtf_nyquist depend on it); only the rendering is skipped. Note
+        the early-return paths below already omit "figures", so callers must
+        treat it as optional regardless.
+        """
         image.estimate_background()
         catalog = self._catalog_builder.build(image)
         fwhm_guess = 4.0
@@ -150,10 +158,11 @@ class PSFAnalyzer:
             result["epsf_iterations"] = getattr(self, "_last_epsf_iterations", None)
             result["mtf_freq"] = freq
             result["mtf_curve"] = mtf
-            result["figures"] = figs_to_b64({
-                "mtf": self._plot_mtf(freq, mtf, mtf50, image.label),
-                "epsf": self._plot_epsf(epsf, image.label),
-            })
+            if make_figures:
+                result["figures"] = figs_to_b64({
+                    "mtf": self._plot_mtf(freq, mtf, mtf50, image.label),
+                    "epsf": self._plot_epsf(epsf, image.label),
+                })
 
         return result
 

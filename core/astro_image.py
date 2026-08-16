@@ -11,6 +11,7 @@ from astropy.utils.exceptions import AstropyUserWarning
 from photutils.background import Background2D, SExtractorBackground, MADStdBackgroundRMS
 
 from core.models import (BACKGROUND_DISPLAY_MAX_DIM, DEFAULT_PIXEL_SCALE,
+                         PIXEL_SCALE_MIN_ARCSEC, PIXEL_SCALE_MAX_ARCSEC,
                           FILTER_THICKNESS_MM)
 
 # Background2D's per-cell outlier rejection. Named constants (rather than
@@ -121,6 +122,16 @@ class AstroImage:
         self.source_mask_result = None      # analysis.source_mask.MaskedBackgroundResult | None
         self.is_color: bool = False                    # True when RGB file was converted to luminance
         self.starless_image: AstroImage | None = None  # Set by ImagePanel when starless is loaded
+        # The pre-registration pixels, retained by AnalysisThread._align() before it
+        # replaces self.data with the array warped onto Image B's frame. Image B is
+        # never warped, so every A-vs-B sharpness comparison carries a one-sided
+        # resampling penalty; keeping the original lets a caller measure A on its own
+        # unresampled pixels. Measured magnitude is small -- astroalign warps at
+        # order=3 (bicubic), worth +0.14% FWHM / -0.13% MTF50 on a 0.5 px shift
+        # (order=1 would cost +4.4% / -4.8%) -- so this exists to make the bias
+        # measurable, not because it is known to be large. None when no alignment
+        # ran. Same externally-populated-slot convention as `starless_image`.
+        self.unaligned_data: np.ndarray | None = None
         # Normalised polygon dicts the user drew in the Background Regions dialog,
         # populated by AnalysisThread from the settings. Kept alongside the
         # rasterised mask below because the report describes the regions (how many,
@@ -249,11 +260,19 @@ class AstroImage:
             self.pixel_scale_is_estimated = True
             return DEFAULT_PIXEL_SCALE
 
+        # A header value outside the plausible range is a placeholder, not a
+        # measurement -- keep looking rather than propagating it. See
+        # PIXEL_SCALE_MIN/MAX_ARCSEC for the CDELT1=1.0 case that motivated this.
+        def _plausible(scale: float) -> bool:
+            return PIXEL_SCALE_MIN_ARCSEC <= scale <= PIXEL_SCALE_MAX_ARCSEC
+
         for kw, factor, use_abs in _PIXEL_SCALE_KEYWORDS:
             if kw in self.header:
                 try:
                     v = float(self.header[kw])
-                    return (abs(v) if use_abs else v) * factor
+                    scale = (abs(v) if use_abs else v) * factor
+                    if _plausible(scale):
+                        return scale
                 except (ValueError, TypeError):
                     pass
 
@@ -263,7 +282,9 @@ class AstroImage:
                 focallen_mm = float(self.header["FOCALLEN"])
                 xpixsz_um = float(self.header["XPIXSZ"])
                 if focallen_mm > 0:
-                    return (xpixsz_um / focallen_mm) * 206.265
+                    scale = (xpixsz_um / focallen_mm) * 206.265
+                    if _plausible(scale):
+                        return scale
             except (ValueError, TypeError):
                 pass
 

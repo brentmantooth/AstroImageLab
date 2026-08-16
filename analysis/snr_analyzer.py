@@ -17,7 +17,14 @@ from core.fig_utils import fig_to_b64, finalize_layout
 class SNRAnalyzer:
     """Compute signal-to-noise ratio metrics from pre-computed background estimates."""
 
-    def analyze(self, image: AstroImage) -> dict:
+    def analyze(self, image: AstroImage, make_figures: bool = True) -> dict:
+        """Compute SNR metrics for one image.
+
+        make_figures=False skips matplotlib entirely and omits the "figures"
+        key from the result — for headless sweeps (tools/sensitivity_sweep.py)
+        that want the numbers across many images without paying the render
+        cost. Every other returned key is identical either way.
+        """
         image.estimate_background()
         bgsub = image.background_subtracted()
         rms = image.background_rms  # 2D array from Background2D
@@ -109,9 +116,10 @@ class SNRAnalyzer:
             noise * gain_e_per_adu if gain_e_per_adu is not None else None)
 
         # --- Figure (per-image, for PNG export) ---------------------------
-        snr_map_fig = self._plot_snr_map(snr_map, image.label)
+        figures = ({"snr_map": self._plot_snr_map(snr_map, image.label)}
+                   if make_figures else None)
 
-        return {
+        result = {
             "snr_global":        snr_global,
             "snr_global_db":     snr_global_db,
             "noise_median":      noise,     # median sky RMS (σ_sky) in ADU
@@ -129,8 +137,10 @@ class SNRAnalyzer:
             "noise_factor":      noise_factor,          # σ_sky / √μ_sky
             "sky_bg_electrons":  sky_bg_electrons,      # μ_sky × gain, or None
             "sky_noise_electrons": sky_noise_electrons, # σ_sky × gain, or None
-            "figures":           {"snr_map": snr_map_fig},
         }
+        if figures is not None:
+            result["figures"] = figures
+        return result
 
     def _plot_snr_map(self, snr_map: np.ndarray, label: str) -> str:
         finite_pos = snr_map[np.isfinite(snr_map) & (snr_map > 0)]

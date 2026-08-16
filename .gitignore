@@ -4,3 +4,7 @@ __pycache__/
 dist/*.exe
 dist/*.zip
 AstroLabTestData/
+# Sensitivity-sweep outputs: intermediate stacks, starless temporaries and
+# result CSVs. All regenerable via tools/sensitivity_sweep.py (see CLAUDE.md).
+# The shipped artifact from these runs is resources/metric_calibration.json.
+sweep_out/
