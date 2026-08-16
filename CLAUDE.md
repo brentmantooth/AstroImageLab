@@ -496,6 +496,26 @@ Moffat profile) take the *median* of the per-star fractions across whichever sta
 population that aggregate was built from, not a fresh whole-image scalar — same
 principle as `consensus_label`'s median-within-a-correlated-family aggregation.
 
+**A fourth re-expression exists, and it deliberately breaks the "never in
+report_builder.py" rule above.** The star-cutout grids (`_plot_halo_star_grid` and its
+saturated-star counterpart) draw a dashed steelblue/tomato ring on each star's own
+cutout image, at the radius where that star's RDF first decays to its own background
+line — `ReportBuilder._rdf_bg_crossing_radius(rdf_r, rdf_mean_log, bg_fraction)` finds
+the first index where the already-log10-normalised RDF curve drops to `rdf_bg_fraction`
+and returns that radius in pixels. This one lives in `report_builder.py`, not
+`HaloAnalyzer.analyze()`, because it isn't a scalar conversion of a single sample — it's
+a crossing search over the RDF curve's own `rdf_r`/`rdf_mean_log` arrays, which only
+exist as plotting data at render time. Returns `None` (draw no ring) whenever the
+profile never reaches background within the sampled radii, and that absence is
+deliberately left silent rather than drawn as some fallback radius: a profile that
+never crosses is a real, still-detectable halo/tail, not a measurement failure — the
+same "report non-convergence rather than hiding it" stance `block_bootstrap_ci`'s
+`.converged` takes elsewhere. Because the ring now carries the per-image
+steelblue/tomato colour coding on the cutout itself, the RDF panel's own dashed
+background line was recoloured to magenta for both images — steelblue/tomato was
+freed specifically so the ring is the only steelblue-vs-tomato distinction on a given
+figure.
+
 This is a different quantity from the interactive Halo Analyzer dialog's own
 background line (`gui/halo_dialog.py`'s `_rdf_bg_level`/`_xs_bg_level`): the dialog
 derives a proxy from the mean of the profile's own outer 20% tail, independent of

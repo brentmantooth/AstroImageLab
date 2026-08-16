@@ -3716,6 +3716,12 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
             f'so a shoulder must appear above this line to be a reliable detection. Because A and B can '
             f'be captured under different sky conditions, the two lines are not expected to sit at the '
             f'same height.<br><br>'
+            f'<strong>Background-crossing ring.</strong> On each star cutout in the comparison and '
+            f'saturated-star grids, a colour-matched dashed ring marks the radius where that star&rsquo;s '
+            f'own RDF first drops to its background line above — the same crossing the RDF panel&rsquo;s '
+            f'dashed line marks, drawn back onto the image. No ring is drawn when the profile never '
+            f'reaches background within the sampled radius; that is a real, still-detectable halo or '
+            f'tail, not a missing measurement.<br><br>'
             f'<strong>Ideal values:</strong> halo/core ratio &lt;&thinsp;0.05 is excellent; '
             f'&gt;&thinsp;0.15 indicates significant internal reflection that will reduce contrast '
             f'on bright stars.',
@@ -3771,10 +3777,15 @@ brightest saturated stars (S1–S{len(matched_sat)}) shown in the saturated star
 faint halo structure. Stars ranked by peak brightness (brightest first).
 <em>Turbo</em> colormap: bright = high intensity. The dashed steelblue/tomato lines in the
 cross-section and RDF panels mark each image's own local background noise (1&sigma;) — see
-"Background reference line" above.</p>
+"Background reference line" above. The matching dashed steelblue/tomato
+<strong>ring</strong> drawn on each cutout marks the radius where that star's own RDF first
+drops to that same background level — everything inside the ring is above the noise floor,
+everything outside is not reliably distinguishable from sky. No ring is drawn where the
+profile never reaches background within the sampled radius (a genuine, still-detectable
+halo tail), so its absence is informative, not a missing measurement.</p>
 
 {sat_grid_tag}
-{"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped. The dashed steelblue/tomato lines mark each image\'s own local background noise (1&sigma;).</p>'}
+{"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped. The dashed steelblue/tomato lines mark each image\'s own local background noise (1&sigma;); the matching dashed ring on each cutout marks the radius where the RDF first reaches that level, omitted when the profile never gets there.</p>'}
 """
 
     def _extract_cutout(self, data: np.ndarray,
@@ -3792,6 +3803,27 @@ cross-section and RDF panels mark each image's own local background noise (1&sig
         y1_dst = y0_dst + (y1_src - y0_src)
         cut[y0_dst:y1_dst, x0_dst:x1_dst] = data[y0_src:y1_src, x0_src:x1_src]
         return cut
+
+    @staticmethod
+    def _rdf_bg_crossing_radius(rdf_r: np.ndarray | None, rdf_mean_log: np.ndarray | None,
+                                 bg_fraction: float | None) -> float | None:
+        """First radius (px) where a star's own RDF drops to its own background level.
+
+        ``rdf_mean_log`` is the log10-normalised RDF (0 at r=0, matching every other
+        RDF plot in this section); ``bg_fraction`` is ``rdf_bg_fraction`` — the same
+        background sample already drawn as that panel's dashed line — so the returned
+        radius is exactly where that dashed line crosses the curve, not a separately
+        estimated value. Returns None (draw no ring) when the background level is
+        unknown or the profile never decays to it within the sampled radii: that is a
+        real, still-detectable halo/tail, not a measurement failure.
+        """
+        if rdf_r is None or rdf_mean_log is None or bg_fraction is None or bg_fraction <= 0:
+            return None
+        linear = 10.0 ** np.asarray(rdf_mean_log)
+        below = np.nonzero(linear <= bg_fraction)[0]
+        if below.size == 0:
+            return None
+        return float(np.asarray(rdf_r)[below[0]])
 
     @staticmethod
     def _match_halo_stars(ra: AnalysisResult, rb: AnalysisResult) -> list:
@@ -4059,6 +4091,21 @@ cross-section and RDF panels mark each image's own local background noise (1&sig
                 ax_rdf.axis("on")
                 ax_rdf.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
+            # Background-crossing ring: radius where each star's own RDF first
+            # decays to its own background line above. Omitted (not just empty)
+            # whenever the profile never gets there within the sampled radii.
+            ring_r_a = self._rdf_bg_crossing_radius(rdf_r_a, rdf_m_a, bg_rdf_a)
+            if ring_r_a is not None:
+                ax_a.add_patch(plt.Circle((half, half), ring_r_a, fill=False,
+                                           edgecolor="steelblue", linewidth=1.3,
+                                           linestyle="--", alpha=0.9, zorder=6))
+            ring_r_b = (self._rdf_bg_crossing_radius(rdf_r_b, rdf_m_b, bg_rdf_b)
+                        if sb is not None else None)
+            if ring_r_b is not None:
+                ax_b.add_patch(plt.Circle((half, half), ring_r_b, fill=False,
+                                           edgecolor="tomato", linewidth=1.3,
+                                           linestyle="--", alpha=0.9, zorder=6))
+
         fig.tight_layout()
         return fig
 
@@ -4195,6 +4242,19 @@ cross-section and RDF panels mark each image's own local background noise (1&sig
                 ax_rdf.axis("on")
                 ax_rdf.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:.2g}'))
 
+            # Background-crossing ring — see the same block in _plot_halo_star_grid
+            ring_r_a = self._rdf_bg_crossing_radius(rdf_r_a, rdf_m_a, bg_rdf_a)
+            if ring_r_a is not None:
+                ax_a.add_patch(plt.Circle((half, half), ring_r_a, fill=False,
+                                           edgecolor="steelblue", linewidth=1.3,
+                                           linestyle="--", alpha=0.9, zorder=6))
+            ring_r_b = (self._rdf_bg_crossing_radius(rdf_r_b, rdf_m_b, bg_rdf_b)
+                        if sb is not None else None)
+            if ring_r_b is not None:
+                ax_b.add_patch(plt.Circle((half, half), ring_r_b, fill=False,
+                                           edgecolor="tomato", linewidth=1.3,
+                                           linestyle="--", alpha=0.9, zorder=6))
+
         fig.tight_layout()
         return fig
 
@@ -4225,12 +4285,12 @@ cross-section and RDF panels mark each image's own local background noise (1&sig
                             alpha=0.25, color="tomato")
         bg_a = ha.get("rdf_bg_fraction")
         if bg_a is not None and bg_a > 0:
-            ax.axhline(bg_a, color="steelblue", linestyle="--", linewidth=0.8,
-                       alpha=0.7, label=f"{label_a} background (1σ)")
+            ax.axhline(bg_a, color="magenta", linestyle="--", linewidth=0.8,
+                       alpha=0.9, label=f"{label_a} background (1σ)")
         bg_b = hb.get("rdf_bg_fraction")
         if bg_b is not None and bg_b > 0:
-            ax.axhline(bg_b, color="tomato", linestyle="--", linewidth=0.8,
-                       alpha=0.7, label=f"{label_b} background (1σ)")
+            ax.axhline(bg_b, color="magenta", linestyle="--", linewidth=0.8,
+                       alpha=0.9, label=f"{label_b} background (1σ)")
         ax.set_xlabel("Radius (pixels)")
         ax.set_ylabel("Normalised mean intensity")
         ax.set_title(title)
