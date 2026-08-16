@@ -717,6 +717,9 @@ class SpatialDetailAnalyzer:
             return {"mean_a": None, "mean_b": None, "std_a": None, "std_b": None,
                     "ratio": None, "log_ratio_mean": None, "log_ratio_std": None,
                     "p_value": None, "cliffs_delta": None,
+                    "ci_lo": None, "ci_hi": None, "ci_se": None,
+                    "ci_block_px": None, "ci_n_blocks": None,
+                    "ci_converged": None, "se_understatement": None,
                     "n_px": 0, "pct_area": 0.0,
                     "vals_a": np.empty(0, dtype=np.float32), "vals_b": np.empty(0, dtype=np.float32),
                     "vals_log_ratio": np.empty(0, dtype=np.float32)}
@@ -729,6 +732,28 @@ class SpatialDetailAnalyzer:
         log_ratio_std = float(np.std(masked_diff))
         ratio = float(10.0 ** log_ratio_mean)
         p_value, delta = mannwhitney_effect(vals_a, vals_b)
+
+        # Spatial block bootstrap of the same masked log-ratio population.
+        #
+        # p_value above is computed as if the masked pixels were independent
+        # samples. They are not -- every map here is the output of a smoothing
+        # operator and the A-B difference carries large-scale structure on top,
+        # so the naive standard error is understated by 6-46x on real data and
+        # the p-value saturates at <0.001 whatever the effect size. This gives
+        # the honest interval alongside it. Computed here rather than in the
+        # report because `mask` exists only in this scope, and because this runs
+        # inside SpatialDetailAnalyzer's own 5-way pool rather than serially
+        # during report generation.
+        from core.spatial_stats import block_bootstrap_ci
+        boot = block_bootstrap_ci(diff[:h, :w], mask=m, seed=0)
+        ci_lo = boot.lo if boot else None
+        ci_hi = boot.hi if boot else None
+        ci_se = boot.se if boot else None
+        ci_block_px = boot.block_px if boot else None
+        ci_n_blocks = boot.n_blocks if boot else None
+        ci_converged = boot.converged if boot else None
+        se_understatement = boot.se_understatement if boot else None
+
         sub_a, sub_b, sub_log_ratio = vals_a, vals_b, masked_diff
         if vals_a.size > SECTION8_LOCALMAX_DIST_MAX_SAMPLES:
             sub_a = vals_a[rng.choice(vals_a.size, SECTION8_LOCALMAX_DIST_MAX_SAMPLES, replace=False)]
@@ -739,6 +764,9 @@ class SpatialDetailAnalyzer:
         return {"mean_a": mean_a, "mean_b": mean_b, "std_a": std_a, "std_b": std_b,
                 "ratio": ratio, "log_ratio_mean": log_ratio_mean, "log_ratio_std": log_ratio_std,
                 "p_value": p_value, "cliffs_delta": delta,
+                "ci_lo": ci_lo, "ci_hi": ci_hi, "ci_se": ci_se,
+                "ci_block_px": ci_block_px, "ci_n_blocks": ci_n_blocks,
+                "ci_converged": ci_converged, "se_understatement": se_understatement,
                 "n_px": n_px, "pct_area": 100.0 * n_px / m.size,
                 "vals_a": sub_a.astype(np.float32), "vals_b": sub_b.astype(np.float32),
                 "vals_log_ratio": sub_log_ratio.astype(np.float32)}

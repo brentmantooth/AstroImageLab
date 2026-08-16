@@ -294,6 +294,9 @@ img { max-width: 100%; height: auto; border: 1px solid #ccc;
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+from core.practical_significance import NONE as _PS_NONE   # noqa: E402
+
+
 def _slugify(text: str, max_len: int = 60) -> str:
     """Lowercase, filesystem-safe slug for a report image filename.
 
@@ -878,9 +881,21 @@ def _error_box(metric_key: str, ra: AnalysisResult, rb: AnalysisResult) -> str:
     return f'<div class="error-box">⚠ <strong>Analysis failed:</strong> {err}</div>'
 
 
-def _better_worse_class(val_a, val_b, higher_is_better: bool = True) -> tuple[str, str]:
+def _better_worse_class(val_a, val_b, higher_is_better: bool = True,
+                        *, neutral: bool = False) -> tuple[str, str]:
+    """Green/red CSS classes for an A-vs-B comparison.
+
+    `neutral=True` renders both cells with the `.neutral` style instead — for a
+    difference too small to be worth a verdict. Keyword-only so all 28 existing
+    call sites are unaffected. The caller decides, rather than this function
+    taking a tolerance, so that the dead-band and the practical label are driven
+    by the same measured threshold and can never disagree: Section 9 passes
+    `neutral=(verdict_for_fwhm(a, b).label == NONE)`.
+    """
     if val_a is None or val_b is None:
         return "", ""
+    if neutral:
+        return "neutral", "neutral"
     if higher_is_better:
         return ("better", "worse") if val_a >= val_b else ("worse", "better")
     return ("better", "worse") if val_a <= val_b else ("worse", "better")
@@ -979,14 +994,23 @@ def _localmax_rows(localmax: dict, rows: list, val_fmt: str = ".3f") -> str:
         sa, sb = entry.get("std_a"), entry.get("std_b")
         log_mean, log_std = entry.get("log_ratio_mean"), entry.get("log_ratio_std")
         n_px, pct = entry.get("n_px", 0), entry.get("pct_area", 0.0)
-        p, delta = entry.get("p_value"), entry.get("cliffs_delta")
         ca, cb = _better_worse_class(va, vb)
-        sig_html = _format_significance_html(p, delta) if p is not None else ""
+        lo, hi = entry.get("ci_lo"), entry.get("ci_hi")
+        converged = entry.get("ci_converged")
+        if lo is None or hi is None:
+            ci_html = "—"
+        else:
+            # A CI that is still widening at the largest measurable block is a
+            # lower bound on the true uncertainty, not the uncertainty. Say so
+            # rather than presenting it as settled.
+            warn = ("" if converged else
+                    '<br><small class="muted">lower bound &mdash; still widening</small>')
+            ci_html = f"[{lo:+.4f}, {hi:+.4f}]{warn}"
         out += (f"<tr><td>{label}</td>"
                 f"<td class='{ca}'>{_val_pm(va, sa, val_fmt)}</td>"
                 f"<td class='{cb}'>{_val_pm(vb, sb, val_fmt)}</td>"
                 f"<td style='background:#b3e5fc'>{_val_pm(log_mean, log_std, val_fmt)}</td>"
-                f"{_sig_td(sig_html, p)}"
+                f"<td>{ci_html}</td>"
                 f"<td>{n_px:,d} ({pct:.2f}%)</td></tr>")
     return out
 
@@ -1348,6 +1372,14 @@ class ReportBuilder:
                                  substituted=_substituted,
                                  orig_label_a=_orig_label_a,
                                  orig_label_b=_orig_label_b),
+            # Unnumbered and placed after the header (which owns the <h1>), so
+            # no existing section number moves — CLAUDE.md records the
+            # cross-reference churn a renumbering causes.
+            self._section_verdict(
+                result_a, result_b,
+                scale_known=not (image_a.pixel_scale_is_estimated
+                                 or (image_b is not None
+                                     and image_b.pixel_scale_is_estimated))),
             self._section_observation(result_a, result_b),
             self._section_snr(result_a, result_b, image_a, image_b),
             self._section_psf(result_a, result_b, image_a, image_b),
@@ -4888,13 +4920,28 @@ curve is shown.</p>
             'derived from Mean A/Mean B — and reported in log10 units: 0 means A = B, positive means A is '
             'brighter, negative means B is brighter, and the equivalent linear &times;-factor is '
             '10<sup>value</sup>. It is shaded a neutral blue rather than red/green, since it is not an '
-            'A-vs-B comparison. <strong>Significance</strong> is a Mann-Whitney U test (two-sided) with '
-            'Cliff\'s delta effect size, comparing the full masked-pixel populations of A vs B for that '
-            'row — the same test and star-rating legend (&#9733;&#9733;&#9733; large, &#9733;&#9733; '
-            'medium, &#9733; small, n.s. not significant; blue cell = p&lt;0.05) already used for the '
-            'per-star PSF comparisons in Section 4. <strong>N px / % area</strong> shows how much of the '
-            'image the reported means/ratio/significance are drawn from — mean, standard deviation, and '
-            'significance are all computed from the full masked population, not a subsampled copy.',
+            'A-vs-B comparison. <strong>95% CI</strong> is a spatial block bootstrap of that same '
+            'per-pixel log<sub>10</sub>(|A|/|B|) population: the frame is tiled, whole tiles are '
+            'resampled with replacement, and the interval is the 2.5–97.5 percentile of the resulting '
+            'distribution. Tile size is chosen from where the standard error stops growing; when it '
+            'never stops within the frame the row is flagged "still widening" and the interval should '
+            'be read as a lower bound on the true uncertainty. <strong>N px / % area</strong> shows how '
+            'much of the image the reported means and ratio are drawn from — every value except the '
+            'distribution figures is computed from the full masked population, not a subsampled copy.'
+            '<br><br>'
+            '<strong>Why there is no p-value here.</strong> Earlier versions of this table reported a '
+            'Mann-Whitney U test with Cliff\'s delta. Those pixels are not independent samples — every '
+            'map above is the output of a smoothing or windowing operator, and the A-minus-B difference '
+            'carries large-scale structure on top of that. Measured against the block bootstrap on real '
+            'data, treating them as independent understates the standard error by 6–46&times;, so the '
+            'p-value saturates below 0.001 for every row regardless of effect size and carries no '
+            'information. A stronger demonstration: two stacks built from disjoint halves of the same '
+            'sub-frames — images whose true difference is exactly zero — still produce intervals '
+            'excluding zero on every metric. The confidence interval above is the honest version of the '
+            'same question; whether a difference is large enough to <em>see</em> is a separate question, '
+            'answered on the sharpness and noise axes in the Executive Summary. Section 4\'s per-star '
+            'tests keep their p-values, where the sample is tens to low hundreds of individually '
+            'measured stars and independence is defensible.',
             title="Local-maxima masked metrics (methodology)")
 
         def _family_figs_with_corr(rows, map_key_fn) -> str:
@@ -4971,7 +5018,7 @@ background populations behind each score are not pixel-paired between A and B.</
 {localmax_methodology_box}
 <table>
   <tr><th>Scale</th><th>{ra.label} (mean &plusmn; SD)</th><th>{rb.label} (mean &plusmn; SD)</th>
-      <th>log ratio A/B (geo. mean &plusmn; SD)</th><th>Significance</th><th>N px / % area</th></tr>
+      <th>log ratio A/B (geo. mean &plusmn; SD)</th><th>95% CI (block bootstrap)</th><th>N px / % area</th></tr>
   {localmax_rows_html}
 </table>
 
@@ -6327,10 +6374,31 @@ signal in the dark region produce a higher SNR.</p>
                 "Spatial view of the same classification — where the sigma-clip kept "
                 "(steelblue) versus excluded (tomato) pixels.")
 
+            # The masked background changes which pixels qualify as signal, not
+            # just their values, so the headline SNR number moves sharply when
+            # the setting is toggled. Without saying so, a user flipping the
+            # checkbox sees the number fall ~8x and concludes the feature broke.
+            # A test pins this paragraph for exactly that reason.
+            _snr_shift_html = (
+                '<div class="warn-box"><p><strong>Expect the global SNR number to move '
+                'when this setting changes — and compare it only within a setting, '
+                'never across this setting.</strong> Global SNR is '
+                'median(pixels &gt; 3&sigma;) / &sigma;, so it depends on which pixels '
+                'qualify, not only on how bright they are. While the background absorbs '
+                'nebulosity, only star cores clear the threshold; once the background '
+                'stops absorbing it, the nebula joins that population and the median is '
+                'taken over a much larger and fainter set. Measured on a ground-truth '
+                'gradient+nebula frame the qualifying pixels went 1.5% &rarr; 11.4% and '
+                'the median fell 30.3 &rarr; 3.7, while recovered signal rose from 46% '
+                'to 84% of the known truth. The number got smaller and the measurement '
+                'got better. Read it as a within-setting comparison between Image A and '
+                'Image B, which is what this report uses it for.</p></div>')
+
             bg_html = f"""
 <h3>3e. Background Model</h3>
 {_info_box(bg_info_text, title="Understanding the background model")}
 <p>Model in use: <strong>{_model_kind}</strong>.</p>
+{_snr_shift_html}
 {_hires_img_tag(mesh_fig, "Background mesh grid")}
 <p class="caption">The 64&times;64 px background estimation grid (cyan outlines) over
 the actual image. Cells straddling bright extended structure can bias that cell's
@@ -6852,6 +6920,120 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
 
     # ── Section 10: Summary ───────────────────────────────────────────────────
 
+    def _section_verdict(self, ra: AnalysisResult, rb: AnalysisResult,
+                          scale_known: bool = True) -> str:
+        """Unnumbered executive summary: what would an imager actually see?
+
+        Three axes, each labelled independently, and a headline that is the
+        strongest of them — a difference material on any one axis is material to
+        the viewer, so the cross-axis reduction is a max (core.practical_
+        significance.overall_label), unlike the median used *within* Section 8's
+        correlated family.
+
+        Sharpness reads fwhm_px, never fwhm_arcsec: the arcsec value depends on
+        a FITS header some processing software writes wrongly (a bare
+        CDELT1 = 1.0 parses to 3600 "/px), while the label is a percentage
+        change and is identical in either unit whenever the scale is right.
+
+        The detail axis deliberately carries no label. Its dead-band would have
+        to come from a null floor, and that floor does not transfer between
+        datasets — measured 15x spread across 14 filter sets, with no image
+        property predicting it (best r2 = 0.35 over six candidates). Reporting
+        the magnitude and saying so is honest; borrowing another target's floor
+        is not.
+        """
+        if getattr(self, "_single_image", False):
+            return ""
+        from core.practical_significance import (
+            overall_label, verdict_for_fwhm, verdict_for_snr)
+
+        psf_a, psf_b = ra.psf_metrics or {}, rb.psf_metrics or {}
+        snr_a, snr_b = ra.snr_metrics or {}, rb.snr_metrics or {}
+        sm = ra.spatial_metrics or {}
+
+        v_sharp = verdict_for_fwhm(psf_a.get("fwhm_px"), psf_b.get("fwhm_px"))
+
+        # Starless SNR when both sides have it — the same precedence Section 9
+        # uses, so the two tables cannot quote different numbers.
+        sl_a, sl_b = snr_a.get("starless") or {}, snr_b.get("starless") or {}
+        use_sl = bool(sl_a) and bool(sl_b)
+        v_noise = verdict_for_snr(
+            (sl_a if use_sl else snr_a).get("snr_global"),
+            (sl_b if use_sl else snr_b).get("snr_global"))
+
+        lm = sm.get("localmax") or {}
+        mags = [e.get("log_ratio_mean") for e in lm.values()
+                if e and e.get("log_ratio_mean") is not None]
+        detail_txt = "—"
+        if mags:
+            detail_txt = (f"{min(mags):+.3f} to {max(mags):+.3f} "
+                          f"log<sub>10</sub> across {len(mags)} metrics")
+
+        # Full label rather than PRACTICAL_SHORT: this is the one line a reader
+        # may take away, so it should read as a sentence, not a table cell.
+        headline = overall_label([v_sharp.label, v_noise.label])
+        head_txt = headline or "not established"
+
+        def _axis(name, detail, verdict, extra=""):
+            lbl = verdict.label if verdict is not None else None
+            cell = (f'<td class="{"neutral" if lbl and lbl == _PS_NONE else ""}">'
+                    f'<strong>{lbl or "not established"}</strong></td>')
+            return (f"<tr><td><strong>{name}</strong></td><td>{detail}</td>"
+                    f"{cell}<td>{extra}</td></tr>")
+
+        fa, fb = psf_a.get("fwhm_px"), psf_b.get("fwhm_px")
+        sharp_detail = (f"{_val(fa, '.3f')} &rarr; {_val(fb, '.3f')} px"
+                        + (f" ({v_sharp.equivalent:+.1f}%)"
+                           if v_sharp.equivalent is not None else ""))
+        if scale_known and psf_a.get("fwhm_arcsec"):
+            sharp_detail += (f'<br><small class="muted">'
+                             f'{_val(psf_a.get("fwhm_arcsec"), ".3f")} &rarr; '
+                             f'{_val(psf_b.get("fwhm_arcsec"), ".3f")} arcsec</small>')
+
+        na = (sl_a if use_sl else snr_a).get("snr_global")
+        nb = (sl_b if use_sl else snr_b).get("snr_global")
+        noise_detail = (f"{_val(na, '.3f')} &rarr; {_val(nb, '.3f')} &sigma;"
+                        + (f" ({v_noise.equivalent:+.2f} dB)"
+                           if v_noise.equivalent is not None else ""))
+        if use_sl:
+            noise_detail += '<br><small class="muted">starless</small>'
+
+        rows = (
+            _axis("Sharpness", sharp_detail, v_sharp, "PSF FWHM, Section 4")
+            + _axis("Noise", noise_detail, v_noise, "Global SNR, Section 3")
+            + f"<tr><td><strong>Detail</strong></td><td>{detail_txt}</td>"
+              f"<td><em>not established</em></td>"
+              f"<td>Section 8 &mdash; needs a null reference for this data</td></tr>"
+        )
+
+        return f"""
+<h2>Executive Summary</h2>
+<table>
+  <tr><th>What changed</th><th>Measured</th><th>Would you see it?</th><th>Source</th></tr>
+  {rows}
+</table>
+<p><strong>Overall: {head_txt}</strong> &mdash; the strongest verdict across the
+axes that can be labelled.</p>
+{_info_box(
+    'Labels describe whether a difference is likely to be <em>visible</em>, not '
+    'whether it is statistically detectable — with millions of pixels almost any '
+    'difference is detectable. The four bands are '
+    '<strong>no visible difference expected</strong>, <strong>subtle</strong>, '
+    '<strong>noticeable under close inspection</strong> and <strong>material</strong>, '
+    'set on two directly-measured quantities: a change in PSF FWHM (5 / 15 / 30 %) '
+    'and a change in global SNR (0.5 / 1.5 / 3 dB). Both are physical measurements '
+    'that need no reference image.<br><br>'
+    'The <strong>detail</strong> axis (Section 8) carries no label. Deciding whether '
+    'a spatial-detail difference is visible needs to know how large that metric reads '
+    'between two images that are genuinely identical — its noise floor — and that '
+    'floor does not transfer between datasets: measured across 14 filter sets it '
+    'spans 15&times;, and no image property predicts it (best r&sup2; = 0.35 across '
+    'six candidates including SNR, sub-frame count and sky noise). Obtaining it for '
+    'a given comparison means splitting that data into disjoint halves. Until then '
+    'the magnitude and its confidence interval are reported, and no verdict is '
+    'implied.',
+    title="How to read these labels")}"""
+
     def _section_summary(self, ra: AnalysisResult, rb: AnalysisResult,
                           bw_differ: bool, scale_known: bool = True) -> str:
         """Section 9 summary table.
@@ -6868,8 +7050,9 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         sm_b = rb.spatial_metrics or {}
 
         def row(metric, val_a, val_b, fmt=".3f",
-                higher_is_better=True, bw_flag="✓"):
-            ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
+                higher_is_better=True, bw_flag="✓", neutral=False):
+            ca, cb = _better_worse_class(val_a, val_b, higher_is_better,
+                                         neutral=neutral)
             flag_class = "metric-label-warn" if bw_flag == "⚠" else "metric-label-ok"
             label = f'{metric} <span class="{flag_class}">{bw_flag}</span>'
             return (f"<tr><td>{label}</td>"
@@ -6899,9 +7082,24 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         # tracks STD_KERNEL_SIZES instead of assuming a fixed value.
         _std_row_ks = max(cr_a) if cr_a else None
 
+        # Dead-band: a difference the practical-significance scale calls
+        # invisible is shaded neutral rather than green/red. Driven by the same
+        # verdict the Executive Summary shows, so the colour and the label can
+        # never disagree. Only FWHM and SNR get this — they are the two axes
+        # with a measured threshold behind them.
+        from core.practical_significance import verdict_for_fwhm, verdict_for_snr
+        _fwhm_neutral = verdict_for_fwhm(
+            psf_a.get("fwhm_px"), psf_b.get("fwhm_px")).label == _PS_NONE
+        _sl_a, _sl_b = snr_ma.get("starless") or {}, snr_mb.get("starless") or {}
+        _use_sl = bool(_sl_a) and bool(_sl_b)
+        _snr_neutral = verdict_for_snr(
+            (_sl_a if _use_sl else snr_ma).get("snr_global"),
+            (_sl_b if _use_sl else snr_mb).get("snr_global")).label == _PS_NONE
+
         def row_pm(metric, val_a, val_b, spread_a, spread_b, fmt=".3f",
-                   higher_is_better=True, bw_flag="✓"):
-            ca, cb = _better_worse_class(val_a, val_b, higher_is_better)
+                   higher_is_better=True, bw_flag="✓", neutral=False):
+            ca, cb = _better_worse_class(val_a, val_b, higher_is_better,
+                                         neutral=neutral)
             flag_class = "metric-label-warn" if bw_flag == "⚠" else "metric-label-ok"
             label = f'{metric} <span class="{flag_class}">{bw_flag}</span>'
             return (f"<tr><td>{label}</td>"
@@ -6926,10 +7124,11 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
         rows = "".join([
             row_pm("FWHM (px)", psf_a.get("fwhm_px"), psf_b.get("fwhm_px"),
                    psf_a.get("fwhm_px_mad"), psf_b.get("fwhm_px_mad"),
-                   higher_is_better=False),
+                   higher_is_better=False, neutral=_fwhm_neutral),
             row_pm("FWHM (arcsec)", psf_a.get("fwhm_arcsec"), psf_b.get("fwhm_arcsec"),
                    psf_a.get("fwhm_arcsec_mad"), psf_b.get("fwhm_arcsec_mad"),
-                   higher_is_better=False) if scale_known else "",
+                   higher_is_better=False,
+                   neutral=_fwhm_neutral) if scale_known else "",
             row_pm("Moffat β", psf_a.get("beta"), psf_b.get("beta"),
                    psf_a.get("beta_mad"), psf_b.get("beta_mad")),
             row_pm("Ellipticity", psf_a.get("ellipticity"), psf_b.get("ellipticity"),
@@ -6962,12 +7161,12 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
                 "Global SNR — starless (σ) ★",
                 (snr_ma.get("starless") or {}).get("snr_global"),
                 (snr_mb.get("starless") or {}).get("snr_global"),
-                fmt=".4f",
+                fmt=".4f", neutral=_snr_neutral,
             )] if (snr_ma.get("starless") or snr_mb.get("starless")) else [row(
                 "Global image SNR (σ)",
                 snr_ma.get("snr_global"),
                 snr_mb.get("snr_global"),
-                fmt=".4f",
+                fmt=".4f", neutral=_snr_neutral,
             )]),
         ]) + xs_snr_rows
 
@@ -7001,7 +7200,15 @@ A uniformly brighter map indicates deeper, more signal-rich data.</p>
   {rows}
 </table>
 {_info_box('Green cells indicate the better value for that metric. '
-           'Red cells indicate the worse value. Metrics marked ⚠ may be influenced by the '
+           'Red cells indicate the worse value. <strong>Grey cells</strong> mark a difference '
+           'small enough that it is not expected to be visible — the FWHM and global-SNR rows '
+           'are shaded this way when the Executive Summary rates them '
+           '"no visible difference expected", so the colour and the label always agree. '
+           'Every other row is coloured on magnitude alone, because no measured visibility '
+           'threshold exists for it. Metrics marked ⚠ may be influenced by the '
            'difference in filter bandwidth and should not be used as the sole basis for '
-           'comparison.',
+           'comparison.<br><br>'
+           '<strong>Ellipticity and Eccentricity are one measurement, not two.</strong> They '
+           'are the same star-shape statistic re-expressed, so they always agree and always '
+           'return an identical significance result; count them once when weighing the table.',
            title="How to read this table")}"""

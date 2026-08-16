@@ -287,6 +287,22 @@ def verdict_for_snr(snr_a: float | None,
                             note="" if db is not None else "no measurement")
 
 
+def _rank_of(item) -> int | None:
+    """Rank for a PracticalVerdict, a bare label string, or None.
+
+    Both reducers below accept either form. That matters because they compose:
+    `consensus_label` returns a *string*, and feeding a set of per-axis consensus
+    strings to `overall_label` is exactly the intended two-level reduction --
+    which would raise AttributeError if `overall_label` only understood verdicts.
+    """
+    if item is None:
+        return None
+    if isinstance(item, str):
+        return PRACTICAL_ORDER.get(item)
+    label = getattr(item, "label", None)
+    return PRACTICAL_ORDER.get(label) if label else None
+
+
 def consensus_label(verdicts) -> str | None:
     """Robust label for several metrics measuring the *same* quantity.
 
@@ -301,7 +317,7 @@ def consensus_label(verdicts) -> str | None:
     detection the report's headline verdict on a filter pair its owner expects
     to be indistinguishable.
     """
-    ranked = sorted(v.rank for v in verdicts if v is not None and v.label)
+    ranked = sorted(r for r in map(_rank_of, verdicts) if r is not None)
     if not ranked:
         return None
     return PRACTICAL_LABELS[ranked[len(ranked) // 2]]
@@ -315,9 +331,9 @@ def overall_label(verdicts) -> str | None:
     them is material to the viewer even when the others are unchanged.
     Averaging across axes would hide exactly the finding the reader opened the
     report for. Feed this the per-axis consensus labels, not raw per-metric
-    verdicts.
+    verdicts -- bare label strings are accepted for exactly that reason.
     """
-    ranked = [v.rank for v in verdicts if v is not None and v.label]
+    ranked = [r for r in map(_rank_of, verdicts) if r is not None]
     if not ranked:
         return None
     return PRACTICAL_LABELS[max(ranked)]

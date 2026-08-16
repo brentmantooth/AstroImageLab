@@ -68,10 +68,17 @@ MIN_BLOCKS = 30
 # only ~5-12% of the frame, so a flat 25%-of-area rule would reject essentially
 # every tile and the bootstrap would return None for exactly the population
 # that best tracks perceived sharpness.
-MIN_TILE_VALID_FRAC = 0.25
-# ...with an absolute floor, so a tile carrying a handful of pixels is still
-# rejected however sparse the mask is overall.
-MIN_TILE_VALID_PX = 16
+# ...but in practice both bounds are 0/1, i.e. every tile holding at least one
+# valid pixel is kept. Tiles are *count-weighted*, so a tile with 3 masked
+# pixels contributes weight 3 and cannot distort the mean -- the sparse-cell
+# concern that motivates a floor applies to unweighted statistics, not to this
+# one. Dropping such tiles instead breaks the identity that makes the whole
+# thing usable: measured on a real Section 8l mask (7.6% coverage), a 16-pixel
+# floor discarded 568 of 900 tiles, and because the discarded tiles were the
+# mask-sparse ones rather than a random subset it biased the estimate 2x --
+# producing a confidence interval that did not contain its own point estimate.
+MIN_TILE_VALID_FRAC = 0.0
+MIN_TILE_VALID_PX = 1
 # SE growth factor between block_px and 2*block_px above which the bootstrap is
 # reported as not converged. 1.0 would be exact convergence; 1.5 allows for the
 # genuine noise in an SE estimated from a few hundred blocks.

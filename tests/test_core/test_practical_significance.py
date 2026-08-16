@@ -259,6 +259,30 @@ class TestOverallLabel:
     def test_empty_input(self):
         assert overall_label([]) is None
 
+    def test_accepts_bare_label_strings(self):
+        """consensus_label returns a string, and the two-level reduction feeds
+        those straight into overall_label -- so it must accept them."""
+        assert overall_label([NONE, SUBTLE, MATERIAL]) == MATERIAL
+
+    def test_accepts_a_mix_of_strings_and_verdicts(self):
+        assert overall_label([NONE, verdict_for_fwhm(2.0, 3.0)]) == MATERIAL
+
+    def test_ignores_none_entries(self):
+        assert overall_label([None, SUBTLE, None]) == SUBTLE
+
+    def test_unknown_string_is_ignored_not_ranked(self):
+        assert overall_label(["not a label", SUBTLE]) == SUBTLE
+
+    def test_consensus_also_accepts_strings(self):
+        assert consensus_label([NONE, NONE, NONE, MATERIAL, MATERIAL]) == NONE
+
+    def test_two_level_reduction_composes(self):
+        """The exact call the report's executive summary makes: a detail
+        consensus reduced from many correlated metrics, then combined with the
+        independent sharpness axis."""
+        detail = consensus_label([NONE] * 10 + [NOTICEABLE])
+        assert overall_label([verdict_for_fwhm(2.0, 2.02), detail]) == NONE
+
 
 class TestAgainstKnownRealCases:
     """Thresholds checked against the six comparisons whose answers are known.

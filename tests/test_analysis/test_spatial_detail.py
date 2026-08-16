@@ -658,6 +658,12 @@ class TestLocalMaxStats:
         assert stats == {"mean_a": None, "mean_b": None, "std_a": None, "std_b": None,
                           "ratio": None, "log_ratio_mean": None, "log_ratio_std": None,
                           "p_value": None, "cliffs_delta": None,
+                          # Block-bootstrap CI fields, absent for an empty mask
+                          # but always present as keys so the report can format
+                          # the row without branching on schema.
+                          "ci_lo": None, "ci_hi": None, "ci_se": None,
+                          "ci_block_px": None, "ci_n_blocks": None,
+                          "ci_converged": None, "se_understatement": None,
                           "n_px": 0, "pct_area": 0.0}
         assert vals_a.size == 0
         assert vals_b.size == 0

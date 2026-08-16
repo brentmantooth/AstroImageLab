@@ -90,11 +90,24 @@ class TestTileReduce:
         assert np.allclose(values, 1.0)
         assert np.sum(weights) == 64 * 128
 
-    def test_sparse_tiles_are_dropped(self):
+    def test_a_single_pixel_tile_is_kept_with_weight_one(self):
+        """Tiles are count-weighted, so a sparse tile cannot distort the mean and
+        must not be discarded. Discarding them broke the point-estimate identity
+        below: on a real 7.6%-coverage mask a 16-pixel floor dropped 568 of 900
+        tiles -- the mask-sparse ones, not a random subset -- and biased the
+        result 2x, yielding a CI that excluded its own point estimate."""
         mask = np.zeros((128, 128), dtype=bool)
-        mask[0, 0] = True          # one pixel in one tile: far below the floor
-        values, _ = tile_reduce(np.ones((128, 128)), mask, 32)
-        assert values.size == 0
+        mask[0, 0] = True
+        values, weights = tile_reduce(np.ones((128, 128)), mask, 32)
+        assert values.size == 1
+        assert weights[0] == 1
+
+    def test_too_few_tiles_still_fails_the_bootstrap_not_the_reduction(self):
+        """Guarding against under-determined input belongs in the bootstrap
+        (which needs >= 2 tiles), not in the reduction."""
+        mask = np.zeros((128, 128), dtype=bool)
+        mask[0, 0] = True
+        assert block_bootstrap_ci(np.ones((128, 128)), mask, block_px=32) is None
 
     def test_a_sparse_mask_still_yields_tiles(self):
         """Section 8l's local-maxima mask selects ~5-12% of the frame. A flat
@@ -114,11 +127,17 @@ class TestTileReduce:
         assert (np.sum(values * weights) / np.sum(weights)
                 == pytest.approx(f[mask].mean(), rel=1e-6))
 
-    def test_absolute_floor_still_rejects_tiny_tiles(self):
-        mask = np.zeros((256, 256), dtype=bool)
-        mask[::64, ::64] = True     # ~1 px per 64x64 tile
-        values, _ = tile_reduce(np.ones((256, 256)), mask, 64)
-        assert values.size == 0
+    def test_point_estimate_equals_the_masked_mean_on_a_concentrated_mask(self):
+        """The invariant that makes the CI presentable next to the mean it
+        belongs to. A mask concentrated on bright structure -- exactly Section
+        8l's local-maxima mask -- is where tile dropping used to bite."""
+        yy, xx = np.mgrid[0:512, 0:512]
+        bright = np.exp(-((yy - 256) ** 2 + (xx - 256) ** 2) / (2 * 80.0 ** 2))
+        field = 0.4 * bright + 0.05 * np.random.default_rng(0).normal(size=(512, 512))
+        mask = bright > np.percentile(bright, 92)      # ~8%, concentrated
+        res = block_bootstrap_ci(field, mask, block_px=16, seed=0)
+        assert res.point == pytest.approx(field[mask].mean(), rel=1e-6)
+        assert res.lo <= res.point <= res.hi
 
     def test_block_larger_than_image_is_clamped(self):
         values, _ = tile_reduce(iid_field((64, 64)), None, 4096)
