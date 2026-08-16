@@ -459,8 +459,8 @@ class HaloAnalyzer:
                        alpha=0.8, label=f"R_halo = {halo_r:.0f} px")
 
         if bg_level is not None and bg_level > 0:
-            ax.axhline(bg_level, color="gray", linestyle="--", linewidth=0.8,
-                       alpha=0.7, label=f"Background (1σ) ≈ {bg_level:.2g}")
+            ax.axhline(bg_level, color="cyan", linestyle="--", linewidth=0.8,
+                       alpha=0.9, label=f"Background (1σ) ≈ {bg_level:.2g}")
 
         halo_r_str = f"{halo_r:.1f} px" if halo_r is not None else "N/A (> data window)"
         ax.set_xlabel("Radius (pixels)")
