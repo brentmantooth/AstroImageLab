@@ -438,12 +438,26 @@ class MainWindow(QMainWindow):
 
         if report_path:
             from pathlib import Path as _Path
-            from gui.report_inspector import ReportInspector
             npz_path = _Path(report_path).with_name(
                 _Path(report_path).stem + "_inspector.npz")
             if npz_path.exists():
-                self._inspector = ReportInspector(npz_path, parent=self)
-                self._inspector.show()
+                try:
+                    from gui.data_inspector import DataInspector
+                except ImportError as exc:
+                    # pyqtgraph is a hard requirement for this window only; degrade
+                    # with an explanation rather than taking down the completion
+                    # path with a traceback.
+                    QMessageBox.warning(
+                        self,
+                        "Data Inspector unavailable",
+                        "The Data Inspector needs the pyqtgraph package, which could "
+                        f"not be imported:\n\n{exc}\n\nInstall it with:\n"
+                        "    pip install pyqtgraph",
+                    )
+                else:
+                    dark = self._control.settings().get("dark_mode_graphics", False)
+                    self._data_inspector = DataInspector(npz_path, dark_mode=dark, parent=self)
+                    self._data_inspector.show()
 
     def _pick_inspector_npz(self, title: str):
         """Prompt for a report .html (or its .npz directly) and resolve the .npz path.

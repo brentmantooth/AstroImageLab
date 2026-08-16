@@ -1,8 +1,8 @@
 """Data Inspector — interactive pyqtgraph explorer for a report's `_inspector.npz`.
 
-A more interactive successor to gui/report_inspector.py, which it will eventually
-replace.  Both are kept while this one is developed and tested; the Report Inspector
-still opens automatically after a run, this one is opened from the File menu.
+A more interactive successor to gui/report_inspector.py. This one now opens
+automatically when an analysis run completes (MainWindow._on_finished); the Report
+Inspector remains available for manual use via File -> Open Report Inspector....
 
 Phase 1 (this file): the data-selection model carried over from the Report Inspector
 (Section -> Image set -> A / B), three pan/zoom-synchronised image panels

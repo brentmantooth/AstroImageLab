@@ -61,8 +61,12 @@ gui/
   analysis_thread.py   QThread orchestrator; dark-mode rcParams save/restore lives here
   control_panel.py     Settings UI; settings() returns dict consumed by the thread
   image_panel.py       Image display panel; load_path() / set_starless_path() for programmatic load
-  report_inspector.py  Interactive side-by-side figure viewer (matplotlib; being replaced)
-  data_inspector.py    Data Inspector (QMainWindow) — pyqtgraph successor to the above
+  report_inspector.py  Interactive side-by-side figure viewer (matplotlib). Manual-only —
+                       reachable via File → Open Report Inspector…, no longer opens
+                       automatically after a run
+  data_inspector.py    Data Inspector (QMainWindow) — pyqtgraph successor to the above.
+                       Opens automatically when analysis completes
+                       (`MainWindow._on_finished`)
   inspector_widgets.py pyqtgraph widgets for the Data Inspector (drawing only, no maths)
   bg_region_dialog.py  Background exclusion regions (QMainWindow, pyqtgraph) — freehand
                        lasso over the image, region list, and a threaded preview of the
@@ -1422,7 +1426,7 @@ mid-run capture) — both live in the script as reusable helpers, not one-off ha
 15 files total: 8 full/panel/group-box states of the main window (empty, both images
 loaded, line drawn, ROI drawn, Parameters group, Metrics+Region&Run composite via
 `grab_side_by_side()`), the manual starless prompt, a mid-run and a completion-dialog
-capture from one real six-metric analysis run, the Report Inspector that run produces,
+capture from one real six-metric analysis run, the Data Inspector that run auto-opens,
 and the three Tools-menu dialogs (Synthetic Data Generator, Spatial Target Generator,
 Halo Analyzer — the latter with a star pre-clicked via `dlg._on_star_clicked(x, y)` so
 the results table and PSF/RDF charts are populated rather than blank).
@@ -1662,8 +1666,11 @@ The frequency axis is always cycles/pixel regardless of ROI size.
 
 Four modules: `gui/data_inspector.py` (window), `gui/inspector_widgets.py` (pyqtgraph
 widgets), `analysis/inspector_regions.py` (all array maths), `core/inspector_catalog.py`
-(`.npz` reader). Opened from **File → Open Data Inspector…**; the Report Inspector is
-unchanged and still auto-opens after a run. Both are kept until this one is proven.
+(`.npz` reader). This is now the inspector that opens automatically when an analysis run
+completes (`MainWindow._on_finished`) — it replaced the Report Inspector in that role once
+proven out. Also reachable manually via **File → Open Data Inspector…**. The Report
+Inspector is unchanged and still exists for manual use via **File → Open Report
+Inspector…**, but no longer opens on its own.
 
 ### Layout
 

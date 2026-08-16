@@ -286,7 +286,7 @@ def capture_running_and_report(app: QApplication, mw: MainWindow) -> None:
     for _ in range(5):
         app.processEvents()
         time.sleep(0.05)
-    grab(mw._inspector, RESOURCES / "14_inspector.png")
+    grab(mw._data_inspector, RESOURCES / "14_inspector.png")
 
 
 def main() -> None:

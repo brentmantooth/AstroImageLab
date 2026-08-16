@@ -131,7 +131,7 @@ python AstroImageLab.py
 6. **Select metrics** — Check or uncheck the metrics you want to run in the control panel. Each metric can also have its figures exported as standalone PNG files using the corresponding export checkbox.
 7. **Set output directory** — Browse to where the self-contained HTML report should be saved.
 8. **Run** — Click **Run Analysis**. Images are aligned automatically using `astroalign` before per-pixel comparisons. A progress bar and per-metric timer are shown during analysis.
-9. **Review report** — The HTML report and an interactive Report Inspector window both open automatically when analysis completes.
+9. **Review report** — The HTML report is saved and an interactive Data Inspector window opens automatically when analysis completes.
 
 The **Tools** menu also has three standalone utilities not part of this linear workflow: a Synthetic Data Generator and a Spatial Target Generator for producing test images, and an interactive Halo Analyzer for click-a-star PSF/halo inspection. See [QuickStart.md](QuickStart.md#additional-tools) for details.
 

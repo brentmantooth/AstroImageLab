@@ -13,7 +13,7 @@ different cameras, or different conditions), and the tool produces a side-by-sid
 - **Spatial detail** — local std, Laplacian of Gaussian, and wavelet maps
 - **Signal / Noise** — sky background, noise factor, and per-star SNR
 
-Output is a self-contained HTML report and an interactive Report Inspector window. Image B is optional — loading only Image A runs the app in single-image analysis mode.
+Output is a self-contained HTML report and an interactive Data Inspector window. Image B is optional — loading only Image A runs the app in single-image analysis mode.
 
 ---
 
@@ -320,24 +320,35 @@ Click **Run Analysis**. The button disables and the following happens:
 After a successful run:
 
 - **HTML report** opens automatically in your default web browser.
-- **Report Inspector** opens as a separate window for interactive comparison of every
-  figure the report generated.
+- **Data Inspector** opens as a separate window for interactive exploration of every
+  array the report was built from.
 
-The Report Inspector is more capable than a simple slider: **Left**/**Right** dropdowns
-let you independently choose what each panel shows (Image A, Image B, a computed
-Reference, or a Diff), a **Mode** selector switches between side-by-side and
-before/after-slider views, and a **Section** dropdown exposes every Section 8 spatial-
-detail sub-map (LoG, wavelet, gradient, local σ, local entropy, at every scale) alongside
-the input images. Scroll to zoom and right-click-drag to pan — both panels stay
-synchronized. Drag directly on either image to draw a cross-section line; the chart
-below updates live with a profile plot that supports a log-scale Y-axis toggle, a hover
-tooltip, and a crosshair.
+The Data Inspector is built around three linked, pan/zoom-synchronised panels —
+**Image A** | **Image B** | **Comparison** — with a cross-section chart and a
+comparison histogram below them, and two correlation plots at the bottom.
+**Section**/**Image set**/**A**/**B** dropdowns pick what feeds the panels, from the raw
+input images through every Section 8 spatial-detail sub-map (LoG, wavelet, gradient,
+local σ, local entropy, at every scale); a **Compare** dropdown sets the Comparison
+panel to either a log ratio (`log₁₀(|A|/|B|)`, the default) or a plain difference
+(`A − B`). A **View** dropdown switches between side-by-side and an A/B swipe divider,
+and a **Tool** dropdown chooses what a click-drag on the images does: pan/zoom, move
+the cross-section line, or resize the ROI. Drag the cross-section line onto any
+feature; the chart below updates live with a hover crosshair and tooltip.
 
-You can reopen the inspector at any time via **File → Open Report Inspector…** and
-selecting either the `.html` report or the `_inspector.npz` data file.
+The region controls let you restrict the histogram and correlation plots to a
+**Region** (rectangle, ellipse, or freehand lasso) and/or a brightness **Threshold**
+(percentile or absolute, upper or lower tail) — the two correlation plots then show
+the split, inside the region/threshold vs. outside it. Lasso-select points on a
+correlation plot to highlight the matching pixels back on the image panels.
 
-![Report Inspector showing side-by-side image comparison](resources/14_inspector.png)
-*The Report Inspector with synchronized side-by-side view. Scroll to zoom, right-click drag to pan.*
+You can reopen the Data Inspector at any time via **File → Open Data Inspector…** and
+selecting either the `.html` report or the `_inspector.npz` data file. The original
+**Report Inspector** — a simpler matplotlib-based side-by-side/slider viewer over the
+same data — remains available via **File → Open Report Inspector…**, but no longer
+opens automatically.
+
+![Data Inspector showing linked image, cross-section, and correlation panels](resources/14_inspector.png)
+*The Data Inspector with synchronized Image A / Image B / Comparison panels, cross-section, and correlation plots.*
 
 ---
 
@@ -459,6 +470,6 @@ sampling. To avoid clipping, either redraw the line entirely within the ROI, or 
 the ROI (click Select ROI → Cancel ROI before the warning appears).
 
 **Inspector file not found**
-The Report Inspector reads a `_inspector.npz` data file saved alongside the HTML report.
-If you move or rename the HTML report, move the `.npz` file with it. If the file is
-missing, re-run the analysis to regenerate it.
+Both the Data Inspector and the Report Inspector read a `_inspector.npz` data file saved
+alongside the HTML report. If you move or rename the HTML report, move the `.npz` file
+with it. If the file is missing, re-run the analysis to regenerate it.
