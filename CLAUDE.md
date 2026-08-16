@@ -465,6 +465,42 @@ Feeding the source mask into `Background2D(mask=…)` instead of fitting a surfa
 known-bad configuration, for the interpolated-fill reason documented below — at high
 coverage most cells go empty and photutils back-fills them.
 
+### A single background sample must be re-expressed in each plot's own normalisation
+
+Section 5 (Halo Analysis) draws a dashed background-noise reference line on every
+cross-section and radial-profile plot. `HaloAnalyzer._bg_rms_at()` samples
+`image.background_rms` once per star, at that star's own pixel location — but every
+plot in this section has already re-normalised its curve differently (cross-section:
+raw ADU; RDF: log10-relative to the star's own centre-bin value; Moffat profile:
+linear-relative to the star's own peak), so the *same* physical noise sample has to be
+converted into three different units before it means anything on a given axis:
+
+| Plot | Existing normalisation (already computed) | Field | Formula |
+| --- | --- | --- | --- |
+| Cross-section (`ax_xs`) | none — raw ADU | `bg_rms` | `bg_rms` as-is |
+| RDF (`ax_rdf`) | `norm = mu[0]` (log10 value at centre bin) | `rdf_bg_fraction` | `bg_rms / 10**norm` |
+| Moffat profile (`_plot_profile`) | `peak = I[0]` (linear centre-bin value) | `bg_over_peak` | `bg_rms / peak` |
+
+Each conversion happens once, at the exact point in `HaloAnalyzer.analyze()` where
+that normalisation constant is already in scope — never in `report_builder.py`,
+which only reads the pre-converted field and calls `axhline`. Guard `bg_over_peak`
+on `I[0] > 0`: `peak` silently falls back to `1.0` when the true centre-bin value is
+non-positive (`peak = I[0] if I[0] > 0 else 1.0`, `analysis/halo_analyzer.py`), and
+dividing by that fallback would produce a number that looks like a fraction but
+isn't one. Aggregate figures (the two `_plot_rdf_comparison` calls, the stacked
+Moffat profile) take the *median* of the per-star fractions across whichever star
+population that aggregate was built from, not a fresh whole-image scalar — same
+principle as `consensus_label`'s median-within-a-correlated-family aggregation.
+
+This is a different quantity from the interactive Halo Analyzer dialog's own
+background line (`gui/halo_dialog.py`'s `_rdf_bg_level`/`_xs_bg_level`): the dialog
+derives a proxy from the mean of the profile's own outer 20% tail, independent of
+`AstroImage.background_rms` entirely, and is not wired to `HaloAnalyzer` at all. The
+two are not expected to agree exactly — the report's line is the real,
+independently-characterised sky noise; the dialog's is a self-referential estimate
+from the same curve it's drawn on. This was a deliberate scope decision (report-only)
+rather than an oversight — see the dialog's own thread architecture notes below.
+
 ### The exclusion mask must be attached before the background is computed
 
 `estimate_background()`'s idempotency guard now keys on `background_model`, and the mask

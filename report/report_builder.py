@@ -3707,6 +3707,15 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
             f'more slowly than the core trend at 10&ndash;60&thinsp;px — indicates halo light '
             f'from internal reflections. The filter with the lower profile at any radius produces '
             f'less scattered light at that distance from the star.<br><br>'
+            f'<strong>Background reference line.</strong> Every cross-section, RDF and radial-profile '
+            f'plot in this section carries a dashed horizontal line at that image&rsquo;s own local '
+            f'1&sigma; sky background noise (colour-matched: steelblue = {ra.label}, tomato = {rb.label}), '
+            f'sampled from the same masked-background noise map Section 3 characterises, at each '
+            f'star&rsquo;s own position. Where a curve reaches or drops below its own line, any '
+            f'remaining structure — halo or otherwise — is no longer distinguishable from sky noise, '
+            f'so a shoulder must appear above this line to be a reliable detection. Because A and B can '
+            f'be captured under different sky conditions, the two lines are not expected to sit at the '
+            f'same height.<br><br>'
             f'<strong>Ideal values:</strong> halo/core ratio &lt;&thinsp;0.05 is excellent; '
             f'&gt;&thinsp;0.15 indicates significant internal reflection that will reduce contrast '
             f'on bright stars.',
@@ -3732,18 +3741,22 @@ each band. Colors identify contrast level (high / medium / low){retention_captio
   <div style="flex:1;">{prof_b}</div>
 </div>
 <p class="caption">Radial profiles (semi-log). A steep drop-off indicates a clean
-filter. A raised floor or shoulder beyond ~10 px indicates a halo component.</p>
+filter. A raised floor or shoulder beyond ~10 px indicates a halo component. The gray dashed
+line marks this image's own local background noise (1&sigma;) — a fitted curve above it near
+the data limit indicates a real, still-detectable halo tail.</p>
 
 {rdf_unsat_fig}
 <p class="caption">Aggregate RDF — unsaturated halo stars. Mean normalised intensity vs. radius
 (blue = Image A, red = Image B). Shaded band = ±1&sigma; within-annulus variability averaged
 over all fitted stars. A shoulder or elevated tail relative to the other filter indicates
-stronger halo contribution at that radius.</p>
+stronger halo contribution at that radius. Dashed steelblue/tomato lines mark each image's
+own local background noise (1&sigma;).</p>
 
 {rdf_sat_fig}
 <p class="caption">Aggregate RDF — saturated stars only. The flat plateau at small radii
 reflects the clipped core; the slope beyond the plateau shows the halo ring structure.
-Meaningful even when the core is fully overexposed.</p>
+Meaningful even when the core is fully overexposed. Dashed steelblue/tomato lines mark each
+image's own local background noise (1&sigma;).</p>
 
 {star_map_tag}
 <p class="caption">STF-stretched overview of {ra.label}.
@@ -3756,10 +3769,12 @@ brightest saturated stars (S1–S{len(matched_sat)}) shown in the saturated star
 <p class="caption">Top {len(matched)} brightest stars common to both images, side-by-side
 (Image A left, Image B right per pair). STF stretch applied per image to reveal
 faint halo structure. Stars ranked by peak brightness (brightest first).
-<em>Turbo</em> colormap: bright = high intensity.</p>
+<em>Turbo</em> colormap: bright = high intensity. The dashed steelblue/tomato lines in the
+cross-section and RDF panels mark each image's own local background noise (1&sigma;) — see
+"Background reference line" above.</p>
 
 {sat_grid_tag}
-{"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped.</p>'}
+{"" if not matched_sat else '<p class="caption">Brightest saturated stars (core overexposed — halo/core ratio not computed). The cross-section shows the halo ring structure in the wings beyond the saturated core. Comparing the ring width and intensity between the two filters is still meaningful even when the core is clipped. The dashed steelblue/tomato lines mark each image\'s own local background noise (1&sigma;).</p>'}
 """
 
     def _extract_cutout(self, data: np.ndarray,
@@ -3990,6 +4005,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                 if xs_b_vals is not None:
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
                                    linewidth=1.0, alpha=XS_LINE_ALPHA, label=label_b)
+                bg_xs_a = sa.get("bg_rms")
+                if bg_xs_a is not None and bg_xs_a > 0:
+                    ax_xs.axhline(bg_xs_a, color="steelblue", linestyle="--",
+                                  linewidth=0.8, alpha=0.7)
+                bg_xs_b = sb.get("bg_rms") if sb is not None else None
+                if bg_xs_b is not None and bg_xs_b > 0:
+                    ax_xs.axhline(bg_xs_b, color="tomato", linestyle="--",
+                                  linewidth=0.8, alpha=0.7)
                 ax_xs.set_title(f"#{idx+1} cross-section", fontsize=8)
                 ax_xs.set_xlabel("px from centre", fontsize=7)
                 ax_xs.tick_params(labelsize=7)
@@ -4019,6 +4042,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                                     10**(rdf_m_b - rdf_s_b),
                                     10**(rdf_m_b + rdf_s_b),
                                     alpha=0.25, color="tomato")
+            bg_rdf_a = sa.get("rdf_bg_fraction")
+            if bg_rdf_a is not None and bg_rdf_a > 0:
+                ax_rdf.axhline(bg_rdf_a, color="steelblue", linestyle="--",
+                               linewidth=0.8, alpha=0.7)
+            bg_rdf_b = sb.get("rdf_bg_fraction") if sb is not None else None
+            if bg_rdf_b is not None and bg_rdf_b > 0:
+                ax_rdf.axhline(bg_rdf_b, color="tomato", linestyle="--",
+                               linewidth=0.8, alpha=0.7)
             if rdf_m_a is not None or rdf_m_b is not None:
                 ax_rdf.set_title(f"#{idx+1} RDF", fontsize=8)
                 ax_rdf.set_xlabel("px from centre", fontsize=7)
@@ -4110,6 +4141,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                     xs_b_vals = np.maximum(cut_b[mid_row, :w_min], noise_floor)
                     ax_xs.semilogy(px_offset, xs_b_vals, color="tomato",
                                    linewidth=1.0, alpha=XS_LINE_ALPHA, label=label_b)
+                bg_xs_a = sa.get("bg_rms")
+                if bg_xs_a is not None and bg_xs_a > 0:
+                    ax_xs.axhline(bg_xs_a, color="steelblue", linestyle="--",
+                                  linewidth=0.8, alpha=0.7)
+                bg_xs_b = sb.get("bg_rms") if sb is not None else None
+                if bg_xs_b is not None and bg_xs_b > 0:
+                    ax_xs.axhline(bg_xs_b, color="tomato", linestyle="--",
+                                  linewidth=0.8, alpha=0.7)
                 ax_xs.set_title(f"S{idx+1} cross-section", fontsize=8)
                 ax_xs.set_xlabel("px from centre", fontsize=7)
                 ax_xs.tick_params(labelsize=7)
@@ -4139,6 +4178,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
                                     10**(rdf_m_b - rdf_s_b),
                                     10**(rdf_m_b + rdf_s_b),
                                     alpha=0.25, color="tomato")
+            bg_rdf_a = sa.get("rdf_bg_fraction")
+            if bg_rdf_a is not None and bg_rdf_a > 0:
+                ax_rdf.axhline(bg_rdf_a, color="steelblue", linestyle="--",
+                               linewidth=0.8, alpha=0.7)
+            bg_rdf_b = sb.get("rdf_bg_fraction") if sb is not None else None
+            if bg_rdf_b is not None and bg_rdf_b > 0:
+                ax_rdf.axhline(bg_rdf_b, color="tomato", linestyle="--",
+                               linewidth=0.8, alpha=0.7)
             if rdf_m_a is not None or rdf_m_b is not None:
                 ax_rdf.set_title(f"S{idx+1} RDF", fontsize=8)
                 ax_rdf.set_xlabel("px from centre", fontsize=7)
@@ -4176,6 +4223,14 @@ faint halo structure. Stars ranked by peak brightness (brightest first).
             ax.fill_between(r_b,
                             10**(m_b - s_b), 10**(m_b + s_b),
                             alpha=0.25, color="tomato")
+        bg_a = ha.get("rdf_bg_fraction")
+        if bg_a is not None and bg_a > 0:
+            ax.axhline(bg_a, color="steelblue", linestyle="--", linewidth=0.8,
+                       alpha=0.7, label=f"{label_a} background (1σ)")
+        bg_b = hb.get("rdf_bg_fraction")
+        if bg_b is not None and bg_b > 0:
+            ax.axhline(bg_b, color="tomato", linestyle="--", linewidth=0.8,
+                       alpha=0.7, label=f"{label_b} background (1σ)")
         ax.set_xlabel("Radius (pixels)")
         ax.set_ylabel("Normalised mean intensity")
         ax.set_title(title)

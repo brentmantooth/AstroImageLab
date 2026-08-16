@@ -53,6 +53,8 @@ class HaloAnalyzer:
         }
 
         bgsub = image.background_subtracted()
+        h, w = image.data.shape
+        rms_map = image.background_rms
 
         # Log10-transform for RDF: gives balanced statistics across the halo's
         # dynamic range; floor at the 1st percentile of positive pixels.
@@ -80,6 +82,14 @@ class HaloAnalyzer:
                 star_entry["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
                 star_entry["halo_radius_px"]     = fit["halo_radius_px"]
 
+            # Local 1σ background noise at this star's own position, expressed in
+            # each plot's own normalisation so report_builder can axhline it directly.
+            bg_rms = self._bg_rms_at(rms_map, xc, yc, h, w)
+            if bg_rms is not None:
+                star_entry["bg_rms"] = bg_rms
+                if I[0] > 0:   # only the real peak, not the 1.0 fallback
+                    star_entry["bg_over_peak"] = bg_rms / peak
+
             rdf_result = self._annular_stats(log_bgsub, xc, yc, HALO_FIT_RADIUS_PX)
             if rdf_result is not None:
                 r_rdf, mu, sig = rdf_result
@@ -87,6 +97,8 @@ class HaloAnalyzer:
                 star_entry["rdf_radii"] = r_rdf
                 star_entry["rdf_mean"]  = mu - norm   # 0 at r=0 → 10^0 = 1 in display
                 star_entry["rdf_std"]   = sig          # already in log10 units
+                if bg_rms is not None:
+                    star_entry["rdf_bg_fraction"] = bg_rms / (10.0 ** norm)
 
             per_star.append(star_entry)
 
@@ -104,25 +116,33 @@ class HaloAnalyzer:
             result["radial_radii"]   = common_r
             result["radial_profile"] = stacked
 
+            bg_over_peak_vals = [s["bg_over_peak"] for s in per_star if "bg_over_peak" in s]
+            profile_bg_level = float(np.median(bg_over_peak_vals)) if bg_over_peak_vals else None
+            result["profile_bg_level"] = profile_bg_level
+
             fit = self._fit_two_component(common_r, stacked)
             if fit is not None:
                 result["halo_to_core_ratio"] = fit["halo_to_core_ratio"]
                 result["halo_radius_px"]     = fit["halo_radius_px"]
                 figs_dict["halo_profile"]    = self._plot_profile(
-                    common_r, stacked, fit, image.label)
+                    common_r, stacked, fit, image.label, bg_level=profile_bg_level)
 
             agg_unsat = self._compute_aggregate_rdf(
                 [s for s in per_star if "rdf_mean" in s])
             if agg_unsat is not None:
-                result["rdf_radii"]    = agg_unsat["rdf_radii"]
-                result["rdf_mean"]     = agg_unsat["rdf_mean"]
-                result["rdf_std"]      = agg_unsat["rdf_std"]
-                result["rdf_star_std"] = agg_unsat["rdf_star_std"]
-                result["rdf_n_stars"]  = agg_unsat["rdf_n_stars"]
+                result["rdf_radii"]       = agg_unsat["rdf_radii"]
+                result["rdf_mean"]        = agg_unsat["rdf_mean"]
+                result["rdf_std"]         = agg_unsat["rdf_std"]
+                result["rdf_star_std"]    = agg_unsat["rdf_star_std"]
+                result["rdf_n_stars"]     = agg_unsat["rdf_n_stars"]
+                result["rdf_bg_fraction"] = agg_unsat["rdf_bg_fraction"]
 
         # --- Saturated stars (always collected, regardless of unsaturated count) ---
         sat_stars = self._collect_saturated_stars(catalog, image)
         for s in sat_stars:
+            bg_rms = self._bg_rms_at(rms_map, s["xc"], s["yc"], h, w)
+            if bg_rms is not None:
+                s["bg_rms"] = bg_rms
             rdf_result = self._annular_stats(log_bgsub, s["xc"], s["yc"], HALO_FIT_RADIUS_PX)
             if rdf_result is not None:
                 r_rdf, mu, sig = rdf_result
@@ -130,16 +150,19 @@ class HaloAnalyzer:
                 s["rdf_radii"] = r_rdf
                 s["rdf_mean"]  = mu - norm      # 0 at r=0 → 10^0 = 1 in display
                 s["rdf_std"]   = sig            # already in log10 units
+                if bg_rms is not None:
+                    s["rdf_bg_fraction"] = bg_rms / (10.0 ** norm)
 
         result["saturated_star_data"] = sat_stars
 
         agg_sat = self._compute_aggregate_rdf(
             [s for s in sat_stars if "rdf_mean" in s])
         if agg_sat is not None:
-            result["sat_rdf_radii"]    = agg_sat["rdf_radii"]
-            result["sat_rdf_mean"]     = agg_sat["rdf_mean"]
-            result["sat_rdf_std"]      = agg_sat["rdf_std"]
-            result["sat_rdf_star_std"] = agg_sat["rdf_star_std"]
+            result["sat_rdf_radii"]       = agg_sat["rdf_radii"]
+            result["sat_rdf_mean"]        = agg_sat["rdf_mean"]
+            result["sat_rdf_std"]         = agg_sat["rdf_std"]
+            result["sat_rdf_star_std"]    = agg_sat["rdf_star_std"]
+            result["sat_rdf_bg_fraction"] = agg_sat["rdf_bg_fraction"]
             result["sat_rdf_n_stars"]  = agg_sat["rdf_n_stars"]
 
         if figs_dict:
@@ -242,6 +265,21 @@ class HaloAnalyzer:
                 for s in cc_stars[:N_SATURATED_DISPLAY]]
 
     # ------------------------------------------------------------------
+    # Background reference
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bg_rms_at(rms_map: np.ndarray | None, xc: float, yc: float,
+                    h: int, w: int) -> float | None:
+        """Local 1σ background noise (ADU) at a star's pixel location."""
+        if rms_map is None:
+            return None
+        iy = min(max(int(round(yc)), 0), h - 1)
+        ix = min(max(int(round(xc)), 0), w - 1)
+        val = float(rms_map[iy, ix])
+        return val if val > 0 else None
+
+    # ------------------------------------------------------------------
     # Radial profiles
     # ------------------------------------------------------------------
 
@@ -312,6 +350,7 @@ class HaloAnalyzer:
 
         stacked_means = []
         stacked_stds  = []
+        bg_fractions  = []
         for d in rdf_list:
             r = d["rdf_radii"]
             m = d["rdf_mean"]
@@ -323,6 +362,8 @@ class HaloAnalyzer:
             s_i = np.interp(r_ref, r, s, left=np.nan, right=np.nan)
             stacked_means.append(m_i)
             stacked_stds.append(s_i)
+            if "rdf_bg_fraction" in d:
+                bg_fractions.append(d["rdf_bg_fraction"])
 
         if not stacked_means:
             return None
@@ -330,11 +371,12 @@ class HaloAnalyzer:
         all_means = np.array(stacked_means)
         all_stds  = np.array(stacked_stds)
         return {
-            "rdf_radii":    r_ref,
-            "rdf_mean":     bn.nanmean(all_means, axis=0),
-            "rdf_std":      bn.nanmean(all_stds,  axis=0),   # avg per-bin σ
-            "rdf_star_std": bn.nanstd(all_means,  axis=0),   # star-to-star σ
-            "rdf_n_stars":  len(stacked_means),
+            "rdf_radii":       r_ref,
+            "rdf_mean":        bn.nanmean(all_means, axis=0),
+            "rdf_std":         bn.nanmean(all_stds,  axis=0),   # avg per-bin σ
+            "rdf_star_std":    bn.nanstd(all_means,  axis=0),   # star-to-star σ
+            "rdf_n_stars":     len(stacked_means),
+            "rdf_bg_fraction": float(np.median(bg_fractions)) if bg_fractions else None,
         }
 
     # ------------------------------------------------------------------
@@ -386,7 +428,8 @@ class HaloAnalyzer:
     # ------------------------------------------------------------------
 
     def _plot_profile(self, r: np.ndarray, I_norm: np.ndarray,
-                       fit: dict, label: str) -> plt.Figure:
+                       fit: dict, label: str,
+                       bg_level: float | None = None) -> plt.Figure:
         halo_r = fit["halo_radius_px"]   # may be None if HWHM > data window
         popt = fit["popt"]
 
@@ -414,6 +457,10 @@ class HaloAnalyzer:
         if halo_r is not None:
             ax.axvline(halo_r, color="tomato", linestyle="--", linewidth=1.0,
                        alpha=0.8, label=f"R_halo = {halo_r:.0f} px")
+
+        if bg_level is not None and bg_level > 0:
+            ax.axhline(bg_level, color="gray", linestyle="--", linewidth=0.8,
+                       alpha=0.7, label=f"Background (1σ) ≈ {bg_level:.2g}")
 
         halo_r_str = f"{halo_r:.1f} px" if halo_r is not None else "N/A (> data window)"
         ax.set_xlabel("Radius (pixels)")
