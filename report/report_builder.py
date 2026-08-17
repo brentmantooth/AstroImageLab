@@ -1098,8 +1098,8 @@ _SPATIAL_GLOSSARY_HTML = (
         '      scale</td></tr>'
         '  <tr><td>Noise-corrected (NC) score (8d–8k)</td><td>same scale as parent method</td>'
         '      <td>SNR of Detail</td>'
-        "      <td>Whether a detail-map response in the nebula is real structure or just this image's "
-        '      own noise floor at that scale</td></tr>'
+        "      <td>Whether that metric's own top-5%-brightest pixels are real structure or just this "
+        "      image's own noise floor at that scale</td></tr>"
         '  <tr><td>Local gradient energy map (8i)</td><td>same σ as LoG/gradient, window &asymp; '
         '      4&times;σ px</td><td>Acutance (sharpness concentration)</td>'
         '      <td>Where windowed high-frequency edge energy concentrates — complements 8f\'s raw '
@@ -1111,8 +1111,8 @@ _SPATIAL_GLOSSARY_HTML = (
         '  <tr><td>Global acutance scalars (8m)</td><td>whole-nebula, absolute (not a ratio)</td>'
         '      <td>Acutance</td>'
         '      <td>Overall edge/curvature steepness compared directly A vs B — the only rows in this '
-        '      table that are <em>not</em> a nebula-vs-background ratio, which is exactly why they '
-        '      respond to same-image sharpening the other rows miss</td></tr>'
+        '      table that are <em>not</em> a ratio of two masked-region medians, which is exactly why '
+        '      they respond to same-image sharpening the other rows miss</td></tr>'
         '</table>',
         title="Which concept each metric primarily measures")
     + _info_box(
@@ -4937,13 +4937,17 @@ curve is shown.</p>
             "inside the nebula mask are filled, then the mask is grown outward by "
             f"{nebula_dilation_px} px to capture dim transition regions at nebula edges, before "
             "the two images' masks are combined below. "
-            "<b>How they're used below.</b> The per-scale correlation plots embedded in "
-            "8d&ndash;8j use the <b>two-image union</b> for Nebula "
+            "<b>How they're used below.</b> Nebula is the <b>two-image union</b> "
             "&mdash; a pixel counts as Nebula if <i>either</i> image classifies it that way, since "
             "a pixel that's clearly nebula in one image but marginal in the other (e.g. due to "
             "registration offset, PSF, or local noise) should still count as signal. Background "
             "stays the <b>two-image intersection</b> &mdash; a pixel counts as Background only if "
-            "<i>both</i> images agree, keeping the noise-floor reference population clean. Shown on "
+            "<i>both</i> images agree, keeping the noise-floor reference population clean. "
+            "These masks feed 8k's background noise-floor (the denominator of every noise-corrected "
+            "score), 8m's whole-nebula acutance scalars, and the Executive Summary's per-image "
+            "contrast ratio &mdash; the correlation plots and noise-corrected score numerator in "
+            "8d&ndash;8j instead use a top-N%-brightness selection of each metric's own map (see "
+            "the methodology box before 8d), not these Nebula/Background masks. Shown on "
             f"{ra.label}, the same array as the &quot;Original&quot; row below."
             "</p>"
             if mask_fig else ""
@@ -4986,10 +4990,12 @@ curve is shown.</p>
         nc_methodology_box = _info_box(
             'Each detail map above additionally yields a <strong>noise-corrected local '
             'contrast score</strong> at every scale: score = median(|detail|) over the '
-            'shared nebula region (the union of each image\'s own nebula mask, so marginal '
-            'nebula signal in either image still counts as signal), divided by median(|detail|) '
+            'top-N%-brightest pixels of that metric/scale\'s own map (the same top-N% '
+            'brightness selection used by the correlation plots above — see the methodology '
+            'box before 8d), divided by median(|detail|) '
             'over that image\'s OWN background region (its empirical per-scale noise floor, '
-            'using only pixels both images classify as background). <strong>Ratio A/B</strong> '
+            'using only pixels both images classify as background, per the Nebula/Background '
+            'masks in 8c). <strong>Ratio A/B</strong> '
             'divides Image A\'s score by Image B\'s score at each scale — greater than 1 '
             'means Image A shows relatively stronger detail than Image B at that scale, '
             'after accounting for each image\'s own noise level. Scale units differ by '
@@ -5000,11 +5006,20 @@ curve is shown.</p>
             '(map ÷ noise floor) so that a shared colour scale is a fair visual comparison '
             'between A and B, even when their absolute noise levels differ.',
             title="Noise-corrected local contrast (methodology)")
+        # nc_shared_nebula_pixels == 0 no longer implies 8k's noise-corrected scores are
+        # unavailable (their numerator is the top-N%-brightness mask now, not this one,
+        # and a percentile-threshold mask is essentially never empty) -- it still implies
+        # both images' own per-image nebula masks are empty too (a shared union can only
+        # be empty if both operands are), so 8m's whole-nebula acutance scalars and the
+        # Executive Summary's contrast ratio are what actually go blank in that case.
         nc_empty_note = ""
         if not getattr(self, "_single_image", False) and sm.get("nc_shared_nebula_pixels", 0) == 0:
             nc_empty_note = _info_box(
-                '⚠ Images A and B share no common nebula-mask pixels — noise-corrected '
-                'scores below are unavailable (—) for every scale and method.',
+                '⚠ Images A and B share no common nebula-mask pixels — Section 8m\'s '
+                'whole-nebula acutance scalars and the Executive Summary\'s contrast ratio are '
+                'unavailable (—) for every scale and method. (8k\'s noise-corrected scores below '
+                'are unaffected — their population is the top-N%-brightness selection described '
+                'in the methodology box before 8d, not this nebula mask.)',
                 title="No shared nebula region", open=True)
 
         localmax_rows_html = _localmax_rows(sm.get("localmax", {}), _SPATIAL_CORR_ROWS)
@@ -5028,7 +5043,11 @@ curve is shown.</p>
             'Unlike the Nebula/Background masks in 8c, this mask is <strong>not</strong> restricted to the '
             'nebula region — the prominence threshold already isolates prominent features on its own, and '
             'intersecting with the coarser nebula mask could exclude legitimate sharp features (stars, '
-            'edges) outside it. '
+            'edges) outside it. It is also a different mask from the plain top-N% brightness selection '
+            'used by 8d&ndash;8j\'s correlation plots and 8k\'s noise-corrected score numerator above '
+            '(same percentage, same per-metric/scale value distribution, but no peak-detection union) — '
+            'this table\'s mask is always at least as large, since it is that same top-N% mask with the '
+            'peaks unioned in. '
             '<strong>Mean A / Mean B</strong> are the average metric magnitude &plusmn; standard deviation '
             'over the masked pixels in each image. <strong>log ratio A/B (geo. mean &plusmn; SD)</strong> '
             'is sampled directly from the masked pixels\' per-pixel log10(|A|/|B|) population — not '
@@ -5123,9 +5142,11 @@ approximate spatial scale. Scale units differ by method (see 8d–8j methodology
 boxes) — use this chart to spot which spatial-scale regime favours which filter,
 not to compare absolute ratio values across methods. Error bars show an
 <strong>approximate</strong> relative uncertainty, propagated from the coefficient of
-variation (standard deviation &divide; median) of each image's own nebula-region pixel
-population — not a formal confidence interval on the median, since the nebula and
-background populations behind each score are not pixel-paired between A and B.</p>
+variation (standard deviation &divide; median) of each image's own top-N%-brightest
+pixel population (the same population the score's numerator is computed over —
+see the methodology box before 8d) — not a formal confidence interval on the median,
+since that population and the background population behind each score are not
+pixel-paired between A and B.</p>
 """
 
         localmax_html = f"""
@@ -5164,10 +5185,18 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
 
         _has_any_corr = any(f"corr_{k}" in figs for k, _l in _SPATIAL_CORR_ROWS)
         corr_methodology_box = (
-            _info_box('Each per-pixel correlation scatter (embedded next to its map figure '
-                      'below) plots the raw (pre-ratio) metric value at every shared pixel: '
+            _info_box('Each per-pixel correlation scatter below (8d&ndash;8j) plots the raw '
+                      '(pre-ratio) metric value at every shared pixel: '
                       f'{ra.label} on the y-axis vs. {rb.label} on the x-axis, split into a '
-                      'Nebula panel and a Background panel using the shared masks explained in 8c. '
+                      '<strong>Top 5%</strong> panel (pixels in the top N% — '
+                      f'{lm_top_percent:g}% by default, GUI-configurable — of Image A\'s or Image '
+                      'B\'s own value distribution <em>for that metric/scale</em>) and a '
+                      '<strong>Rest</strong> panel (everything else). This is the same top-N% '
+                      'brightness selection 8k\'s noise-corrected score numerator uses, and the same '
+                      'mechanism (without the added peak-detection union) behind 8l\'s combined mask '
+                      '— it is <em>not</em> the Nebula/Background split explained in 8c, which only '
+                      'the 8b Original-image correlation plot above and 8m\'s whole-nebula scalars '
+                      'still use. '
                       'The <strong>black dashed diagonal</strong> is the 1:1 line (perfect agreement, '
                       'A = B). Axis limits span the <strong>full</strong> data range for that panel — '
                       'unlike the 8l distribution violin plots, they are <em>not</em> clipped to a '
@@ -5263,7 +5292,10 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
               'flux can be negative — same convention as the Wavelet family), and — when a '
               'cross-section line is set — its profile (middle-right, and overlaid directly on '
               'Image A/B above), plus a bottom-row histogram of the log-ratio pixel values. '
-              'Immediately followed by the per-pixel correlation scatter (see methodology below).</p>'
+              'Immediately followed by the per-pixel correlation scatter, split into a Nebula '
+              'panel and a Background panel using the shared masks explained in 8c (unlike the '
+              'derived metrics in 8d&ndash;8j below, whose correlation plots use a different '
+              'split — see the methodology box before 8d).</p>'
             if orig_fig else ""
         )
 
@@ -5410,7 +5442,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 'is spread evenly across the nebula or concentrated in specific structures.</p>'
                 '<p><strong>Noise-corrected score and local-maxima row:</strong> this map is wired '
                 'through the same pipeline as every other Section 8 family — its median '
-                'nebula&divide;background noise-corrected score is folded into 8l\'s combined '
+                'top-N%-brightest&divide;background noise-corrected score is folded into 8l\'s combined '
                 'cross-method table (row "Local grad. energy") and its ratio into the 8k/8l overview '
                 'plots ("local_grad_energy"), rather than duplicated in a table here.</p>'
                 '<p><strong>Read per-scale, and alongside 8m.</strong> As with 8m, the finest '
@@ -5463,7 +5495,7 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 'concentrated in specific structures.</p>'
                 '<p><strong>Noise-corrected score and local-maxima row:</strong> this map is wired '
                 'through the same pipeline as every other Section 8 family — its median '
-                'nebula&divide;background noise-corrected score is folded into 8l\'s combined '
+                'top-N%-brightest&divide;background noise-corrected score is folded into 8l\'s combined '
                 'cross-method table (row "Local Laplacian var.") and its ratio into the 8k/8l '
                 'overview plots ("local_lap_variance"), rather than duplicated in a table here.</p>'
                 '<p><strong>Read per-scale, and alongside 8m.</strong> As with 8m, the finest '
@@ -5480,7 +5512,8 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
             )
 
         # 8m. Global acutance / perceived-sharpness scalars. Unlike 8d–8l (which
-        # reduce every map to a median nebula/background ratio, deliberately
+        # reduce every map to a median ratio -- top-N%-brightest/background for
+        # 8d-8j's NC score, a direct masked A/B ratio for 8l -- deliberately
         # bandwidth-normalised and insensitive to same-image sharpening), these are
         # ABSOLUTE second-moment measures over the nebula mask — dominated by the
         # sharp-edge tail the median washes out. Two-image mode only.
@@ -5519,13 +5552,15 @@ box above), overlaid on that metric's own |A| magnitude map.</p>
                 'below measure directly, and exactly what the ratio-based families in 8d&ndash;8l '
                 'are not designed to detect, for the following reason.</p>'
                 '<p>The families above (8d&ndash;8l) reduce every detail map to a '
-                '<strong>median</strong> nebula&divide;background <strong>ratio</strong> &mdash; '
+                '<strong>median</strong> <strong>ratio</strong> &mdash; top-N%-brightest'
+                '&divide;background for 8d&ndash;8j\'s noise-corrected score, a direct masked '
+                'A/B ratio for 8l &mdash; '
                 'deliberately bandwidth-normalised so two <em>different</em> filters can be '
                 'compared fairly. The median is a '
                 'central-tendency statistic dominated by the millions of low-gradient interior '
                 'pixels, so it barely moves when sharpening steepens the relatively few strong '
-                'edges (the <em>tail</em> of the gradient distribution); and a nebula&divide;'
-                'background ratio further cancels changes that scale signal and noise together.</p>'
+                'edges (the <em>tail</em> of the gradient distribution); and a ratio of two such '
+                'medians further cancels changes that scale signal and noise together.</p>'
                 '<p>These two metrics instead use <strong>absolute second-moment (variance / '
                 'energy)</strong> reductions over the nebula mask, which are dominated by exactly '
                 'that sharp-edge tail &mdash; the classic focus / acutance measures used for '

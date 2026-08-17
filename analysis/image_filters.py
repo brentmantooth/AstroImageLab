@@ -854,20 +854,29 @@ class SpatialDetailAnalyzer:
             std_a = self._compute_std_map(norm_a, ks)
             std_b = self._compute_std_map(norm_b, ks) if not single else None
 
-            # Contrast ratios (computed on unsmoothed maps)
+            # Contrast ratios (computed on unsmoothed maps) — still nebula/background,
+            # feeds the Executive Summary's own detail-axis magnitude (out of scope for
+            # the top-5% switch below).
             cr_a = self._contrast_ratio(std_a, mask_neb_a, mask_bg_a)
             partial["contrast_ratios_a"][ks] = cr_a
             if not single:
                 cr_b = self._contrast_ratio(std_b, mask_neb_b, mask_bg_b)
                 partial["contrast_ratios_b"][ks] = cr_b
 
+            # Top-N%-brightness population for the correlation plot and NC-score
+            # numerator below (replaces the nebula/background split for this family) —
+            # top N% of THIS metric's own A/B value distribution, no peak-detection
+            # union (unlike 8j/8l's _combined_localmax_mask, which also ORs in
+            # local-maxima peaks for its own, separate table).
+            top5_mask = self._top_percent_mask(std_a, std_b, localmax_top_percent) if not single else None
+
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a, neb_std_a = self._nc_score(std_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(std_a, top5_mask, mask_bg_a)
                 partial["std_nc_score_a"][ks] = nc_a
                 partial["std_nc_noise_a"][ks] = noise_a
                 partial["std_nc_neb_std_a"][ks] = neb_std_a
-                nc_b, noise_b, neb_std_b = self._nc_score(std_b, mask_neb_shared, mask_bg_b)
+                nc_b, noise_b, neb_std_b = self._nc_score(std_b, top5_mask, mask_bg_b)
                 partial["std_nc_score_b"][ks] = nc_b
                 partial["std_nc_noise_b"][ks] = noise_b
                 partial["std_nc_neb_std_b"][ks] = neb_std_b
@@ -889,8 +898,9 @@ class SpatialDetailAnalyzer:
                 partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
-                    std_a, std_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Local σ (kernel {ks}px)", rng)
+                    std_a, std_b, diff, top5_mask, ~top5_mask,
+                    label_a, label_b, f"Local σ (kernel {ks}px)", rng,
+                    region_names=("Top 5%", "Rest"))
                 if corr_fig is not None:
                     figures[f"corr_std_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
@@ -1002,34 +1012,39 @@ class SpatialDetailAnalyzer:
         return float(np.median(neb_vals)) / bg_med
 
     def _nc_score(self, detail_map: np.ndarray,
-                  mask_neb_shared: np.ndarray | None,
+                  mask_population: np.ndarray | None,
                   mask_bg: np.ndarray) -> tuple[float | None, float | None, float | None]:
         """Noise-corrected local-contrast score for one detail map at one scale.
 
-        score = median(|detail|) over the pixels either image classifies as nebula
-        (mask_neb_shared), divided by median(|detail|) over THIS image's own
-        background mask — its empirical per-scale noise floor for this operator.
-        Returns (score, noise_floor, neb_std); all None if a mask selects zero
-        pixels, mask_neb_shared is unavailable (single-image mode), or
-        noise_floor <= 0. neb_std is the sample standard deviation of the same
-        nebula-region |detail| population the median score is computed from —
-        used to propagate an approximate uncertainty onto the 8i cross-method
-        overview's ratio-of-scores error bars (see _compute_nc_ratio_errors).
+        score = median(|detail|) over mask_population, divided by median(|detail|)
+        over THIS image's own background mask — its empirical per-scale noise floor
+        for this operator. mask_population is caller-supplied and generic: every
+        current caller (the 5 family methods) passes a top-N%-brightness mask (see
+        _top_percent_mask) so the numerator is that metric's own brightest pixels.
+        (8b's Original-image family doesn't call this function at all — its
+        correlation plot goes straight to _plot_metric_correlation with the shared
+        nebula mask instead, so it never yields an NC score.) Returns (score,
+        noise_floor, pop_std); all None if a mask selects zero pixels,
+        mask_population is unavailable (single-image mode), or noise_floor <= 0.
+        pop_std is the sample standard deviation of the same mask_population
+        |detail| population the median score is computed from — used to propagate
+        an approximate uncertainty onto the 8k cross-method overview's
+        ratio-of-scores error bars (see _compute_nc_ratio_errors).
         """
-        if mask_neb_shared is None:
+        if mask_population is None:
             return None, None, None
-        h = min(detail_map.shape[0], mask_neb_shared.shape[0], mask_bg.shape[0])
-        w = min(detail_map.shape[1], mask_neb_shared.shape[1], mask_bg.shape[1])
+        h = min(detail_map.shape[0], mask_population.shape[0], mask_bg.shape[0])
+        w = min(detail_map.shape[1], mask_population.shape[1], mask_bg.shape[1])
         absmap = np.abs(detail_map[:h, :w])
-        neb_vals = absmap[mask_neb_shared[:h, :w]]
+        pop_vals = absmap[mask_population[:h, :w]]
         bg_vals = absmap[mask_bg[:h, :w]]
-        if neb_vals.size == 0 or bg_vals.size == 0:
+        if pop_vals.size == 0 or bg_vals.size == 0:
             return None, None, None
         noise_floor = float(bn.median(bg_vals))
         if noise_floor <= 0:
             return None, None, None
-        neb_std = float(np.std(neb_vals))
-        return float(bn.median(neb_vals)) / noise_floor, noise_floor, neb_std
+        pop_std = float(np.std(pop_vals))
+        return float(bn.median(pop_vals)) / noise_floor, noise_floor, pop_std
 
     @staticmethod
     def _masked_reduce(values: np.ndarray, mask: np.ndarray, fn) -> float | None:
@@ -1124,12 +1139,15 @@ class SpatialDetailAnalyzer:
                                   neb_std_a: dict, neb_std_b: dict) -> dict:
         """Approximate symmetric uncertainty on each scale's nc_ratio, propagated
         from the coefficient of variation (std/median) of each image's own
-        nebula-region pixel population -- a standard relative-uncertainty
-        propagation for a ratio of two independent quantities. This is NOT a
-        formal confidence interval on the median; it is an approximate indicator
-        of spread, captioned as such in the report (see 8i methodology).
-        median_neb is recovered as score * noise_floor (score = median_neb /
-        noise_floor by construction in _nc_score) rather than recomputed.
+        _nc_score population (top-N%-brightest for every current caller -- the
+        neb_std_a/b parameter names predate that switch and now just mean "the
+        population _nc_score's numerator was computed over") -- a standard
+        relative-uncertainty propagation for a ratio of two independent
+        quantities. This is NOT a formal confidence interval on the median; it is
+        an approximate indicator of spread, captioned as such in the report (see
+        8k methodology). median_neb is recovered as score * noise_floor (score =
+        median_neb / noise_floor by construction in _nc_score) rather than
+        recomputed.
         """
         out = {}
         for scale, r in ratio.items():
@@ -1208,13 +1226,18 @@ class SpatialDetailAnalyzer:
                 partial["lap_var_a"][sigma] = self._masked_reduce(lap_a, mask_neb_shared, np.var)
                 partial["lap_var_b"][sigma] = self._masked_reduce(lap_b, mask_neb_shared, np.var)
 
+            # Top-N%-brightness population for the correlation plot and NC-score
+            # numerator below (replaces the nebula/background split for this family) —
+            # log_a/log_b are already |LoG|, so no abs() needed.
+            top5_mask = self._top_percent_mask(log_a, log_b, localmax_top_percent) if not single else None
+
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a, neb_std_a = self._nc_score(log_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(log_a, top5_mask, mask_bg_a)
                 partial["log_nc_score_a"][sigma] = nc_a
                 partial["log_nc_noise_a"][sigma] = noise_a
                 partial["log_nc_neb_std_a"][sigma] = neb_std_a
-                nc_b, noise_b, neb_std_b = self._nc_score(log_b, mask_neb_shared, mask_bg_b)
+                nc_b, noise_b, neb_std_b = self._nc_score(log_b, top5_mask, mask_bg_b)
                 partial["log_nc_score_b"][sigma] = nc_b
                 partial["log_nc_noise_b"][sigma] = noise_b
                 partial["log_nc_neb_std_b"][sigma] = neb_std_b
@@ -1236,8 +1259,9 @@ class SpatialDetailAnalyzer:
                 partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
             if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
-                    log_a, log_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"|LoG| (σ={sigma}px)", rng)
+                    log_a, log_b, diff, top5_mask, ~top5_mask,
+                    label_a, label_b, f"|LoG| (σ={sigma}px)", rng,
+                    region_names=("Top 5%", "Rest"))
                 if corr_fig is not None:
                     figures[f"corr_log_{sigma}"] = corr_fig
             if not single and noise_a and noise_b:
@@ -1306,13 +1330,16 @@ class SpatialDetailAnalyzer:
             lv_a = self._windowed_variance(lap_a, window_px).astype(np.float32)
             lv_b = self._windowed_variance(lap_b, window_px).astype(np.float32) if not single else None
 
+            # lv_a/lv_b are a windowed variance, already >= 0 -- no abs() needed.
+            lv_top5_mask = self._top_percent_mask(lv_a, lv_b, localmax_top_percent) if not single else None
+
             lv_noise_a = lv_noise_b = None
             if not single:
-                lv_nc_a, lv_noise_a, lv_neb_std_a = self._nc_score(lv_a, mask_neb_shared, mask_bg_a)
+                lv_nc_a, lv_noise_a, lv_neb_std_a = self._nc_score(lv_a, lv_top5_mask, mask_bg_a)
                 partial["loclap_nc_score_a"][sigma] = lv_nc_a
                 partial["loclap_nc_noise_a"][sigma] = lv_noise_a
                 partial["loclap_nc_neb_std_a"][sigma] = lv_neb_std_a
-                lv_nc_b, lv_noise_b, lv_neb_std_b = self._nc_score(lv_b, mask_neb_shared, mask_bg_b)
+                lv_nc_b, lv_noise_b, lv_neb_std_b = self._nc_score(lv_b, lv_top5_mask, mask_bg_b)
                 partial["loclap_nc_score_b"][sigma] = lv_nc_b
                 partial["loclap_nc_noise_b"][sigma] = lv_noise_b
                 partial["loclap_nc_neb_std_b"][sigma] = lv_neb_std_b
@@ -1334,8 +1361,9 @@ class SpatialDetailAnalyzer:
                 partial["loclap_localmax_log_ratio_err"][sigma] = lv_lm_entry["log_ratio_std"]
             if not single and make_figures:
                 lv_corr_fig = self._plot_metric_correlation(
-                    lv_a, lv_b, lv_diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Local Laplacian variance (σ={sigma}px, window={window_px}px)", rng)
+                    lv_a, lv_b, lv_diff, lv_top5_mask, ~lv_top5_mask,
+                    label_a, label_b, f"Local Laplacian variance (σ={sigma}px, window={window_px}px)", rng,
+                    region_names=("Top 5%", "Rest"))
                 if lv_corr_fig is not None:
                     figures[f"corr_loclap_{sigma}"] = lv_corr_fig
             if not single and lv_noise_a and lv_noise_b:
@@ -1459,13 +1487,18 @@ class SpatialDetailAnalyzer:
                 partial["grad_energy_b"][sigma] = self._masked_reduce(
                     gm_b, mask_neb_shared, lambda v: np.mean(v ** 2))
 
+            # Top-N%-brightness population for the correlation plot and NC-score
+            # numerator below (replaces the nebula/background split for this family) —
+            # gm_a/gm_b are already |gradient|, so no abs() needed.
+            top5_mask = self._top_percent_mask(gm_a, gm_b, localmax_top_percent) if not single else None
+
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a, neb_std_a = self._nc_score(gm_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(gm_a, top5_mask, mask_bg_a)
                 partial["gm_nc_score_a"][sigma] = nc_a
                 partial["gm_nc_noise_a"][sigma] = noise_a
                 partial["gm_nc_neb_std_a"][sigma] = neb_std_a
-                nc_b, noise_b, neb_std_b = self._nc_score(gm_b, mask_neb_shared, mask_bg_b)
+                nc_b, noise_b, neb_std_b = self._nc_score(gm_b, top5_mask, mask_bg_b)
                 partial["gm_nc_score_b"][sigma] = nc_b
                 partial["gm_nc_noise_b"][sigma] = noise_b
                 partial["gm_nc_neb_std_b"][sigma] = neb_std_b
@@ -1487,8 +1520,9 @@ class SpatialDetailAnalyzer:
                 partial["localmax_log_ratio_err"][sigma] = lm_entry["log_ratio_std"]
             if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
-                    gm_a, gm_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Gradient |G| (σ={sigma}px)", rng)
+                    gm_a, gm_b, diff, top5_mask, ~top5_mask,
+                    label_a, label_b, f"Gradient |G| (σ={sigma}px)", rng,
+                    region_names=("Top 5%", "Rest"))
                 if corr_fig is not None:
                     figures[f"corr_gradient_{sigma}"] = corr_fig
             if not single and noise_a and noise_b:
@@ -1558,13 +1592,17 @@ class SpatialDetailAnalyzer:
             le_a = uniform_filter(gm_a ** 2, size=window_px).astype(np.float32)
             le_b = uniform_filter(gm_b ** 2, size=window_px).astype(np.float32) if not single else None
 
+            # le_a/le_b are a windowed mean of squared gradient magnitude, already
+            # >= 0 -- no abs() needed.
+            le_top5_mask = self._top_percent_mask(le_a, le_b, localmax_top_percent) if not single else None
+
             le_noise_a = le_noise_b = None
             if not single:
-                le_nc_a, le_noise_a, le_neb_std_a = self._nc_score(le_a, mask_neb_shared, mask_bg_a)
+                le_nc_a, le_noise_a, le_neb_std_a = self._nc_score(le_a, le_top5_mask, mask_bg_a)
                 partial["localgrad_nc_score_a"][sigma] = le_nc_a
                 partial["localgrad_nc_noise_a"][sigma] = le_noise_a
                 partial["localgrad_nc_neb_std_a"][sigma] = le_neb_std_a
-                le_nc_b, le_noise_b, le_neb_std_b = self._nc_score(le_b, mask_neb_shared, mask_bg_b)
+                le_nc_b, le_noise_b, le_neb_std_b = self._nc_score(le_b, le_top5_mask, mask_bg_b)
                 partial["localgrad_nc_score_b"][sigma] = le_nc_b
                 partial["localgrad_nc_noise_b"][sigma] = le_noise_b
                 partial["localgrad_nc_neb_std_b"][sigma] = le_neb_std_b
@@ -1586,8 +1624,9 @@ class SpatialDetailAnalyzer:
                 partial["localgrad_localmax_log_ratio_err"][sigma] = le_lm_entry["log_ratio_std"]
             if not single and make_figures:
                 le_corr_fig = self._plot_metric_correlation(
-                    le_a, le_b, le_diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Local gradient energy (σ={sigma}px, window={window_px}px)", rng)
+                    le_a, le_b, le_diff, le_top5_mask, ~le_top5_mask,
+                    label_a, label_b, f"Local gradient energy (σ={sigma}px, window={window_px}px)", rng,
+                    region_names=("Top 5%", "Rest"))
                 if le_corr_fig is not None:
                     figures[f"corr_localgrad_{sigma}"] = le_corr_fig
             if not single and le_noise_a and le_noise_b:
@@ -1709,13 +1748,20 @@ class SpatialDetailAnalyzer:
             rec_a = self._reconstruct_level(coeffs_a, coeff_idx, wavelet, levels)
             rec_b = self._reconstruct_level(coeffs_b, coeff_idx, wavelet, levels) if coeffs_b is not None else None
 
+            # Top-N%-brightness population for the correlation plot and NC-score
+            # numerator below (replaces the nebula/background split for this family).
+            # rec_a/rec_b are signed band-pass reconstructions, so top-N% is selected
+            # by magnitude (abs), matching how _localmax_entry treats this same family.
+            top5_mask = (self._top_percent_mask(np.abs(rec_a), np.abs(rec_b), localmax_top_percent)
+                         if not single else None)
+
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a, neb_std_a = self._nc_score(rec_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(rec_a, top5_mask, mask_bg_a)
                 partial["wavelet_nc_score_a"][human_level] = nc_a
                 partial["wavelet_nc_noise_a"][human_level] = noise_a
                 partial["wavelet_nc_neb_std_a"][human_level] = neb_std_a
-                nc_b, noise_b, neb_std_b = self._nc_score(rec_b, mask_neb_shared, mask_bg_b)
+                nc_b, noise_b, neb_std_b = self._nc_score(rec_b, top5_mask, mask_bg_b)
                 partial["wavelet_nc_score_b"][human_level] = nc_b
                 partial["wavelet_nc_noise_b"][human_level] = noise_b
                 partial["wavelet_nc_neb_std_b"][human_level] = neb_std_b
@@ -1744,8 +1790,9 @@ class SpatialDetailAnalyzer:
                 # sign-discarding log-ratio map, shows whether band-pass detail
                 # flips sign between the two filters at a given pixel.
                 corr_fig = self._plot_metric_correlation(
-                    rec_a, rec_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Wavelet level {display_level}", rng)
+                    rec_a, rec_b, diff, top5_mask, ~top5_mask,
+                    label_a, label_b, f"Wavelet level {display_level}", rng,
+                    region_names=("Top 5%", "Rest"))
                 if corr_fig is not None:
                     figures[f"corr_wavelet_{display_level}"] = corr_fig
             if not single and noise_a and noise_b:
@@ -1871,20 +1918,27 @@ class SpatialDetailAnalyzer:
             ent_a = self._compute_entropy_map(norm_a, ks)
             ent_b = self._compute_entropy_map(norm_b, ks) if not single else None
 
-            # Contrast ratios (computed on unsmoothed maps)
+            # Contrast ratios (computed on unsmoothed maps) — still nebula/background,
+            # feeds the Executive Summary's own detail-axis magnitude (out of scope for
+            # the top-5% switch below).
             cr_a = self._contrast_ratio(ent_a, mask_neb_a, mask_bg_a)
             partial["entropy_contrast_ratio_a"][ks] = cr_a
             if not single:
                 cr_b = self._contrast_ratio(ent_b, mask_neb_b, mask_bg_b)
                 partial["entropy_contrast_ratio_b"][ks] = cr_b
 
+            # Top-N%-brightness population for the correlation plot and NC-score
+            # numerator below (replaces the nebula/background split for this family) —
+            # entropy is already >= 0, so no abs() needed.
+            top5_mask = self._top_percent_mask(ent_a, ent_b, localmax_top_percent) if not single else None
+
             noise_a = noise_b = None
             if not single:
-                nc_a, noise_a, neb_std_a = self._nc_score(ent_a, mask_neb_shared, mask_bg_a)
+                nc_a, noise_a, neb_std_a = self._nc_score(ent_a, top5_mask, mask_bg_a)
                 partial["entropy_nc_score_a"][ks] = nc_a
                 partial["entropy_nc_noise_a"][ks] = noise_a
                 partial["entropy_nc_neb_std_a"][ks] = neb_std_a
-                nc_b, noise_b, neb_std_b = self._nc_score(ent_b, mask_neb_shared, mask_bg_b)
+                nc_b, noise_b, neb_std_b = self._nc_score(ent_b, top5_mask, mask_bg_b)
                 partial["entropy_nc_score_b"][ks] = nc_b
                 partial["entropy_nc_noise_b"][ks] = noise_b
                 partial["entropy_nc_neb_std_b"][ks] = neb_std_b
@@ -1906,8 +1960,9 @@ class SpatialDetailAnalyzer:
                 partial["localmax_log_ratio_err"][ks] = lm_entry["log_ratio_std"]
             if not single and make_figures:
                 corr_fig = self._plot_metric_correlation(
-                    ent_a, ent_b, diff, mask_neb_shared, mask_bg_shared,
-                    label_a, label_b, f"Local entropy (kernel {ks}px)", rng)
+                    ent_a, ent_b, diff, top5_mask, ~top5_mask,
+                    label_a, label_b, f"Local entropy (kernel {ks}px)", rng,
+                    region_names=("Top 5%", "Rest"))
                 if corr_fig is not None:
                     figures[f"corr_entropy_{ks}px"] = corr_fig
             if not single and noise_a and noise_b:
@@ -2440,15 +2495,22 @@ class SpatialDetailAnalyzer:
     @staticmethod
     def _plot_metric_correlation(map_a: np.ndarray, map_b: np.ndarray,
                                   log_ratio: np.ndarray,
-                                  mask_neb_shared: np.ndarray, mask_bg_shared: np.ndarray,
+                                  mask_a: np.ndarray, mask_b: np.ndarray,
                                   label_a: str, label_b: str, metric_title: str,
                                   rng: np.random.Generator,
-                                  max_samples: int = SECTION8_SCATTER_MAX_SAMPLES) -> plt.Figure | None:
-        """1x2 correlation scatter (Nebula | Background): metric value in A (y)
-        vs. metric value in B (x), with a dashed 1:1 reference line. Each point
-        is colored by that pixel's log-ratio value (log_ratio — the same array
+                                  max_samples: int = SECTION8_SCATTER_MAX_SAMPLES,
+                                  region_names: tuple[str, str] = ("Nebula", "Background")) -> plt.Figure | None:
+        """1x2 correlation scatter (region_names[0] | region_names[1]): metric value
+        in A (y) vs. metric value in B (x), with a dashed 1:1 reference line. Each
+        point is colored by that pixel's log-ratio value (log_ratio — the same array
         driving the adjacent log-ratio map panel), using the same bwr colormap
         and range, so the scatter visually links back to the map.
+
+        mask_a/mask_b select the two populations plotted side by side — the
+        default (Nebula/Background) is the 8b/8c convention; 8d-8j pass a
+        top-N%-brightness mask and its complement instead (region_names=
+        ("Top 5%", "Rest")), so these parameters are named generically rather
+        than after either convention.
 
         Axis limits reflect the FULL pooled population range per subplot (not
         percentile-clipped like the Section 8a violin plots) so upper-tail
@@ -2458,14 +2520,14 @@ class SpatialDetailAnalyzer:
         unsampled population. Returns None if both subplots have too few points.
         """
         h = min(map_a.shape[0], map_b.shape[0], log_ratio.shape[0],
-                mask_neb_shared.shape[0], mask_bg_shared.shape[0])
+                mask_a.shape[0], mask_b.shape[0])
         w = min(map_a.shape[1], map_b.shape[1], log_ratio.shape[1],
-                mask_neb_shared.shape[1], mask_bg_shared.shape[1])
+                mask_a.shape[1], mask_b.shape[1])
         map_a = map_a[:h, :w]
         map_b = map_b[:h, :w]
         log_ratio = log_ratio[:h, :w]
-        mask_neb_shared = mask_neb_shared[:h, :w]
-        mask_bg_shared = mask_bg_shared[:h, :w]
+        mask_a = mask_a[:h, :w]
+        mask_b = mask_b[:h, :w]
 
         # Dark-mode-aware reference-line color (project convention).
         is_dark = matplotlib.rcParams.get("figure.facecolor", "white") not in ("white", "#ffffff", 1.0)
@@ -2477,8 +2539,7 @@ class SpatialDetailAnalyzer:
 
         fig, axes = plt.subplots(1, 2, figsize=(9, 4.5))
         any_data = False
-        for ax, region_name, mask in zip(axes, ("Nebula", "Background"),
-                                          (mask_neb_shared, mask_bg_shared)):
+        for ax, region_name, mask in zip(axes, region_names, (mask_a, mask_b)):
             a_vals = map_a[mask]
             b_vals = map_b[mask]
             c_vals = log_ratio[mask]

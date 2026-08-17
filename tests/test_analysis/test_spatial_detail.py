@@ -816,6 +816,75 @@ class TestLocalMaxTopPercentWiring:
         )
 
 
+class TestNcScoreUsesTopPercentNotNebula:
+    """Regression guard for the switch (Section 8d-8j) from the shared nebula mask
+    to a plain top-N%-brightness mask as the correlation-plot/NC-score population.
+    Stubs _top_percent_mask to always select zero pixels; nc_image_pair's own
+    nebula mask stays genuinely non-empty (test_shared_nebula_pixels_positive), so
+    any family whose NC score stays non-None despite the stub would prove it is
+    still reading the nebula mask instead of _top_percent_mask's output."""
+
+    @pytest.mark.parametrize("prefix", ["std", "log", "wavelet", "entropy", "gm", "localgrad", "loclap"])
+    def test_nc_score_becomes_none_when_top_percent_mask_is_empty(self, nc_image_pair, monkeypatch, prefix):
+        monkeypatch.setattr(
+            SpatialDetailAnalyzer, "_top_percent_mask",
+            staticmethod(lambda abs_a, abs_b, top_percent: np.zeros_like(abs_a, dtype=bool)))
+        img_a, img_b = nc_image_pair
+        result = SpatialDetailAnalyzer().analyze(img_a, img_b)
+        assert result["nc_shared_nebula_pixels"] > 0   # nebula mask itself is still non-empty
+        assert result[f"{prefix}_nc_score_a"] and all(
+            v is None for v in result[f"{prefix}_nc_score_a"].values())
+        assert result[f"{prefix}_nc_score_b"] and all(
+            v is None for v in result[f"{prefix}_nc_score_b"].values())
+
+    def test_original_family_is_unaffected_by_the_stub(self, nc_image_pair, monkeypatch):
+        # 8b (Original) is the one remaining correlation plot wired to the shared
+        # nebula mask, not _top_percent_mask -- stubbing _top_percent_mask to
+        # select nothing must not blank out its correlation figure.
+        monkeypatch.setattr(
+            SpatialDetailAnalyzer, "_top_percent_mask",
+            staticmethod(lambda abs_a, abs_b, top_percent: np.zeros_like(abs_a, dtype=bool)))
+        img_a, img_b = nc_image_pair
+        result = SpatialDetailAnalyzer().analyze(img_a, img_b)
+        assert "corr_original" in result["figures"]
+
+
+class TestPlotMetricCorrelationRegionNames:
+    """_plot_metric_correlation's region_names parameter: default label pair
+    (Nebula/Background, still used by 8b) versus the Top 5%/Rest pair 8d-8j pass."""
+
+    @staticmethod
+    def _sample_arrays():
+        a = np.random.default_rng(0).uniform(0, 1, (10, 10)).astype(np.float32)
+        b = np.random.default_rng(1).uniform(0, 1, (10, 10)).astype(np.float32)
+        diff = SpatialDetailAnalyzer._log_ratio_map(a, b)
+        mask1 = np.zeros((10, 10), dtype=bool)
+        mask1[:5, :] = True
+        mask2 = ~mask1
+        return a, b, diff, mask1, mask2
+
+    def test_default_region_names_are_nebula_background(self):
+        import matplotlib.pyplot as plt
+        a, b, diff, mask1, mask2 = self._sample_arrays()
+        fig = SpatialDetailAnalyzer._plot_metric_correlation(
+            a, b, diff, mask1, mask2, "A", "B", "Test metric", np.random.default_rng(2))
+        titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+        assert any(t.startswith("Nebula") for t in titles)
+        assert any(t.startswith("Background") for t in titles)
+        plt.close(fig)
+
+    def test_custom_region_names_used(self):
+        import matplotlib.pyplot as plt
+        a, b, diff, mask1, mask2 = self._sample_arrays()
+        fig = SpatialDetailAnalyzer._plot_metric_correlation(
+            a, b, diff, mask1, mask2, "A", "B", "Test metric", np.random.default_rng(2),
+            region_names=("Top 5%", "Rest"))
+        titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+        assert any(t.startswith("Top 5%") for t in titles)
+        assert any(t.startswith("Rest") for t in titles)
+        plt.close(fig)
+
+
 class _FakeMaskImage:
     """Minimal duck-typed stand-in for AstroImage, exposing only what
     _make_masks reads (background_rms, background_subtracted())."""

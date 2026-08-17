@@ -251,10 +251,12 @@ class AnalysisControlPanel(QWidget):
         self._localmax_top_percent.setSuffix(" %")
         self._localmax_top_percent.setValue(SECTION8_LOCALMAX_TOP_PERCENT)
         self._localmax_top_percent.setToolTip(
-            "Section 8j local-maxima mask: pixels in the top N% of Image A's or Image B's\n"
-            "own value distribution are unioned (OR) into the mask, so broad bright plateaus\n"
-            "are captured even when they never register as an isolated local-maximum peak.")
-        form2.addRow("Local-maxima top-bright (%):", self._localmax_top_percent)
+            "Pixels in the top N% of a metric's Image A or Image B value distribution.\n"
+            "Section 8l local-maxima mask: unioned (OR) with local-maxima peaks, so broad\n"
+            "bright plateaus are captured even when they never register as an isolated peak.\n"
+            "Section 8d-8j correlation plots and 8k's contrast score: used on its own (no\n"
+            "peak-detection union) as the population selected in each metric's map.")
+        form2.addRow("Top-bright selection (%):", self._localmax_top_percent)
 
         self._source_masked_bg_cb = QCheckBox("mask stars && nebulosity")
         self._source_masked_bg_cb.setChecked(True)

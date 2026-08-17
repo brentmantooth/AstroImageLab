@@ -1221,6 +1221,49 @@ a better global value is not.
 versus 2.34 at 1.0 across 105 combinations. It makes no material difference and does not need
 exposing as a user control.
 
+### 8d–8j's correlation plots and NC-score numerator select top-N%-brightest, not nebula
+
+The correlation scatter plots and the noise-corrected (NC) score numerator for LoG (8d), Wavelet
+(8e), Gradient (8f), Local σ (8g), Local Entropy (8h), Local Gradient Energy (8i), and Local
+Variance of Laplacian (8j) select each metric's own top-N%-brightest pixels
+(`_top_percent_mask(map_a, map_b, localmax_top_percent)`, same knob as `SECTION8_LOCALMAX_TOP_PERCENT`)
+rather than the shared nebula mask. The correlation plot's two panels are now labelled
+**"Top 5%" / "Rest"** (`_plot_metric_correlation`'s `region_names` parameter), not "Nebula" /
+"Background". 8k's NC-score **denominator** is unchanged — still that image's own background
+mask, which is what makes the score "noise-corrected" — only the numerator moved.
+
+This is the same fix, applied one level up, that motivated the pre-existing local-maxima table
+(8l): `tests/test_core/test_practical_acceptance.py::TestTopFivePercentIsWhatSeesSharpening`
+already pinned, credited to the project owner, that on the whole-frame/nebula population a
+visibly-sharpened pair scores **below** a possibly-null filter pair (`-0.0163` vs `-0.0198` on
+`std_3px`), while the top-5% population separates them by an order of magnitude. The nebula mask
+is dominated by the same "millions of low-gradient interior pixels" the 8m acutance box already
+describes as washing out a median — extending the top-N% selection to 8d–8j's own correlation
+plots and NC score gives that family the same resolving power 8l already had, instead of only
+the separate local-maxima table.
+
+**What did not change, and why**, since three different populations now coexist in one section:
+
+| Stays nebula/background | Reason |
+| --- | --- |
+| 8b (Original) correlation plot | It's the raw input, not a "metric image calculation" |
+| 8c's mask illustration itself | Still feeds 8k's denominator, 8m's scalars, and the Executive Summary's contrast ratio — 8c's caption spells out this narrower remaining role |
+| 8l (Local-Maxima Masked Metrics) | Untouched — keeps `_combined_localmax_mask` (peaks **∪** top-N%-brightness), a superset of 8d–8j's plain top-N% mask at the same percentage |
+| 8m (`lap_var`/`grad_energy` scalars) | Untouched — whole-nebula absolute second-moment measures, deliberately not a ratio |
+| `_contrast_ratio` / `contrast_ratios_a,b` / `entropy_contrast_ratio_a,b` | Feeds the Executive Summary's detail-axis magnitude, a different consumer, still per-image nebula/background |
+
+Two top-N% masks now exist side by side at the same default percentage and must not be
+conflated: 8d–8j/8k's is `_top_percent_mask` alone (brightness only), 8l's is
+`_combined_localmax_mask` (brightness **∪** local-maxima peaks, always a superset). Follow the
+MTF-source-labelling convention's precedent — every mask-derived figure/table states which one
+it is (see the disambiguating clauses added to 8c's caption, the correlation methodology box, and
+8l's own methodology box) — rather than letting a bare "top 5%" mention be ambiguous between them.
+
+`_nc_score`'s own parameter is named generically (`mask_population`, not `mask_neb_shared`) since
+every current caller passes a top-N% mask; its docstring documents 8b's Original-image plot as
+the one remaining nebula-mask consumer, and that one doesn't call `_nc_score` at all (it goes
+straight to `_plot_metric_correlation`).
+
 ---
 
 ## Collaboration Rules
